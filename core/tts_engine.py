@@ -984,13 +984,14 @@ class TTSEngine:
                             "원인: Google Colab에서 AI 서버가 아직 준비 중이거나 실행되지 않았습니다.\n"
                             "해결: 구글 코랩의 4단계 셀이 완전히 실행 완료될 때까지 기다린 후 다시 시도해주세요."
                         )
-                    # GET 방식 fallback (단, 큰 base64 데이터가 없을 때만 시도)
-                    if not ref_b64:
-                        res_get = requests.get(api_url, params=payload, timeout=90)
-                        if res_get.status_code == 200 and len(res_get.content) > 100:
-                            audio_bytes = res_get.content
-                        else:
-                            raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")
+                    if "pos" in res.text:
+                        raise RuntimeError(
+                            "GPT-SoVITS 한국어 형태소 분석기(Mecab) 미적용 오류.\n"
+                            "▶ 원인: 현재 접속 중인 Google Colab 서버가 이전 버전 상태로 계속 켜져 있어서 발생합니다.\n"
+                            "▶ 즉시 해결 방법 2가지:\n"
+                            "1) [가장 빠름] 구글 코랩 탭에서 상단 [런타임] -> [세션 다시 시작 및 모두 실행]을 눌러 새 주소를 받아 입력하세요.\n"
+                            "2) [또는] 사이드바 맨 위에서 'Supertonic 3 (로컬 무료)' 또는 'Edge-TTS'를 선택하시면 코랩 없이 즉시 무료로 생성됩니다!"
+                        )
                     else:
                         raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")
 

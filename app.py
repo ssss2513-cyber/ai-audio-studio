@@ -2,6 +2,7 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import subprocess
 import zipfile
 from typing import List, Optional, Dict, Any, Tuple, Set
 import streamlit as st
@@ -24,6 +25,7 @@ from core.tts_engine import (
 )
 from core.audio_processor import AudioProcessor
 from core.subtitle import SubtitleGenerator
+from core.parser import ScriptParser, ScriptSegment
 import core.story_precise_parser
 try:
     importlib.reload(core.story_precise_parser)

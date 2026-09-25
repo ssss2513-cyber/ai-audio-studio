@@ -914,10 +914,19 @@ class TTSEngine:
                 if res.status_code == 200 and len(res.content) > 100:
                     audio_bytes = res.content
                 else:
-                    # GET 방식 fallback
-                    res_get = requests.get(api_url, params=payload, timeout=90)
-                    if res_get.status_code == 200 and len(res_get.content) > 100:
-                        audio_bytes = res_get.content
+                    if res.status_code == 502:
+                        raise RuntimeError(
+                            "GPT-SoVITS 서버 응답 없음 (502 Bad Gateway).\n"
+                            "원인: Google Colab에서 AI 서버가 아직 준비 중이거나 실행되지 않았습니다.\n"
+                            "해결: 구글 코랩의 4단계 셀이 완전히 실행 완료될 때까지 기다린 후 다시 시도해주세요."
+                        )
+                    # GET 방식 fallback (단, 큰 base64 데이터가 없을 때만 시도)
+                    if not ref_b64:
+                        res_get = requests.get(api_url, params=payload, timeout=90)
+                        if res_get.status_code == 200 and len(res_get.content) > 100:
+                            audio_bytes = res_get.content
+                        else:
+                            raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")
                     else:
                         raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")
 

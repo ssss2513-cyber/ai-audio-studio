@@ -2,7 +2,10 @@ import os
 import subprocess
 from dataclasses import dataclass
 from typing import List, Tuple
-from pydub import AudioSegment
+try:
+    from pydub import AudioSegment
+except Exception:
+    AudioSegment = None
 import mutagen.mp3
 
 @dataclass
@@ -30,8 +33,13 @@ class AudioProcessor:
             audio = mutagen.mp3.MP3(file_path)
             return int(audio.info.length * 1000)
         except Exception:
-            audio = AudioSegment.from_file(file_path)
-            return len(audio)
+            if AudioSegment is not None:
+                try:
+                    audio = AudioSegment.from_file(file_path)
+                    return len(audio)
+                except Exception:
+                    pass
+            return 0
 
     def merge_segments(
         self,
@@ -82,7 +90,16 @@ class AudioProcessor:
 
         # 2. FFmpeg concat demuxer를 이용한 초고속 무손실 병합 시도
         silence_file = os.path.join(out_dir, "temp_silence.mp3")
-        AudioSegment.silent(duration=pause_ms).export(silence_file, format="mp3", bitrate="192k")
+        if AudioSegment is not None:
+            AudioSegment.silent(duration=pause_ms).export(silence_file, format="mp3", bitrate="192k")
+        else:
+            # ffmpeg command to create silent mp3
+            cmd_silence = [
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "anullsrc=r=44100:cl=mono", "-t", str(max(pause_ms / 1000.0, 0.1)),
+                "-c:a", "libmp3lame", "-b:a", "192k", silence_file
+            ]
+            subprocess.run(cmd_silence, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         concat_list_path = os.path.join(out_dir, "concat_list.txt")
         try:
@@ -115,13 +132,16 @@ class AudioProcessor:
                     pass
 
         # 3. 만약 ffmpeg concat 실패 시 pydub 폴백 (대량 세그먼트 안정 처리)
-        combined = AudioSegment.empty()
-        silence = AudioSegment.silent(duration=pause_ms)
-        for i, seg in enumerate(valid_segments):
-            audio_seg = AudioSegment.from_file(seg['file_path'])
-            combined += audio_seg
-            if i < len(valid_segments) - 1:
-                combined += silence
+        if AudioSegment is not None:
+            combined = AudioSegment.empty()
+            silence = AudioSegment.silent(duration=pause_ms)
+            for i, seg in enumerate(valid_segments):
+                audio_seg = AudioSegment.from_file(seg['file_path'])
+                combined += audio_seg
+                if i < len(valid_segments) - 1:
+                    combined += silence
 
-        combined.export(output_file, format="mp3", bitrate="192k")
-        return output_file, timings
+            combined.export(output_file, format="mp3", bitrate="192k")
+            return output_file, timings
+
+        raise RuntimeError("오디오 파일 병합에 실패했습니다. FFmpeg 출력을 확인해 주세요.")

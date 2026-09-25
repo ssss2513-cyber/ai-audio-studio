@@ -9,3 +9,6 @@ font = "sans serif"
 [server]
 headless = true
 port = 8501
+enableStaticServing = true
+maxMessageSize = 1000
+maxUploadSize = 1000

@@ -7,7 +7,9 @@ outputs/
 ref_cache/
 *.wav
 *.mp3
+*.zip
 
+static/
 cloudflared.exe
 *.log
 

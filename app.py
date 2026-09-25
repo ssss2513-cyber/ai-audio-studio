@@ -1762,15 +1762,31 @@ def main():
                 SubtitleGenerator.generate_srt(timings, srt_path, include_speaker=include_spk_in_sub)
                 SubtitleGenerator.generate_vtt(timings, vtt_path, include_speaker=include_spk_in_sub)
 
-                # 4. 전체 ZIP 압축 패키징
-                zip_path = os.path.join(work_dir, "tts_bundle.zip")
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                # 4. ZIP 압축 패키징 (Streamlit 200MB 한도 회피 및 초고속 전송을 위해 완성본/세그먼트 스마트 분리)
+                main_zip_path = os.path.join(work_dir, "tts_main_bundle.zip")
+                with zipfile.ZipFile(main_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
                     zipf.write(full_audio_path, arcname="full_audio.mp3")
                     zipf.write(srt_path, arcname="subtitles.srt")
                     zipf.write(vtt_path, arcname="subtitles.vtt")
+
+                seg_zip_path = os.path.join(work_dir, "tts_segments_bundle.zip")
+                with zipfile.ZipFile(seg_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
                     for item in audio_info_list:
                         arcname = os.path.join("segments", os.path.basename(item['file_path']))
                         zipf.write(item['file_path'], arcname=arcname)
+
+                # 5. 초고속 HTTP 직접 다운로드를 위해 static 폴더에 동기화
+                static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+                os.makedirs(static_dir, exist_ok=True)
+                import shutil
+                try:
+                    shutil.copy2(full_audio_path, os.path.join(static_dir, "full_audio.mp3"))
+                    shutil.copy2(srt_path, os.path.join(static_dir, "subtitles.srt"))
+                    shutil.copy2(vtt_path, os.path.join(static_dir, "subtitles.vtt"))
+                    shutil.copy2(main_zip_path, os.path.join(static_dir, "tts_main_bundle.zip"))
+                    shutil.copy2(seg_zip_path, os.path.join(static_dir, "tts_segments_bundle.zip"))
+                except Exception:
+                    pass
 
                 progress_bar.progress(1.0)
                 status_text.text("🎉 모든 음성 생성 및 자막 합성이 완료되었습니다!")
@@ -1779,7 +1795,8 @@ def main():
                     "full_audio": full_audio_path,
                     "srt": srt_path,
                     "vtt": vtt_path,
-                    "zip": zip_path,
+                    "main_zip": main_zip_path,
+                    "seg_zip": seg_zip_path,
                     "timings": timings,
                     "audio_info_list": audio_info_list
                 }
@@ -1791,6 +1808,17 @@ def main():
         st.divider()
         st.success("✨ 오디오 생성 및 병합이 완벽하게 완료되었습니다!")
 
+        # 윈도우 로컬 환경일 경우 원클릭 탐색기 열기 (다운로드 없이 0초 즉시 사용)
+        if os.name == 'nt' and os.path.exists(res.get("full_audio", "")):
+            folder_path = os.path.dirname(os.path.abspath(res["full_audio"]))
+            col_loc1, col_loc2 = st.columns([3, 1])
+            with col_loc1:
+                st.info(f"💡 **로컬 즉시 사용**: 파일이 이미 컴퓨터에 100% 저장되어 있습니다: `{folder_path}`")
+            with col_loc2:
+                if st.button("📂 저장 폴더 즉시 열기 (0초)", use_container_width=True, key="btn_open_local_folder"):
+                    subprocess.Popen(["explorer", folder_path])
+                    st.toast("✅ 윈도우 파일 탐색기를 열었습니다!")
+
         col_main, col_down = st.columns([3, 2])
         with col_main:
             st.markdown("### 🎧 전체 병합 오디오 재생")
@@ -1800,42 +1828,62 @@ def main():
                 st.audio(audio_bytes, format="audio/mp3")
 
         with col_down:
-            st.markdown("### 📥 결과 파일 원클릭 다운로드")
-            
-            # 전체 ZIP 다운로드
-            if os.path.exists(res["zip"]):
-                with open(res["zip"], "rb") as f:
+            st.markdown("### 📥 결과 파일 초고속 다운로드")
+
+            # 1. 고속 직접 HTTP 스트리밍 링크 (WebSocket 200MB 버퍼링 한도 우회, 초당 40~300MB/s 속도)
+            st.markdown(
+                """
+                <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+                    <a href="app/static/tts_main_bundle.zip" download="tts_main_bundle.zip" 
+                       style="display: block; text-align: center; background: linear-gradient(135deg, #7c3aed, #6366f1); color: white; padding: 12px 16px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 0.95rem; box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);">
+                        ⚡ 완성본 초고속 다운로드 (.ZIP - 전체 오디오+자막)
+                    </a>
+                    <div style="display: flex; gap: 8px;">
+                        <a href="app/static/full_audio.mp3" download="full_audio.mp3" 
+                           style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
+                            🎵 전체 오디오 (MP3)
+                        </a>
+                        <a href="app/static/subtitles.srt" download="subtitles.srt" 
+                           style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
+                            📝 자막 파일 (SRT)
+                        </a>
+                    </div>
+                    <a href="app/static/tts_segments_bundle.zip" download="tts_segments_bundle.zip" 
+                       style="display: block; text-align: center; background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 8px 12px; border-radius: 6px; text-decoration: none; font-size: 0.82rem;">
+                        🗄️ 개별 분할 대사 압축팩 (전체 세그먼트 MP3)
+                    </a>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # 2. 보조 표준 다운로드 버튼 (스트림 지연 로딩)
+            with st.expander("🛠️ 대체 다운로드 방식 (표준 버튼)", expanded=False):
+                main_z = res.get("main_zip", res.get("zip"))
+                if main_z and os.path.exists(main_z):
                     st.download_button(
-                        label="📦 전체 패키지 다운로드 (.ZIP - 오디오/개별mp3/자막)",
-                        data=f.read(),
-                        file_name="tts_project_bundle.zip",
+                        label="📦 완성본 패키지 (.ZIP)",
+                        data=lambda: open(main_z, "rb").read(),
+                        file_name="tts_main_bundle.zip",
                         mime="application/zip",
-                        type="primary",
                         use_container_width=True
                     )
-
-            # 개별 파일 다운로드 버튼들
-            c1, c2 = st.columns(2)
-            with c1:
                 if os.path.exists(res["full_audio"]):
-                    with open(res["full_audio"], "rb") as f:
-                        st.download_button(
-                            "🎵 전체 오디오 (MP3)",
-                            data=f.read(),
-                            file_name="full_audio.mp3",
-                            mime="audio/mp3",
-                            use_container_width=True
-                        )
-            with c2:
+                    st.download_button(
+                        "🎵 전체 오디오 (MP3)",
+                        data=lambda: open(res["full_audio"], "rb").read(),
+                        file_name="full_audio.mp3",
+                        mime="audio/mp3",
+                        use_container_width=True
+                    )
                 if os.path.exists(res["srt"]):
-                    with open(res["srt"], "rb") as f:
-                        st.download_button(
-                            "📝 자막 파일 (SRT)",
-                            data=f.read(),
-                            file_name="subtitles.srt",
-                            mime="text/plain",
-                            use_container_width=True
-                        )
+                    st.download_button(
+                        "📝 자막 파일 (SRT)",
+                        data=lambda: open(res["srt"], "rb").read(),
+                        file_name="subtitles.srt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
 
         # 개별 대사별 타임라인 및 재생 목록
         with st.expander("🔍 세부 대사별 타임라인 및 개별 음성 확인", expanded=False):

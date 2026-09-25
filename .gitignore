@@ -1,0 +1,17 @@
+﻿__pycache__/
+*.py[cod]
+*.class
+*.so
+
+outputs/
+ref_cache/
+*.wav
+*.mp3
+
+cloudflared.exe
+*.log
+
+data/users.db
+
+.DS_Store
+Thumbs.db

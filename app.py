@@ -7,7 +7,12 @@ from typing import List, Optional, Dict, Any, Tuple, Set
 import streamlit as st
 import streamlit.components.v1 as components
 
-from core.parser import ScriptParser, ScriptSegment
+import importlib
+import core.tts_engine
+try:
+    importlib.reload(core.tts_engine)
+except Exception:
+    pass
 from core.tts_engine import (
     TTSEngine,
     VoiceConfig,
@@ -19,7 +24,6 @@ from core.tts_engine import (
 )
 from core.audio_processor import AudioProcessor
 from core.subtitle import SubtitleGenerator
-import importlib
 import core.story_precise_parser
 try:
     importlib.reload(core.story_precise_parser)
@@ -28,8 +32,10 @@ except Exception:
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 from core.database import DatabaseManager
 
+APP_VERSION = "v2.6 (Gemini 3.1/3.8 지원 패치 완료)"
+
 st.set_page_config(
-    page_title="화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · Edge-TTS)",
+    page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · Edge-TTS) - {APP_VERSION}",
     page_icon="🎙️",
     layout="wide"
 )
@@ -531,6 +537,9 @@ def main():
             <span class="tag-chip tag-chip-edge">🌐 Edge-TTS 한국어 표준 성우</span>
             <span class="tag-chip tag-chip-sovits">🎙️ GPT-SoVITS 6초 즉석 복제</span>
             <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
+        </div>
+        <div style="background: rgba(34, 197, 94, 0.15); border: 1px solid #22c55e; border-radius: 8px; padding: 8px 14px; margin: 12px auto 0 auto; max-width: 650px; color: #86efac; font-size: 13px; font-weight: 600; text-align: center;">
+            🚀 시스템 패치 v2.6 적용 완료 (Gemini 3.8 / 3.1 Flash 전용 모델 탑재 및 자동 다중 폴백)
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1311,11 +1320,12 @@ def main():
                                 preview_file = os.path.join(work_dir, f"preview_gemini_{safe_spk}.mp3")
                                 sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
                                 
+                                safe_gemini_model = gemini_model if gemini_model in gemini_model_options else "gemini-3.1-flash-tts-preview"
                                 cfg = VoiceConfig(
                                     engine="gemini",
                                     voice=selected_voice,
                                     style=selected_style,
-                                    model=gemini_model,
+                                    model=safe_gemini_model,
                                     api_key=gemini_api_key
                                 )
                                 with st.spinner(f"'{spk}' ({selected_voice} · {selected_style}) Gemini Flash 음성 생성 중..."):
@@ -1701,11 +1711,12 @@ def main():
                     eng_badge = "👑 Supertonic"
                 elif seg_engine == "gemini":
                     v_name = spk_cfg_data.get("voice", "Kore")
+                    safe_gemini_model = gemini_model if gemini_model in gemini_model_options else "gemini-3.1-flash-tts-preview"
                     cfg = VoiceConfig(
                         engine="gemini",
                         voice=v_name,
                         style=seg_style,
-                        model=gemini_model,
+                        model=safe_gemini_model,
                         api_key=gemini_api_key
                     )
                     eng_badge = "⚡ Gemini"

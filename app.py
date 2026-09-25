@@ -853,11 +853,30 @@ def main():
         # 4. GPT-SoVITS 로컬 API 전용 옵션
         if st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
             st.markdown("#### 🎙️ GPT-SoVITS API 설정")
+
+            # 구글 코랩 원클릭 실행 배지 및 안내
+            st.markdown(
+                """
+                <div style="background: rgba(66, 133, 244, 0.08); border: 1px solid rgba(66, 133, 244, 0.25); border-radius: 8px; padding: 10px; margin-bottom: 12px;">
+                    <div style="font-weight: 600; font-size: 0.86rem; color: #4285F4; margin-bottom: 3px;">
+                        ☁️ 내 컴퓨터 GPU가 없거나 24시간 쓰려면?
+                    </div>
+                    <div style="font-size: 0.80rem; color: #aaa; margin-bottom: 8px; line-height: 1.35;">
+                        Google Colab 무료 T4 GPU에서 원클릭으로 켜고 나온 주소를 아래에 붙여넣으세요!
+                    </div>
+                    <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/GPT_SoVITS_Colab_API.ipynb" target="_blank">
+                        <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
+                    </a>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
             saved_sovits = st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts")
             sovits_url = st.text_input(
                 "GPT-SoVITS API 주소",
                 value=saved_sovits,
-                help="로컬 또는 서버에서 실행 중인 GPT-SoVITS API 주소 (기본: http://127.0.0.1:9880/tts)",
+                help="로컬 또는 서버에서 실행 중인 GPT-SoVITS API 주소 (예: https://xxx.trycloudflare.com/tts 또는 http://127.0.0.1:9880/tts)",
                 key="input_gpt_sovits_url"
             )
             st.session_state["gpt_sovits_url"] = sovits_url
@@ -876,7 +895,11 @@ def main():
                     st.success(msg)
                 else:
                     st.error(msg)
-                    st.info("💡 **실행 방법**: GPT-SoVITS 폴더에서 터미널을 열고 다음 명령을 실행하세요:\n```bash\npython api_v2.py -a 127.0.0.1 -p 9880\n```")
+                    st.info(
+                        "💡 **서버 연결 방법**:\n"
+                        "1. **구글 코랩(무료 GPU)**: 상단의 [Open In Colab]을 눌러 서버를 켜고 생성된 `https://...trycloudflare.com/tts` 주소를 붙여넣기\n"
+                        "2. **내 컴퓨터(로컬 PC)**: 터미널에서 `python api_v2.py -a 127.0.0.1 -p 9880` 실행"
+                    )
 
         st.divider()
         st.markdown("#### 🎚️ 재생 및 자막 설정")
@@ -1611,7 +1634,7 @@ def main():
                 sovits_url = st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts")
                 ok, test_msg = TTSEngine.test_gpt_sovits_connection(sovits_url)
                 if not ok:
-                    st.error(f"⚠️ GPT-SoVITS API 서버에 연결할 수 없습니다: {test_msg}\n\n로컬 PC에서 GPT-SoVITS API 서버(`python api_v2.py -a 127.0.0.1 -p 9880`)가 실행 중인지 확인해주세요.")
+                    st.error(f"⚠️ GPT-SoVITS API 서버에 연결할 수 없습니다: {test_msg}\n\n로컬 PC에서 GPT-SoVITS 서버(`python api_v2.py -a 127.0.0.1 -p 9880`)를 켜시거나, 좌측 사이드바에서 [Google Colab 무료 GPU] 링크를 눌러 서버를 켜고 주소를 입력해주세요.")
                     return
                 # GPT-SoVITS 화자들의 참조 오디오 유효성 사전 검사
                 for s in target_segments:

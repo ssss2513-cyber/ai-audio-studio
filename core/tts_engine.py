@@ -884,6 +884,16 @@ class TTSEngine:
             if auto_txt:
                 prompt_txt = auto_txt
 
+        # 원격 서버(Google Colab 등) 호환성을 위해 참조 오디오를 base64로도 인코딩하여 전송
+        ref_b64 = None
+        try:
+            if os.path.exists(actual_ref_path):
+                import base64
+                with open(actual_ref_path, "rb") as rf:
+                    ref_b64 = base64.b64encode(rf.read()).decode("utf-8")
+        except Exception:
+            pass
+
         payload = {
             "text": text,
             "text_lang": getattr(voice_config, "text_lang", "ko"),
@@ -892,6 +902,8 @@ class TTSEngine:
             "prompt_lang": getattr(voice_config, "prompt_lang", "ko"),
             "speed_factor": getattr(voice_config, "speed_factor", 1.0)
         }
+        if ref_b64:
+            payload["ref_audio_base64"] = ref_b64
 
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
         last_err = None

@@ -217,28 +217,58 @@ def apply_preset_to_speakers(speakers, engine_type):
     return new_settings
 
 def main():
-    # 크롬 브라우저 자동 번역으로 인한 React DOM 훼손 (removeChild 오류) 원천 방지
-    components.html("""
-    <script>
-    try {
-        const rootDoc = window.parent.document;
-        rootDoc.documentElement.setAttribute('translate', 'no');
-        rootDoc.documentElement.classList.add('notranslate');
-        if (rootDoc.body) {
-            rootDoc.body.setAttribute('translate', 'no');
-            rootDoc.body.classList.add('notranslate');
-        }
-        if (!rootDoc.querySelector('meta[name="google"][content="notranslate"]')) {
-            const meta = rootDoc.createElement('meta');
-            meta.name = 'google';
-            meta.content = 'notranslate';
-            rootDoc.head.appendChild(meta);
-        }
-    } catch (e) {
-        console.warn('Translate guard error:', e);
+    # 크롬 브라우저 자동 번역으로 인한 React removeChild 크래시 원천 차단
+    st.html("""
+    <meta name="google" content="notranslate">
+    <style>
+    .notranslate {
+        translate: no !important;
     }
+    </style>
+    <script>
+    (function() {
+        try {
+            document.documentElement.setAttribute('translate', 'no');
+            document.documentElement.classList.add('notranslate');
+            if (document.body) {
+                document.body.setAttribute('translate', 'no');
+                document.body.classList.add('notranslate');
+            }
+            if (!document.querySelector('meta[name="google"][content="notranslate"]')) {
+                const meta = document.createElement('meta');
+                meta.name = 'google';
+                meta.content = 'notranslate';
+                document.head.appendChild(meta);
+            }
+        } catch (e) {}
+
+        // React DOM removeChild/insertBefore Crash Guard (구글 번역 충돌 방어)
+        if (typeof Node === 'function' && Node.prototype) {
+            const origRemoveChild = Node.prototype.removeChild;
+            Node.prototype.removeChild = function(child) {
+                if (child && child.parentNode !== this) {
+                    if (console && console.warn) {
+                        console.warn('React Crash Guard: Blocked invalid removeChild');
+                    }
+                    return child;
+                }
+                return origRemoveChild.apply(this, arguments);
+            };
+
+            const origInsertBefore = Node.prototype.insertBefore;
+            Node.prototype.insertBefore = function(newNode, refNode) {
+                if (refNode && refNode.parentNode !== this) {
+                    if (console && console.warn) {
+                        console.warn('React Crash Guard: Blocked invalid insertBefore');
+                    }
+                    return newNode;
+                }
+                return origInsertBefore.apply(this, arguments);
+            };
+        }
+    })();
     </script>
-    """, height=0, width=0)
+    """)
 
     # 고품격 스튜디오 디자인 테마 CSS 주입
     st.markdown("""

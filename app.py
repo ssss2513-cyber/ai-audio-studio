@@ -527,7 +527,7 @@ def main():
         </p>
         <div class="tag-row">
             <span class="tag-chip tag-chip-super">👑 Supertonic 3 (로컬 완전 무료)</span>
-            <span class="tag-chip tag-chip-gemini">⚡ Gemini 2.0 Flash 감정 연기</span>
+            <span class="tag-chip tag-chip-gemini">⚡ Gemini 3.1 / 3.8 Flash 감정 연기</span>
             <span class="tag-chip tag-chip-edge">🌐 Edge-TTS 한국어 표준 성우</span>
             <span class="tag-chip tag-chip-sovits">🎙️ GPT-SoVITS 6초 즉석 복제</span>
             <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
@@ -575,7 +575,7 @@ def main():
         st.session_state["gemini_api_key"] = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
     if "gpt_sovits_url" not in st.session_state:
         st.session_state["gpt_sovits_url"] = "http://127.0.0.1:9880/tts"
-    if "gemini_model" not in st.session_state or "tts" not in str(st.session_state.get("gemini_model", "")):
+    if "gemini_model" not in st.session_state or "tts" not in str(st.session_state.get("gemini_model", "")) or "2.0" in str(st.session_state.get("gemini_model", "")):
         st.session_state["gemini_model"] = "gemini-3.1-flash-tts-preview"
 
     if "script_editor" not in st.session_state:
@@ -601,7 +601,7 @@ def main():
         custom_characters: Optional[List[str]] = None,
         use_gemini: bool = False,
         gemini_key: str = "",
-        gemini_model: str = "gemini-2.0-flash",
+        gemini_model: str = "gemini-3.8-flash",
         progress_callback: Optional[Any] = None
     ):
         if not raw_text or not raw_text.strip():
@@ -792,7 +792,13 @@ def main():
             st.caption("💡 하이브(HYBE) 수퍼톤의 가벼운 고속 ONNX 모델로, 내 컴퓨터에서 완전 무료로 동작합니다.")
 
         # 3. Gemini Flash TTS 및 AI 화자 분석 설정
-        gemini_model_options = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-2.0-flash"]
+        gemini_model_options = [
+            "gemini-3.1-flash-tts-preview",
+            "gemini-3.8-flash-tts",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-3.8-flash-lite-tts",
+            "gemini-2.5-pro-preview-tts"
+        ]
         curr_model = st.session_state.get("gemini_model", "gemini-3.1-flash-tts-preview")
         if curr_model not in gemini_model_options:
             curr_model = "gemini-3.1-flash-tts-preview"
@@ -815,11 +821,21 @@ def main():
             )
             st.session_state["gemini_api_key"] = g_key
 
+            def _format_model_name(m: str) -> str:
+                labels = {
+                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (구글 추천 최신 고품질 전용 모델)",
+                    "gemini-3.8-flash-tts": "🚀 Gemini 3.8 Flash TTS (최신 3.8 고음질 음성 모델)",
+                    "gemini-2.5-flash-preview-tts": "🌟 Gemini 2.5 Flash TTS (안정형 고속 모델)",
+                    "gemini-3.8-flash-lite-tts": "⚡ Gemini 3.8 Flash Lite TTS (초고속 경량 음성 모델)",
+                    "gemini-2.5-pro-preview-tts": "👑 Gemini 2.5 Pro TTS (최고 음질 프로 모델)"
+                }
+                return labels.get(m, m)
+
             g_model = st.selectbox(
                 "Gemini TTS 음성 합성 모델 선택",
                 options=gemini_model_options,
                 index=model_idx,
-                format_func=lambda m: "⚡ Gemini 3.1 Flash TTS (구글 추천 최신 전용 음성 모델)" if m == "gemini-3.1-flash-tts-preview" else ("🚀 Gemini 2.5 Flash TTS" if m == "gemini-2.5-flash-preview-tts" else "🌟 Gemini 2.0 Flash (멀티모달)"),
+                format_func=_format_model_name,
                 key="select_gemini_model"
             )
             st.session_state["gemini_model"] = g_model
@@ -976,7 +992,7 @@ def main():
                             custom_characters=custom_chars_list,
                             use_gemini=True,
                             gemini_key=gemini_api_key,
-                            gemini_model="gemini-2.0-flash",
+                            gemini_model="gemini-3.8-flash",
                             progress_callback=on_gemini_prog
                         )
                     progress_bar.empty()

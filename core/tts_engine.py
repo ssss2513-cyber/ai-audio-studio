@@ -649,22 +649,21 @@ class TTSEngine:
         else:
             prompt = f"Say with a {style_prompt.lower()} tone: {text}"
 
-        # 요청 모델 정규화 및 TTS 전용 모델 후보군 (우선순위 순서)
-        req_model = (voice_config.model or "").strip()
-        # 만약 gemini-3.8-flash 등 텍스트 전용 모델이 넘어왔다면 TTS 전용 모델로 교체
-        if not req_model or ("tts" not in req_model.lower() and req_model not in ("gemini-2.0-flash",)):
-            req_model = "gemini-3.1-flash-tts-preview"
-
-        candidate_models = [
-            req_model,
+        # 사용 가능한 공식 Google Gemini TTS 모델 목록 (우선순위 순)
+        VALID_GEMINI_TTS_MODELS = [
             "gemini-3.1-flash-tts-preview",
+            "gemini-3.8-flash-tts",
             "gemini-2.5-flash-preview-tts",
-            "gemini-2.0-flash"
+            "gemini-3.8-flash-lite-tts",
+            "gemini-2.5-pro-preview-tts",
         ]
-        models_to_try = []
-        for m in candidate_models:
-            if m and m not in models_to_try:
-                models_to_try.append(m)
+
+        req_model = (voice_config.model or "").strip()
+        # 요청 모델이 유효한 TTS 모델이면 최우선 사용
+        if req_model in VALID_GEMINI_TTS_MODELS:
+            models_to_try = [req_model] + [m for m in VALID_GEMINI_TTS_MODELS if m != req_model]
+        else:
+            models_to_try = list(VALID_GEMINI_TTS_MODELS)
 
         last_err = None
         for current_model in models_to_try:
@@ -735,8 +734,73 @@ class TTSEngine:
                     return output_file
                 except Exception as e:
                     last_err = e
+                    err_str = str(e)
+                    # 404: 만료/미지원 모델은 재시도하지 않고 다음 후보 모델로 즉시 건너뜀
+                    if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
+                        break
+                    # 429: 분당 쿼터 초과 시 다른 TTS 모델은 독립 쿼터를 가지므로 즉시 다음 모델 시도
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
+                        break
                     if attempt < retries:
                         await asyncio.sleep(0.5)
+
+        # 모든 모델 시도 후 429 쿼터 한도인 경우 5초 대기 후 1회 추가 폴백 재시도
+        if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
+            await asyncio.sleep(5.0)
+            for fallback_model in models_to_try:
+                try:
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda m=fallback_model: client.models.generate_content(
+                            model=m,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name=v_name
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                    audio_bytes = None
+                    if response and response.candidates:
+                        for candidate in response.candidates:
+                            if candidate.content and candidate.content.parts:
+                                for part in candidate.content.parts:
+                                    if getattr(part, "inline_data", None) and part.inline_data.data:
+                                        audio_bytes = part.inline_data.data
+                                        break
+                            if audio_bytes:
+                                break
+                    if audio_bytes:
+                        temp_wav = output_file + ".retry.wav"
+                        if audio_bytes.startswith(b"RIFF"):
+                            with open(temp_wav, "wb") as f:
+                                f.write(audio_bytes)
+                        else:
+                            with wave.open(temp_wav, "wb") as wf:
+                                wf.setnchannels(1)
+                                wf.setsampwidth(2)
+                                wf.setframerate(24000)
+                                wf.writeframes(audio_bytes)
+                        cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                        if os.path.exists(temp_wav):
+                            try:
+                                os.remove(temp_wav)
+                            except Exception:
+                                pass
+                        return output_file
+                except Exception:
+                    continue
+
+        if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
+            raise RuntimeError(f"Gemini API 분당 요청 한도(Quota)에 일시적으로 도달했습니다. 잠시 후 다시 생성하시거나, 완전 무료인 Supertonic 엔진을 선택해주세요. ({last_err})")
 
         raise last_err or RuntimeError("모든 Gemini TTS 모델 시도 실패")
 

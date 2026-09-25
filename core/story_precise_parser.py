@@ -310,7 +310,7 @@ def parse_story_with_gemini(
     candidates = []
     if model:
         candidates.append(model)
-    candidates.extend(["gemini-3.8-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"])
+    candidates.extend(["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"])
     
     seen = set()
     unique_candidates = []

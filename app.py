@@ -32,7 +32,7 @@ try:
 except Exception:
     pass
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
-from core.database import DatabaseManager
+
 
 APP_VERSION = "v2.6 (Gemini 3.1/3.8 지원 패치 완료)"
 
@@ -554,38 +554,23 @@ def main():
     if "pending_script_text" in st.session_state:
         st.session_state["script_editor"] = st.session_state.pop("pending_script_text")
 
-    # 0. URL 세션 토큰 확인 및 자동 로그인 복원 (브라우저 새로고침 F5 대응)
-    token = st.query_params.get("token")
-    if isinstance(token, list) and token:
-        token = token[0]
-
-    if token and not st.session_state.get("user"):
-        user_profile = DatabaseManager.get_user_from_session(token)
-        if user_profile:
-            st.session_state["user"] = user_profile
-            st.session_state["user_token"] = token
-            if user_profile.get("gemini_api_key"):
-                st.session_state["gemini_api_key"] = user_profile["gemini_api_key"]
-            if user_profile.get("gpt_sovits_url"):
-                st.session_state["gpt_sovits_url"] = user_profile["gpt_sovits_url"]
-            if user_profile.get("preferred_engine"):
-                st.session_state["active_engine_mode"] = user_profile["preferred_engine"]
-        else:
-            if "token" in st.query_params:
-                try:
-                    del st.query_params["token"]
-                except Exception:
-                    pass
-
-    # 세션 상태 기본값 초기화
-    if "user" not in st.session_state:
-        st.session_state["user"] = None
-    if "user_token" not in st.session_state:
-        st.session_state["user_token"] = None
+    # 세션 상태 기본값 초기화 (Streamlit Secrets / 환경변수 자동 연동)
     if "gemini_api_key" not in st.session_state:
-        st.session_state["gemini_api_key"] = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+        sec_key = ""
+        try:
+            sec_key = st.secrets.get("GEMINI_API_KEY", "") or st.secrets.get("GOOGLE_API_KEY", "")
+        except Exception:
+            pass
+        st.session_state["gemini_api_key"] = sec_key or os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+
     if "gpt_sovits_url" not in st.session_state:
-        st.session_state["gpt_sovits_url"] = "http://127.0.0.1:9880/tts"
+        sec_url = ""
+        try:
+            sec_url = st.secrets.get("GPT_SOVITS_URL", "")
+        except Exception:
+            pass
+        st.session_state["gpt_sovits_url"] = sec_url or "http://127.0.0.1:9880/tts"
+
     if "gemini_model" not in st.session_state or "tts" not in str(st.session_state.get("gemini_model", "")) or "2.0" in str(st.session_state.get("gemini_model", "")):
         st.session_state["gemini_model"] = "gemini-3.1-flash-tts-preview"
 
@@ -672,78 +657,6 @@ def main():
 
     # 사이드바 설정
     with st.sidebar:
-        # 0. 회원 관리 & 로그인 연동
-        curr_user = st.session_state.get("user")
-        if curr_user:
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #1e293b, #0f172a); padding: 14px; border-radius: 10px; border: 1px solid #3b82f6; margin-bottom: 12px;">
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-weight: 700; color: #60a5fa; font-size: 15px;">🟢 {curr_user['username']} 님</span>
-                    <span style="font-size: 11px; color: #93c5fd; background: #1e3a8a; padding: 2px 8px; border-radius: 4px; font-weight: 600;">회원 계정 연동 중</span>
-                </div>
-                <div style="font-size: 12px; color: #cbd5e1; margin-top: 6px;">
-                    💾 저장된 API 키 및 맞춤 설정이 새로고침(F5) 시에도 자동 복원됩니다.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("🚪 로그아웃", use_container_width=True, key="btn_sidebar_logout"):
-                if st.session_state.get("user_token"):
-                    DatabaseManager.delete_session(st.session_state["user_token"])
-                st.session_state["user"] = None
-                st.session_state["user_token"] = None
-                st.session_state["gemini_api_key"] = ""
-                if "token" in st.query_params:
-                    try:
-                        del st.query_params["token"]
-                    except Exception:
-                        pass
-                st.toast("로그아웃 되었습니다.")
-                st.rerun()
-        else:
-            with st.expander("👤 로그인 / 간편 회원가입", expanded=False):
-                tab_login, tab_reg = st.tabs(["🔑 로그인", "📝 간편 회원가입"])
-                with tab_login:
-                    l_user = st.text_input("아이디", key="login_username_input")
-                    l_pwd = st.text_input("비밀번호", type="password", key="login_pwd_input")
-                    if st.button("로그인", use_container_width=True, key="btn_do_login"):
-                        ok, res = DatabaseManager.authenticate_user(l_user, l_pwd)
-                        if ok:
-                            tok = DatabaseManager.create_session(l_user)
-                            st.query_params["token"] = tok
-                            st.session_state["user"] = res
-                            st.session_state["user_token"] = tok
-                            if res.get("gemini_api_key"):
-                                st.session_state["gemini_api_key"] = res["gemini_api_key"]
-                            if res.get("gpt_sovits_url"):
-                                st.session_state["gpt_sovits_url"] = res["gpt_sovits_url"]
-                            if res.get("preferred_engine"):
-                                st.session_state["active_engine_mode"] = res["preferred_engine"]
-                            st.toast(f"🎉 {l_user}님, 환영합니다!")
-                            st.rerun()
-                        else:
-                            st.error(res)
-                with tab_reg:
-                    r_user = st.text_input("아이디 (2~20자)", key="reg_username_input")
-                    r_pwd = st.text_input("비밀번호 (4자 이상)", type="password", key="reg_pwd_input")
-                    r_pwd_conf = st.text_input("비밀번호 확인", type="password", key="reg_pwd_conf_input")
-                    if st.button("회원가입 완료", use_container_width=True, key="btn_do_reg"):
-                        if r_pwd != r_pwd_conf:
-                            st.error("비밀번호 확인이 일치하지 않습니다.")
-                        else:
-                            ok, msg = DatabaseManager.register_user(r_user, r_pwd)
-                            if ok:
-                                tok = DatabaseManager.create_session(r_user)
-                                st.query_params["token"] = tok
-                                profile = DatabaseManager.get_user_profile(r_user)
-                                st.session_state["user"] = profile
-                                st.session_state["user_token"] = tok
-                                st.toast(f"🎉 환영합니다, {r_user}님! 자동 로그인되었습니다.")
-                                st.rerun()
-                            else:
-                                st.error(msg)
-            st.caption("🔒 로그인하시면 API 키와 설정이 브라우저 새로고침(F5) 후에도 계속 유지됩니다.")
-
-        st.divider()
         st.header("⚙️ 엔진 & 환경 설정")
 
         # 1. 엔진 모드 선택
@@ -784,8 +697,6 @@ def main():
         # 엔진 모드가 변경되었으면 화자 설정 일괄 업데이트 및 계정 저장
         if new_mode != st.session_state["active_engine_mode"]:
             st.session_state["active_engine_mode"] = new_mode
-            if curr_user:
-                DatabaseManager.update_user_api_keys(curr_user["username"], preferred_engine=new_mode)
             if st.session_state["speakers"]:
                 if new_mode == "supertonic":
                     st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "supertonic")
@@ -851,16 +762,6 @@ def main():
             )
             st.session_state["gemini_model"] = g_model
 
-            if curr_user:
-                if st.button("💾 이 API 키를 내 계정에 영구 저장", use_container_width=True, key="btn_save_gemini_key"):
-                    ok, msg = DatabaseManager.update_user_api_keys(curr_user["username"], gemini_api_key=g_key)
-                    if ok:
-                        st.toast("✅ Gemini API 키가 내 계정에 영구 저장되었습니다!")
-                    else:
-                        st.error(msg)
-            else:
-                st.caption("🔒 상단에서 로그인하시면 API 키가 내 계정에 안전하게 저장되어 새로고침(F5)해도 유지됩니다.")
-
             if not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
                 st.markdown("[👉 Google AI Studio에서 무료 키 받기](https://aistudio.google.com/)")
@@ -907,14 +808,6 @@ def main():
                 key="input_gpt_sovits_url"
             )
             st.session_state["gpt_sovits_url"] = sovits_url
-
-            if curr_user:
-                if st.button("💾 이 API 주소를 내 계정에 영구 저장", use_container_width=True, key="btn_save_sovits_url"):
-                    ok, msg = DatabaseManager.update_user_api_keys(curr_user["username"], gpt_sovits_url=sovits_url)
-                    if ok:
-                        st.toast("✅ GPT-SoVITS 주소가 내 계정에 영구 저장되었습니다!")
-                    else:
-                        st.error(msg)
 
             if st.button("🔌 GPT-SoVITS 서버 연결 테스트", use_container_width=True, key="btn_test_sovits"):
                 ok, msg = TTSEngine.test_gpt_sovits_connection(sovits_url)

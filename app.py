@@ -224,6 +224,29 @@ def apply_preset_to_speakers(speakers, engine_type):
                 new_settings[spk] = {"engine": "edge-tts", "voice": EDGE_VOICE_KEYS[v_idx], "style": def_style, "rate": 0, "pitch": 0}
     return new_settings
 
+def set_speakers_preset(engine_type: str):
+    """모든 화자의 엔진, 보이스, 스타일 설정을 일괄 변경하고 Streamlit 위젯 상태까지 강제 동기화"""
+    speakers = st.session_state.get("speakers", [])
+    if not speakers:
+        return
+    eng_mode = "edge" if engine_type == "edge-tts" else engine_type
+    st.session_state["active_engine_mode"] = eng_mode
+    new_settings = apply_preset_to_speakers(speakers, engine_type)
+    st.session_state["voice_settings"] = new_settings
+
+    for spk, sdata in new_settings.items():
+        eng = sdata.get("engine", engine_type)
+        st.session_state[f"engine_select_{spk}"] = eng
+        voice = sdata.get("voice", "")
+        style = sdata.get("style", "🎤 기본")
+        if eng == "supertonic":
+            st.session_state[f"supertonic_voice_{spk}"] = voice
+        elif eng == "gemini":
+            st.session_state[f"gemini_voice_{spk}"] = voice
+        elif eng == "edge-tts":
+            st.session_state[f"edge_voice_{spk}"] = voice
+        st.session_state[f"style_select_{spk}"] = style
+
 def main():
     # 크롬 브라우저 자동 번역으로 인한 React removeChild 크래시 원천 차단
     st.html("""
@@ -642,9 +665,9 @@ def main():
         st.session_state["parsed_segments"] = segments
         st.session_state["speakers"] = speakers
 
-        # 4. 현재 엔진 프리셋 및 스타일 자동 배정
+        # 4. 현재 엔진 프리셋 및 스타일 자동 배정 (위젯 상태 동기화 포함)
         mode = st.session_state.get("active_engine_mode", "supertonic")
-        st.session_state["voice_settings"] = apply_preset_to_speakers(speakers, mode)
+        set_speakers_preset(mode)
         st.session_state["generation_result"] = None
         spk_summary = ", ".join(speakers)
         return True, f"✨ 총 {len(speakers)}명의 화자({spk_summary})와 {len(segments)}개 대사로 정밀 변환 및 배정 완료!"
@@ -694,18 +717,12 @@ def main():
         elif "하이브리드" in selected_mode_label:
             new_mode = "custom"
 
-        # 엔진 모드가 변경되었으면 화자 설정 일괄 업데이트 및 계정 저장
+        # 엔진 모드가 변경되었으면 화자 설정 일괄 업데이트 및 위젯 상태 동기화
         if new_mode != st.session_state["active_engine_mode"]:
-            st.session_state["active_engine_mode"] = new_mode
-            if st.session_state["speakers"]:
-                if new_mode == "supertonic":
-                    st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "supertonic")
-                elif new_mode == "gemini":
-                    st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "gemini")
-                elif new_mode == "edge":
-                    st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "edge-tts")
-                elif new_mode == "gpt-sovits":
-                    st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "gpt-sovits")
+            if new_mode != "custom":
+                set_speakers_preset("edge-tts" if new_mode == "edge" else new_mode)
+            else:
+                st.session_state["active_engine_mode"] = "custom"
             st.rerun()
 
         # 2. Supertonic 옵션 안내
@@ -973,26 +990,22 @@ def main():
         col_bar1, col_bar2, col_bar3, col_bar4 = st.columns(4)
         with col_bar1:
             if st.button("👑 전체 Supertonic 3(무료)", use_container_width=True):
-                st.session_state["active_engine_mode"] = "supertonic"
-                st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "supertonic")
+                set_speakers_preset("supertonic")
                 st.toast("모든 화자가 Supertonic 3 로컬 무료 모델로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar2:
             if st.button("⚡ 전체 Gemini Flash", use_container_width=True):
-                st.session_state["active_engine_mode"] = "gemini"
-                st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "gemini")
+                set_speakers_preset("gemini")
                 st.toast("모든 화자가 Gemini Flash TTS로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar3:
             if st.button("🌐 전체 Edge-TTS(무료)", use_container_width=True):
-                st.session_state["active_engine_mode"] = "edge"
-                st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "edge-tts")
+                set_speakers_preset("edge-tts")
                 st.toast("모든 화자가 Edge-TTS 무료 음성으로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar4:
             if st.button("🎙️ 전체 GPT-SoVITS(API)", use_container_width=True):
-                st.session_state["active_engine_mode"] = "gpt-sovits"
-                st.session_state["voice_settings"] = apply_preset_to_speakers(st.session_state["speakers"], "gpt-sovits")
+                set_speakers_preset("gpt-sovits")
                 st.toast("모든 화자가 GPT-SoVITS 보이스 클로닝으로 일괄 변경되었습니다!")
                 st.rerun()
 
@@ -1101,9 +1114,11 @@ def main():
                         if chosen_engine == "supertonic":
                             p = SUPERTONIC_CHARACTER_PRESETS.get(spk, {"voice": "F1", "style": cur_style})
                             current_cfg = {"engine": "supertonic", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
+                            st.session_state[f"supertonic_voice_{spk}"] = p["voice"]
                         elif chosen_engine == "gemini":
                             p = GEMINI_CHARACTER_PRESETS.get(spk, {"voice": "Kore", "style": cur_style})
                             current_cfg = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
+                            st.session_state[f"gemini_voice_{spk}"] = p["voice"]
                         elif chosen_engine == "gpt-sovits":
                             current_cfg = {
                                 "engine": "gpt-sovits",
@@ -1116,6 +1131,8 @@ def main():
                         else:
                             p = EDGE_CHARACTER_PRESETS.get(spk, {"voice": "ko-KR-SunHiNeural", "style": cur_style, "rate": 0, "pitch": 0})
                             current_cfg = {"engine": "edge-tts", "voice": p["voice"], "style": p.get("style", cur_style), "rate": p.get("rate", 0), "pitch": p.get("pitch", 0)}
+                            st.session_state[f"edge_voice_{spk}"] = p["voice"]
+                        st.session_state[f"engine_select_{spk}"] = chosen_engine
                         st.session_state["voice_settings"][spk] = current_cfg
                         spk_engine = chosen_engine
                         st.rerun()
@@ -1133,7 +1150,7 @@ def main():
                             options=SUPERTONIC_VOICE_KEYS,
                             index=def_idx,
                             format_func=get_supertonic_voice_label,
-                            key=f"voice_select_{spk}"
+                            key=f"supertonic_voice_{spk}"
                         )
 
                         selected_style = st.selectbox(
@@ -1188,7 +1205,7 @@ def main():
                             options=GEMINI_VOICE_KEYS,
                             index=def_idx,
                             format_func=get_gemini_voice_label,
-                            key=f"voice_select_{spk}"
+                            key=f"gemini_voice_{spk}"
                         )
 
                         selected_style = st.selectbox(
@@ -1457,7 +1474,7 @@ def main():
                             options=EDGE_VOICE_KEYS,
                             index=def_idx,
                             format_func=get_edge_voice_label,
-                            key=f"voice_select_{spk}"
+                            key=f"edge_voice_{spk}"
                         )
 
                         selected_style = st.selectbox(

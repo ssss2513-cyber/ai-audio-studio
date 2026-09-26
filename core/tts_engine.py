@@ -649,11 +649,22 @@ class TTSEngine:
         style_info = VOICE_STYLES.get(style_key, {})
         style_prompt = style_info.get("gemini_prompt", "Read clearly, naturally, and expressively.")
 
-        # TTS 전용 프롬프트: Google 공식 TTS 가이드라인에 맞춘 자연스러운 낭독 지시
+        # CRITICAL: contents에는 오직 낭독해야 할 한국어 대본 텍스트만 전달!
+        # 프롬프트나 영문 연기 지시문이 contents에 들어가면 모델이 이를 영어로 소리 내어 읽어버림.
         if style_key == "🎤 기본":
-            prompt = text
+            sys_instruct = (
+                "You are an expert Korean voice actor. "
+                "Read the Korean script verbatim with clear, natural pronunciation. "
+                "Do NOT speak any introductory phrases, English words, instructions, or meta-commentary aloud."
+            )
         else:
-            prompt = f"Say with a {style_prompt.lower()} tone: {text}"
+            sys_instruct = (
+                "You are an expert Korean voice actor performing a script for an audiobook or video. "
+                f"Emotion and performance style: {style_prompt}. "
+                "CRITICAL INSTRUCTION: Speak ONLY the exact Korean text given in the input. "
+                "Do NOT speak instructions, notes, or English words aloud under any circumstances. "
+                "Output purely the voiced Korean narration or dialogue."
+            )
 
         # 사용 가능한 공식 Google Gemini TTS 모델 목록 (우선순위 순)
         VALID_GEMINI_TTS_MODELS = [
@@ -676,23 +687,43 @@ class TTSEngine:
             for attempt in range(1, retries + 1):
                 try:
                     loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda m=current_model: client.models.generate_content(
-                            model=m,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=v_name
+                    def _call_gemini(m=current_model):
+                        try:
+                            return client.models.generate_content(
+                                model=m,
+                                contents=text,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=sys_instruct,
+                                    response_modalities=["AUDIO"],
+                                    speech_config=types.SpeechConfig(
+                                        voice_config=types.VoiceConfig(
+                                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                                voice_name=v_name
+                                            )
                                         )
                                     )
                                 )
                             )
-                        )
-                    )
+                        except Exception as e_inner:
+                            # 만약 특정 모델에서 system_instruction을 지원하지 않는 경우 대비 폴백
+                            if "system_instruction" in str(e_inner).lower():
+                                return client.models.generate_content(
+                                    model=m,
+                                    contents=text,
+                                    config=types.GenerateContentConfig(
+                                        response_modalities=["AUDIO"],
+                                        speech_config=types.SpeechConfig(
+                                            voice_config=types.VoiceConfig(
+                                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                                    voice_name=v_name
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            raise e_inner
+
+                    response = await loop.run_in_executor(None, _call_gemini)
 
                     audio_bytes = None
                     rejection_msgs = []

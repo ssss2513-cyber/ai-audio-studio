@@ -23,18 +23,23 @@ print("⏳ [1/6] 충돌 패키지 제거 중...")
 os.system("pip uninstall -y -q torchvision 2>/dev/null || true")
 
 # 2. 필수 패키지 설치
-print("⏳ [2/6] 필수 패키지 설치 중 (시간 소요)...")
+print("⏳ [2/6] 필수 패키지 설치 중 (5~10분 소요, 진행상황 아래에 표시됨)...")
+sys.stdout.flush()
 pkgs = [
-    "pip setuptools wheel Cython",
-    "'torchaudio<2.9.0'",
-    "lightning openai-whisper inflect pyworld-prebuilt",
-    "onnxruntime-gpu HyperPyYAML conformer",
-    "diffusers hydra-core omegaconf x-transformers",
-    "wetext modelscope soundfile gradio librosa",
-    "gdown wget transformers networkx fastapi",
+    ("pip setuptools wheel Cython", "기본 빌드 도구"),
+    ("'torchaudio<2.9.0'", "오디오 처리"),
+    ("lightning openai-whisper inflect pyworld-prebuilt", "AI 기반 라이브러리"),
+    ("onnxruntime-gpu HyperPyYAML conformer", "모델 런타임"),
+    ("diffusers hydra-core omegaconf x-transformers", "확산 모델"),
+    ("wetext modelscope soundfile gradio librosa", "Gradio 서버"),
+    ("gdown wget transformers networkx fastapi", "기타 의존성"),
 ]
-for p in pkgs:
-    os.system(f"pip install -q --upgrade {p}")
+for p, label in pkgs:
+    print(f"  📦 {label} 설치 중...")
+    sys.stdout.flush()
+    os.system(f"pip install --upgrade {p}")
+    print(f"  ✅ {label} 완료")
+    sys.stdout.flush()
 
 # 3. torchaudio.info 보완 패치 (라이브러리 레벨)
 print("⏳ [3/6] torchaudio.info 호환 패치 적용 중...")

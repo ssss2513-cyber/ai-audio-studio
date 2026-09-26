@@ -43,6 +43,87 @@ def clean_spoken_text(text: str) -> str:
     
     return text.strip()
 
+def optimize_text_for_sovits(text: str, max_chunk_len: int = 40) -> str:
+    """
+    GPT-SoVITS의 자기회귀(AR) 모델 특성상 문장이 35~40자 이상 길어지면
+    호흡 조절 실패, 주의집중(Attention) 이탈로 인해 뒤로 갈수록 말이 빨라지고
+    발음 뭉개짐(slurring), 씹힘, 톤 변형이 발생합니다.
+    
+    미리듣기(20~25자)처럼 또렷하고 선명한 고음질을 전체 생성에서도 유지하기 위해,
+    쉼표(,)나 마침표 없이 40자를 초과하는 긴 절(Clause)을
+    한국어 문맥(접속사, 연결어미, 띄어쓰기)을 고려해 자연스럽게 쉼표(,)로 분할합니다.
+    """
+    if not text or len(text) <= max_chunk_len:
+        return text
+
+    # 문장부호 단위로 1차 분할
+    tokens = re.split(r'([,.:;?!~…\n]+)', text)
+    result_parts = []
+    
+    # 한국어에서 호흡을 쉬어가기 가장 자연스러운 연결어미 및 접속어
+    endings = (
+        '있었고', '있으며', '있지만', '있는데', '하는데', '였는데', '되었고', '보았고',
+        '그리고', '하지만', '그러나', '그런데', '때문에', '따라서',
+        '고', '며', '면서', '면', '지만', '는데', '은데', '인데', '하여', '하고', '더니', '거든', '려고'
+    )
+    
+    for token in tokens:
+        if not token:
+            continue
+        if re.match(r'^[,.:;?!~…\n]+$', token):
+            result_parts.append(token)
+            continue
+            
+        cur = token.strip()
+        while len(cur) > max_chunk_len:
+            search_window_start = 20
+            search_window_end = min(len(cur), max_chunk_len + 5)
+            sub = cur[:search_window_end]
+            
+            words = sub.split(' ')
+            split_pos = -1
+            
+            # 1순위: 긴 연결어미 패턴 일치
+            acc_len = 0
+            for w in words[:-1]:
+                acc_len += len(w) + 1
+                if acc_len >= search_window_start:
+                    clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                    for e in endings:
+                        if clean_w.endswith(e):
+                            split_pos = acc_len - 1
+                            break
+                    if split_pos != -1:
+                        break
+            
+            # 2순위: 20자 ~ max_chunk_len 사이의 일반 띄어쓰기 위치
+            if split_pos == -1:
+                acc_len = 0
+                best_space = -1
+                for w in words[:-1]:
+                    acc_len += len(w) + 1
+                    if search_window_start <= acc_len <= max_chunk_len + 5:
+                        best_space = acc_len - 1
+                if best_space != -1:
+                    split_pos = best_space
+            
+            # 3순위: 그래도 없으면 max_chunk_len 위치
+            if split_pos == -1 or split_pos <= 5:
+                split_pos = max_chunk_len
+            
+            part = cur[:split_pos].strip()
+            if part:
+                if not part.endswith((',', '.', '!', '?', ';', ':')):
+                    result_parts.append(part + ', ')
+                else:
+                    result_parts.append(part + ' ')
+            cur = cur[split_pos:].strip()
+            
+        if cur:
+            result_parts.append(cur)
+            
+    return ''.join(result_parts).strip()
+
 @dataclass
 class VoiceConfig:
     engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits"
@@ -63,6 +144,8 @@ class VoiceConfig:
     temperature: float = 0.65            # GPT-SoVITS 샘플링 온도 (0.65: 최고 싱크로율 및 잡음 방지)
     top_k: int = 5                       # GPT-SoVITS Top-k
     top_p: float = 0.85                  # GPT-SoVITS Top-p
+    text_split_method: str = "cut5"      # GPT-SoVITS 텍스트 분할 (cut5: 구두점/절 단위 분할로 뭉개짐 방지)
+    fragment_interval: float = 0.2       # 절과 절 사이의 자연스러운 호흡 무음 간격(초)
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -1077,18 +1160,27 @@ class TTSEngine:
         top_k_val = int(getattr(voice_config, "top_k", 5))
         top_p_val = float(getattr(voice_config, "top_p", 0.85))
 
+        # GPT-SoVITS의 자기회귀(AR) 모델 특성상 문장이 35~40자 이상 길어지면
+        # 주의집중(Attention) 이탈로 인해 뒤로 갈수록 말이 빨라지고 발음이 심하게 뭉개집니다.
+        # 미리듣기(20~25자)처럼 또렷하고 선명한 품질을 유지하기 위해 긴 문장을 자연스러운 호흡 단위로 최적화 분할합니다.
+        optimized_text = optimize_text_for_sovits(text, max_chunk_len=40)
+        split_method = getattr(voice_config, "text_split_method", "cut5") or "cut5"
+        frag_interval = float(getattr(voice_config, "fragment_interval", 0.2))
+
         payload = {
-            "text": text,
+            "text": optimized_text,
             "text_lang": target_t_lang,
             "ref_audio_path": actual_ref_path,
             "prompt_text": prompt_txt,
             "prompt_lang": target_p_lang,
-            "text_split_method": "cut4",  # 마침표/문장 단위(cut4)로 분할하여 쉼표마다 어색하게 끊기는 억양 문제 해결
+            "text_split_method": split_method,
             "speed_factor": speed_val,
             "top_k": top_k_val,
             "top_p": top_p_val,
             "temperature": temp_val,
-            "repetition_penalty": 1.35
+            "repetition_penalty": 1.35,
+            "fragment_interval": frag_interval,
+            "parallel_infer": True
         }
         if ref_b64:
             payload["ref_audio_base64"] = ref_b64

@@ -2,6 +2,8 @@ import asyncio
 import os
 import io
 import re
+import time
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -126,7 +128,7 @@ def optimize_text_for_sovits(text: str, max_chunk_len: int = 40) -> str:
 
 @dataclass
 class VoiceConfig:
-    engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits"
+    engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits", "f5-tts", "xtts"
     voice: str = "F1"                     # 보이스 ID (Supertonic: F1~F5, M1~M5 / Gemini: Kore, Charon... / Edge: SunHi...)
     model: str = "gemini-3.1-flash-tts-preview"       # Gemini TTS 전용 모델명
     style: str = "🎤 기본"                # 음성 스타일 (34종 감정/연령/톤)
@@ -136,16 +138,18 @@ class VoiceConfig:
     volume: str = "+0%"
     api_key: Optional[str] = None         # Gemini API Key
     gpt_sovits_url: str = "http://127.0.0.1:9880/tts" # GPT-SoVITS API 주소
-    ref_audio_path: str = ""              # GPT-SoVITS 목소리 복제용 참조 오디오 (.wav)
-    prompt_text: str = ""                 # GPT-SoVITS 참조 오디오의 대사 텍스트
-    prompt_lang: str = "ko"               # GPT-SoVITS 참조 오디오 언어 (ko, en, zh, ja)
-    text_lang: str = "ko"                 # GPT-SoVITS 생성할 대사 언어 (ko, en, zh, ja)
-    speed_factor: float = 1.0             # GPT-SoVITS 배속 (0.5 ~ 2.0)
-    temperature: float = 0.65            # GPT-SoVITS 샘플링 온도 (0.65: 최고 싱크로율 및 잡음 방지)
+    f5_tts_url: str = "http://127.0.0.1:7860" # Pinokio F5-TTS API 주소
+    ref_audio_path: str = ""              # GPT-SoVITS / F5-TTS 목소리 복제용 참조 오디오 (.wav, .mp3)
+    prompt_text: str = ""                 # 참조 오디오의 대사 텍스트
+    prompt_lang: str = "ko"               # 참조 오디오 언어 (ko, en, zh, ja)
+    text_lang: str = "ko"                 # 생성할 대사 언어 (ko, en, zh, ja)
+    speed_factor: float = 1.0             # 배속 (0.5 ~ 2.0)
+    temperature: float = 0.65            # GPT-SoVITS 샘플링 온도
     top_k: int = 5                       # GPT-SoVITS Top-k
     top_p: float = 0.85                  # GPT-SoVITS Top-p
-    text_split_method: str = "cut5"      # GPT-SoVITS 텍스트 분할 (cut5: 구두점/절 단위 분할로 뭉개짐 방지)
-    fragment_interval: float = 0.2       # 절과 절 사이의 자연스러운 호흡 무음 간격(초)
+    text_split_method: str = "cut5"      # GPT-SoVITS 텍스트 분할 (cut5)
+    fragment_interval: float = 0.2       # 절과 절 사이의 무음 간격(초)
+    nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -1021,6 +1025,106 @@ class TTSEngine:
         raise last_err
 
     @classmethod
+    def test_f5_tts_connection(cls, api_url: str = "http://127.0.0.1:7860") -> Tuple[bool, str]:
+        """
+        Pinokio F5-TTS API 서버 연결 가능 여부 테스트
+        """
+        import requests
+        base_url = api_url.rstrip("/")
+        try:
+            res = requests.get(f"{base_url}/config", timeout=3)
+            if res.status_code == 200:
+                return True, f"Pinokio F5-TTS 서버({base_url})에 성공적으로 연결되었습니다!"
+            return True, f"Pinokio F5-TTS 서버({base_url}) 응답 확인 완료!"
+        except requests.exceptions.ConnectionError:
+            return False, f"서버 연결 실패: '{base_url}' 주소에 응답하는 F5-TTS 서버가 없습니다. (포트 7860 실행 여부를 확인해주세요)"
+        except Exception as e:
+            return False, f"서버 연결 실패: {str(e)}"
+
+    @classmethod
+    def generate_f5_tts_speech(
+        cls,
+        text: str,
+        output_file: str,
+        voice_config: VoiceConfig,
+        retries: int = 2
+    ) -> str:
+        """
+        Pinokio F5-TTS (Gradio API)를 통한 음성 합성 (Voice Cloning)
+        """
+        text = clean_spoken_text(text)
+        if not text:
+            raise ValueError("생성할 텍스트가 비어 있습니다.")
+
+        ref_path = getattr(voice_config, "ref_audio_path", "")
+        if not ref_path:
+            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
+        if not os.path.exists(ref_path):
+            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
+        if os.path.isdir(ref_path):
+            raise IsADirectoryError(f"입력하신 경로('{ref_path}')는 파일이 아니라 폴더입니다.")
+
+        actual_ref_path = os.path.abspath(ref_path)
+        prompt_txt = getattr(voice_config, "prompt_text", "").strip()
+
+        # prompt_txt가 비어있으면 저장된 .txt 캐시나 Whisper로 자동 분석
+        if not prompt_txt:
+            txt_cache = actual_ref_path + ".txt"
+            if os.path.exists(txt_cache):
+                try:
+                    with open(txt_cache, "r", encoding="utf-8") as cf:
+                        prompt_txt = cf.read().strip()
+                except Exception:
+                    pass
+            if not prompt_txt:
+                prompt_txt = cls.transcribe_audio_whisper(actual_ref_path)
+
+        api_url = getattr(voice_config, "f5_tts_url", "http://127.0.0.1:7860") or "http://127.0.0.1:7860"
+        api_url = api_url.rstrip("/")
+
+        speed_val = float(getattr(voice_config, "speed_factor", 1.0) or 1.0)
+        nfe_val = int(getattr(voice_config, "nfe_steps", 32) or 32)
+
+        from gradio_client import Client, handle_file
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+        last_err = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                client = Client(api_url, verbose=False)
+                res = client.predict(
+                    ref_audio_input=handle_file(actual_ref_path),
+                    ref_text_input=prompt_txt,
+                    gen_text_input=text,
+                    remove_silence=False,
+                    randomize_seed=True,
+                    seed_input=0,
+                    cross_fade_duration_slider=0.15,
+                    nfe_slider=nfe_val,
+                    speed_slider=speed_val,
+                    api_name="/basic_tts"
+                )
+                if not res or not res[0] or not os.path.exists(res[0]):
+                    raise RuntimeError("F5-TTS 음성 파일 생성 실패 (결과 파일 없음)")
+
+                temp_audio = res[0]
+                if output_file.lower().endswith(".mp3"):
+                    cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                else:
+                    shutil.copy2(temp_audio, output_file)
+
+                return output_file
+            except Exception as e:
+                last_err = e
+                if attempt == retries:
+                    raise last_err
+                time.sleep(1.0)
+
+        raise last_err
+
+    @classmethod
     def test_gpt_sovits_connection(cls, api_url: str = "http://127.0.0.1:9880") -> Tuple[bool, str]:
         """
         GPT-SoVITS API 서버 연결 가능 여부 테스트
@@ -1311,6 +1415,9 @@ class TTSEngine:
         if voice_config.engine == "supertonic":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_supertonic_speech(text, output_file, voice_config))
+        elif voice_config.engine == "f5-tts":
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: cls.generate_f5_tts_speech(text, output_file, voice_config))
         elif voice_config.engine == "gpt-sovits":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_gpt_sovits_speech(text, output_file, voice_config))
@@ -1330,9 +1437,11 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
-        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits"):
+        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits", "f5-tts"):
             if voice_config.engine == "supertonic":
                 return cls.generate_supertonic_speech(text, output_file, voice_config)
+            elif voice_config.engine == "f5-tts":
+                return cls.generate_f5_tts_speech(text, output_file, voice_config)
             else:
                 return cls.generate_gpt_sovits_speech(text, output_file, voice_config)
 
@@ -1374,8 +1483,10 @@ class TTSEngine:
                 pitch=str(pitch),
                 style=str(style),
                 gpt_sovits_url=kwargs.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
+                f5_tts_url=kwargs.get("f5_tts_url", "http://127.0.0.1:7860"),
                 ref_audio_path=kwargs.get("ref_audio_path", ""),
                 prompt_text=kwargs.get("prompt_text", ""),
-                speed_factor=kwargs.get("speed_factor", 1.0)
+                speed_factor=kwargs.get("speed_factor", 1.0),
+                nfe_steps=kwargs.get("nfe_steps", 32)
             )
         return cls.generate_speech(sample_text, output_file, voice_config)

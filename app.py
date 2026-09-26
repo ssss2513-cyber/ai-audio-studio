@@ -39,7 +39,7 @@ from core.story_precise_parser import parse_story_precisely, parse_story_with_ge
 APP_VERSION = "v2.6 (Gemini 3.1/3.8 지원 패치 완료)"
 
 st.set_page_config(
-    page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · Edge-TTS) - {APP_VERSION}",
+    page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
     page_icon="🎙️",
     layout="wide"
 )
@@ -206,6 +206,16 @@ def apply_preset_to_speakers(speakers, engine_type):
             else:
                 v_idx = idx % len(GEMINI_VOICE_KEYS)
                 new_settings[spk] = {"engine": "gemini", "voice": GEMINI_VOICE_KEYS[v_idx], "style": def_style, "speed": 1.0}
+        elif engine_type == "f5-tts":
+            new_settings[spk] = {
+                "engine": "f5-tts",
+                "voice": "Pinokio F5-TTS 목소리 복제",
+                "style": def_style,
+                "ref_audio_path": "",
+                "prompt_text": "",
+                "speed": 1.0,
+                "nfe_steps": 32
+            }
         elif engine_type == "gpt-sovits":
             new_settings[spk] = {
                 "engine": "gpt-sovits",
@@ -219,14 +229,14 @@ def apply_preset_to_speakers(speakers, engine_type):
                 "top_p": 0.85
             }
         else:
-            if spk in EDGE_CHARACTER_PRESETS:
-                p = EDGE_CHARACTER_PRESETS[spk]
-                new_settings[spk] = {"engine": "edge-tts", "voice": p["voice"], "style": p.get("style", def_style), "rate": p["rate"], "pitch": p["pitch"]}
+            if spk in SUPERTONIC_CHARACTER_PRESETS:
+                p = SUPERTONIC_CHARACTER_PRESETS[spk]
+                new_settings[spk] = {"engine": "supertonic", "voice": p["voice"], "style": p.get("style", def_style), "speed": 1.0}
             elif "나레이션" in spk or "해설" in spk:
-                new_settings[spk] = {"engine": "edge-tts", "voice": "ko-KR-SunHiNeural", "style": "📖 동화 나레이션", "rate": 0, "pitch": 0}
+                new_settings[spk] = {"engine": "supertonic", "voice": "F1", "style": "📖 동화 나레이션", "speed": 1.0}
             else:
-                v_idx = idx % len(EDGE_VOICE_KEYS)
-                new_settings[spk] = {"engine": "edge-tts", "voice": EDGE_VOICE_KEYS[v_idx], "style": def_style, "rate": 0, "pitch": 0}
+                v_idx = idx % len(SUPERTONIC_VOICE_KEYS)
+                new_settings[spk] = {"engine": "supertonic", "voice": SUPERTONIC_VOICE_KEYS[v_idx], "style": def_style, "speed": 1.0}
     return new_settings
 
 def set_state_safe(key: str, value: Any) -> None:
@@ -253,6 +263,13 @@ def set_speakers_preset(engine_type: str):
         style = sdata.get("style", "🎤 기본")
         if eng == "supertonic":
             set_state_safe(f"supertonic_voice_{spk}", voice)
+        elif eng == "f5-tts":
+            set_state_safe(f"f5_speed_{spk}", sdata.get("speed", 1.0))
+            set_state_safe(f"f5_nfe_{spk}", sdata.get("nfe_steps", 32))
+            if sdata.get("prompt_text"):
+                set_state_safe(f"f5_prompt_{spk}", sdata.get("prompt_text"))
+            if sdata.get("ref_audio_path"):
+                set_state_safe(f"f5_saved_path_{spk}", sdata.get("ref_audio_path"))
         elif eng == "gemini":
             set_state_safe(f"gemini_voice_{spk}", voice)
         elif eng == "edge-tts":
@@ -572,14 +589,13 @@ def main():
         <h1 class="hero-title"><span style="color:#ffffff !important;">멀티 보이스 오디오 드라마</span> <span class="gradient-text">스튜디오 PRO</span></h1>
         <p class="hero-subtitle">
             소설 및 시나리오 속 <b>실제 등장인물과 대사</b>를 AI가 스마트하게 자동 분석하고, 
-            <b>초고속 로컬 무료 AI(Supertonic 3)</b> · <b>100% 무료 신경망(Edge-TTS)</b> · <b>목소리 복제(GPT-SoVITS)</b>로 
+            <b>초고속 로컬 무료 AI(Supertonic 3)</b> · <b>성우급 감정 연기(Gemini Flash)</b> · <b>AI 목소리 복제(Colab GPU)</b>로 
             생생한 멀티 보이스 낭독 오디오와 싱크 자막(SRT/VTT)을 원클릭으로 제작합니다.
         </p>
         <div class="tag-row">
             <span class="tag-chip tag-chip-super">👑 Supertonic 3 (로컬 완전 무료)</span>
             <span class="tag-chip tag-chip-gemini">⚡ Gemini 3.1 / 3.8 Flash 감정 연기</span>
-            <span class="tag-chip tag-chip-edge">🌐 Edge-TTS 한국어 표준 성우</span>
-            <span class="tag-chip tag-chip-sovits">🎙️ GPT-SoVITS 6초 즉석 복제</span>
+            <span class="tag-chip tag-chip-sovits">🎙️ AI 제로샷 목소리 복제 (Colab 16GB GPU)</span>
             <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
         </div>
         <div style="background: rgba(34, 197, 94, 0.15); border: 1px solid #22c55e; border-radius: 8px; padding: 8px 14px; margin: 12px auto 0 auto; max-width: 650px; color: #86efac; font-size: 13px; font-weight: 600; text-align: center;">
@@ -705,16 +721,16 @@ def main():
         engine_mode_options = [
             "👑 Supertonic 3 (로컬 무료 · 네이티브 완벽 한국어 발음)",
             "⚡ Gemini 3.1 Flash TTS (스튜디오 성우급 감정 연기)",
-            "🌐 Edge-TTS (마이크로소프트 신경망 무료)",
-            "🎙️ GPT-SoVITS v4 (BigVGAN 48kHz 로컬 목소리 복제)",
+            "🎙️ AI 목소리 복제 (구글 코랩 GPU / GPT-SoVITS)",
+            "✨ Pinokio F5-TTS (피노키오 초고음질 제로샷 복제)",
             "🔀 하이브리드 (인물별 자유 선택)"
         ]
         curr_idx = 0
         if st.session_state["active_engine_mode"] == "gemini":
             curr_idx = 1
-        elif st.session_state["active_engine_mode"] == "edge":
-            curr_idx = 2
         elif st.session_state["active_engine_mode"] == "gpt-sovits":
+            curr_idx = 2
+        elif st.session_state["active_engine_mode"] == "f5-tts":
             curr_idx = 3
         elif st.session_state["active_engine_mode"] == "custom":
             curr_idx = 4
@@ -723,23 +739,23 @@ def main():
             "🎙️ TTS 기본 엔진 선택",
             options=engine_mode_options,
             index=curr_idx,
-            help="Supertonic 3와 Edge-TTS, GPT-SoVITS는 완전 무료입니다."
+            help="Supertonic 3, Pinokio F5-TTS, GPT-SoVITS는 완전 무료입니다."
         )
 
         new_mode = "supertonic"
         if "Gemini" in selected_mode_label:
             new_mode = "gemini"
-        elif "Edge-TTS" in selected_mode_label:
-            new_mode = "edge"
-        elif "GPT-SoVITS" in selected_mode_label:
+        elif "AI 목소리 복제" in selected_mode_label or "GPT-SoVITS" in selected_mode_label:
             new_mode = "gpt-sovits"
+        elif "F5-TTS" in selected_mode_label:
+            new_mode = "f5-tts"
         elif "하이브리드" in selected_mode_label:
             new_mode = "custom"
 
         # 엔진 모드가 변경되었으면 화자 설정 일괄 업데이트 및 위젯 상태 동기화
         if new_mode != st.session_state["active_engine_mode"]:
             if new_mode != "custom":
-                set_speakers_preset("edge-tts" if new_mode == "edge" else new_mode)
+                set_speakers_preset(new_mode)
             else:
                 st.session_state["active_engine_mode"] = "custom"
             st.rerun()
@@ -814,27 +830,24 @@ def main():
             with st.expander("⚡ Gemini API 키 등록 / 화자 분석 연동", expanded=bool(st.session_state.get("gemini_api_key"))):
                 gemini_api_key, gemini_model = render_gemini_section()
 
-        if st.session_state["active_engine_mode"] == "edge":
-            st.success("✅ Edge-TTS 무료 모드 활성화됨 (API 키 불필요)")
-
-        # 4. GPT-SoVITS 로컬 API 전용 옵션
-        if st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
-            st.markdown("#### 🎙️ GPT-SoVITS API 설정")
-            st.success("🚀 **최신 v4 BigVGAN 48kHz 신경망 모델 탑재** (기계음/노이즈 대폭 저감)")
-
             # 구글 코랩 원클릭 실행 배지 및 안내
             st.markdown(
                 """
                 <div style="background: rgba(66, 133, 244, 0.08); border: 1px solid rgba(66, 133, 244, 0.25); border-radius: 8px; padding: 10px; margin-bottom: 12px;">
                     <div style="font-weight: 600; font-size: 0.86rem; color: #4285F4; margin-bottom: 3px;">
-                        ☁️ 내 컴퓨터 GPU가 없거나 24시간 쓰려면?
+                        ☁️ Google Colab 16GB GPU 무료 서버 열기
                     </div>
                     <div style="font-size: 0.80rem; color: #aaa; margin-bottom: 8px; line-height: 1.35;">
-                        Google Colab 무료 T4 GPU에서 원클릭으로 켜고 나온 주소를 아래에 붙여넣으세요!
+                        내 컴퓨터 GPU 없이 구글 무료 16GB GPU로 목소리를 초고속 복제합니다.
                     </div>
-                    <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/GPT_SoVITS_Colab_API.ipynb" target="_blank">
-                        <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
-                    </a>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/CosyVoice_XTTS_Colab_API.ipynb" target="_blank">
+                            <span style="display:inline-block; padding:5px 10px; background:#4f46e5; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🔥 CosyVoice & XTTS 코랩 열기</span>
+                        </a>
+                        <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/GPT_SoVITS_Colab_API.ipynb" target="_blank">
+                            <span style="display:inline-block; padding:5px 10px; background:#2563eb; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🎙️ GPT-SoVITS 코랩 열기</span>
+                        </a>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -873,9 +886,9 @@ def main():
     st.info(
         f"💡 **현재 기본 엔진: {selected_mode_label}**\n"
         "- **Supertonic 3**: 하이브 수퍼톤 한국어 모델로 **완전 무료 + 인터넷/키 없이도 로컬에서 초고속 생성**\n"
-        "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **초고속 TTS**\n"
-        "- **Edge-TTS**: 마이크로소프트의 **100% 평생 무료 표준 음성**\n"
-        "- **GPT-SoVITS**: 단 몇 초의 샘플 음성으로 목소리를 복제하는 **오픈소스 AI 보이스 클로닝 API**"
+        "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **스튜디오 성우급 감정 연기**\n"
+        "- **AI 목소리 복제 (Colab GPU / GPT-SoVITS)**: 구글 16GB GPU를 통해 단 몇 초의 샘플 음성으로 목소리를 복제하는 **오픈소스 AI 보이스 클로닝 API**\n"
+        "- **Pinokio F5-TTS**: 피노키오 제로샷 음성 복제로 **단 한 번의 참조 음성으로 고음질 목소리 즉시 복제**"
     )
 
     # Step 1: 대본 입력
@@ -1010,26 +1023,21 @@ def main():
         st.subheader("2️⃣ 화자별 목소리 및 성우 배정")
         
         # 일괄 변경 원클릭 버튼 바
-        col_bar1, col_bar2, col_bar3, col_bar4 = st.columns(4)
+        col_bar1, col_bar2, col_bar3 = st.columns(3)
         with col_bar1:
-            if st.button("👑 전체 Supertonic 3(무료)", use_container_width=True):
+            if st.button("👑 전체 Supertonic 3 (로컬 무료)", use_container_width=True):
                 set_speakers_preset("supertonic")
                 st.toast("모든 화자가 Supertonic 3 로컬 무료 모델로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar2:
-            if st.button("⚡ 전체 Gemini Flash", use_container_width=True):
+            if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True):
                 set_speakers_preset("gemini")
                 st.toast("모든 화자가 Gemini Flash TTS로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar3:
-            if st.button("🌐 전체 Edge-TTS(무료)", use_container_width=True):
-                set_speakers_preset("edge-tts")
-                st.toast("모든 화자가 Edge-TTS 무료 음성으로 일괄 변경되었습니다!")
-                st.rerun()
-        with col_bar4:
-            if st.button("🎙️ 전체 GPT-SoVITS(API)", use_container_width=True):
+            if st.button("🎙️ 전체 AI 목소리 복제 (Colab GPU)", use_container_width=True):
                 set_speakers_preset("gpt-sovits")
-                st.toast("모든 화자가 GPT-SoVITS 보이스 클로닝으로 일괄 변경되었습니다!")
+                st.toast("모든 화자가 AI 목소리 복제로 일괄 변경되었습니다!")
                 st.rerun()
 
         # 화자별 대사 개수 통계 뱃지
@@ -1120,12 +1128,12 @@ def main():
                         </div>""", 
                         unsafe_allow_html=True
                     )
-                    engine_choices = ["supertonic", "gemini", "edge-tts", "gpt-sovits"]
+                    engine_choices = ["supertonic", "gemini", "gpt-sovits", "f5-tts"]
                     chosen_engine = st.selectbox(
                         "음성 엔진 선택",
                         options=engine_choices,
                         index=engine_choices.index(spk_engine) if spk_engine in engine_choices else 0,
-                        format_func=lambda e: "👑 Supertonic 3 (로컬 무료)" if e == "supertonic" else ("⚡ Gemini Flash" if e == "gemini" else ("🌐 Edge-TTS (무료)" if e == "edge-tts" else "🎙️ GPT-SoVITS v4 (BigVGAN 48kHz)")),
+                        format_func=lambda e: "👑 Supertonic 3 (로컬 무료)" if e == "supertonic" else ("⚡ Gemini Flash" if e == "gemini" else ("🎙️ AI 목소리 복제 (Colab GPU)" if e == "gpt-sovits" else "✨ Pinokio F5-TTS (복제)")),
                         key=f"engine_select_{spk}"
                     )
                     
@@ -1142,6 +1150,32 @@ def main():
                             p = SUPERTONIC_CHARACTER_PRESETS.get(spk, {"voice": "F1", "style": cur_style})
                             current_cfg = {"engine": "supertonic", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
                             set_state_safe(f"supertonic_voice_{spk}", p["voice"])
+                        elif chosen_engine == "f5-tts":
+                            candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav") if ("나레이션" in spk or "해설" in spk) else ""
+                            candidate_prompt = ""
+                            if candidate_ref and os.path.exists(candidate_ref):
+                                c_txt_file = candidate_ref + ".txt"
+                                if os.path.exists(c_txt_file):
+                                    try:
+                                        with open(c_txt_file, "r", encoding="utf-8") as cf:
+                                            candidate_prompt = cf.read().strip()
+                                    except Exception:
+                                        pass
+                            current_cfg = {
+                                "engine": "f5-tts",
+                                "voice": "Pinokio F5-TTS 목소리 복제",
+                                "style": cur_style,
+                                "ref_audio_path": candidate_ref if (candidate_ref and os.path.exists(candidate_ref)) else "",
+                                "prompt_text": candidate_prompt,
+                                "speed": 1.0,
+                                "nfe_steps": 32
+                            }
+                            set_state_safe(f"f5_speed_{spk}", 1.0)
+                            set_state_safe(f"f5_nfe_{spk}", 32)
+                            if candidate_prompt:
+                                set_state_safe(f"f5_prompt_{spk}", candidate_prompt)
+                            if candidate_ref:
+                                set_state_safe(f"f5_saved_path_{spk}", candidate_ref)
                         elif chosen_engine == "gemini":
                             p = GEMINI_CHARACTER_PRESETS.get(spk, {"voice": "Kore", "style": cur_style})
                             current_cfg = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
@@ -1295,6 +1329,156 @@ def main():
                                         if os.path.exists(preview_file):
                                             st.audio(preview_file, format="audio/mp3")
                                             st.caption(f'💬 샘플: "{sample_text}" [{selected_style}]')
+                                    except Exception as e:
+                                        st.error(f"음성 생성 실패: {str(e)}")
+
+                    # 2.5. Pinokio F5-TTS 설정 폼 (목소리 복제)
+                    elif spk_engine == "f5-tts":
+                        st.markdown("**✨ Pinokio F5-TTS 목소리 복제 (제로샷 초고음질)**")
+                        ref_audio_val = current_cfg.get("ref_audio_path", "")
+                        prompt_text_val = current_cfg.get("prompt_text", "")
+                        speed_val = current_cfg.get("speed", 1.0)
+                        nfe_val = current_cfg.get("nfe_steps", 32)
+
+                        # 나레이션 화자이고 기본 등록된 참고 파일이 있으면 자동 연결
+                        if not ref_audio_val:
+                            candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav")
+                            if os.path.exists(candidate_ref):
+                                ref_audio_val = candidate_ref
+                                if not prompt_text_val:
+                                    c_txt_file = candidate_ref + ".txt"
+                                    if os.path.exists(c_txt_file):
+                                        try:
+                                            with open(c_txt_file, "r", encoding="utf-8") as cf:
+                                                prompt_text_val = cf.read().strip()
+                                        except Exception:
+                                            pass
+
+                        saved_ref_key = f"f5_saved_path_{spk}"
+                        if saved_ref_key not in st.session_state and ref_audio_val:
+                            st.session_state[saved_ref_key] = ref_audio_val
+
+                        # 1. 파일 직접 업로드
+                        ref_file = st.file_uploader(
+                            "🎙️ 참조 오디오 파일 (.wav, .mp3) 업로드",
+                            type=["wav", "mp3"],
+                            key=f"f5_upload_{spk}",
+                            help="복제할 인물의 3~12초 길이 목소리 음원 파일"
+                        )
+                        
+                        effective_ref_audio = ""
+                        if ref_file is not None:
+                            safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
+                            save_ref_dir = os.path.join(work_dir, "ref_audios")
+                            os.makedirs(save_ref_dir, exist_ok=True)
+                            raw_val = ref_file.getvalue()
+                            import hashlib
+                            raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
+                            with open(uploaded_path, "wb") as f:
+                                f.write(raw_val)
+                            effective_ref_audio = uploaded_path
+                            st.session_state[saved_ref_key] = uploaded_path
+                            st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}**")
+
+                            txt_cache = uploaded_path + ".txt"
+                            auto_spoken = ""
+                            if os.path.exists(txt_cache):
+                                try:
+                                    with open(txt_cache, "r", encoding="utf-8") as cf:
+                                        auto_spoken = cf.read().strip()
+                                except Exception:
+                                    pass
+                            if not auto_spoken:
+                                with st.spinner("🎧 업로드된 음성을 AI(Whisper)가 듣고 실제 대사를 분석 중..."):
+                                    auto_spoken = TTSEngine.transcribe_audio_whisper(uploaded_path)
+                                    if auto_spoken:
+                                        try:
+                                            with open(txt_cache, "w", encoding="utf-8") as cf:
+                                                cf.write(auto_spoken)
+                                        except Exception:
+                                            pass
+                            if auto_spoken:
+                                prompt_text_val = auto_spoken
+                                set_state_safe(f"f5_prompt_{spk}", auto_spoken)
+                                st.info(f"🎙️ AI 자동 인식 대사: **\"{auto_spoken}\"**")
+                        elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
+                            effective_ref_audio = st.session_state[saved_ref_key]
+                        elif ref_audio_val and os.path.exists(ref_audio_val):
+                            effective_ref_audio = ref_audio_val
+                            st.session_state[saved_ref_key] = ref_audio_val
+
+                        # 2. 등록된 참조 오디오 플레이어
+                        if effective_ref_audio and os.path.isfile(effective_ref_audio):
+                            col_a1, col_a2 = st.columns([3.5, 1.2])
+                            with col_a1:
+                                st.info(f"🎧 등록된 참조 음성: **{os.path.basename(effective_ref_audio)}**")
+                            with col_a2:
+                                if st.button("🗑️ 변경", key=f"f5_del_audio_{spk}"):
+                                    set_state_safe(saved_ref_key, "")
+                                    set_state_safe(f"f5_prompt_{spk}", "")
+                                    effective_ref_audio = ""
+                                    st.rerun()
+
+                            try:
+                                with open(effective_ref_audio, "rb") as af:
+                                    st.audio(af.read(), format=f"audio/{effective_ref_audio.split('.')[-1]}")
+                            except Exception:
+                                pass
+
+                        # 3. 참조 텍스트 입력
+                        saved_prompt = st.session_state.get(f"f5_prompt_{spk}", prompt_text_val)
+                        prompt_input = st.text_input(
+                            "참조 오디오 대사 (공란 시 AI 자동인식)",
+                            value=saved_prompt,
+                            key=f"f5_prompt_{spk}"
+                        )
+
+                        # 4. 배속 및 품질(NFE Steps)
+                        col_s1, col_s2 = st.columns(2)
+                        with col_s1:
+                            speed_f5 = st.slider("배속 (속도)", 0.5, 2.0, float(speed_val), 0.05, key=f"f5_speed_{spk}")
+                        with col_s2:
+                            nfe_f5 = st.slider("NFE Steps (품질)", 16, 64, int(nfe_val), 4, key=f"f5_nfe_{spk}", help="생성 스텝 수. 기본 32, 빠름 16, 최고 품질 48~64")
+
+                        selected_style = st.selectbox("🎨 스타일", options=VOICE_STYLE_KEYS, index=style_idx, key=f"style_select_{spk}")
+
+                        st.session_state["voice_settings"][spk] = {
+                            "engine": "f5-tts",
+                            "voice": "Pinokio F5-TTS 목소리 복제",
+                            "style": selected_style,
+                            "ref_audio_path": effective_ref_audio,
+                            "prompt_text": prompt_input,
+                            "speed": speed_f5,
+                            "nfe_steps": nfe_f5
+                        }
+
+                        # F5-TTS 미리듣기 버튼
+                        if st.button(f"🔊 {spk} Pinokio F5-TTS 미리듣기", key=f"f5_preview_btn_{spk}", use_container_width=True):
+                            if not effective_ref_audio:
+                                st.error("참조 오디오 파일을 먼저 업로드해주세요!")
+                            else:
+                                safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
+                                preview_file = os.path.join(work_dir, f"preview_f5_{safe_spk}.mp3")
+                                sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                                cfg = VoiceConfig(
+                                    engine="f5-tts",
+                                    f5_tts_url=st.session_state.get("f5_tts_url", "http://127.0.0.1:7860"),
+                                    ref_audio_path=effective_ref_audio,
+                                    prompt_text=prompt_input,
+                                    speed_factor=speed_f5,
+                                    nfe_steps=nfe_f5
+                                )
+                                with st.spinner(f"'{spk}' Pinokio F5-TTS 고음질 음성 복제 생성 중..."):
+                                    try:
+                                        TTSEngine.generate_preview(
+                                            voice_config=cfg,
+                                            output_file=preview_file,
+                                            sample_text=sample_text
+                                        )
+                                        if os.path.exists(preview_file):
+                                            st.audio(preview_file, format="audio/mp3")
+                                            st.caption(f'💬 샘플: "{sample_text}"')
                                     except Exception as e:
                                         st.error(f"음성 생성 실패: {str(e)}")
 
@@ -1715,6 +1899,25 @@ def main():
                 st.error("⚠️ Gemini 성우가 지정된 인물이 포함되어 있습니다. 사이드바에 Gemini API Key를 입력하시거나, [👑 전체 Supertonic 3(무료)] 일괄 변경 버튼을 눌러주세요!")
                 return
 
+            # Pinokio F5-TTS 사용 여부 체크
+            has_f5 = any(
+                st.session_state["voice_settings"].get(s.speaker, {}).get("engine") == "f5-tts"
+                for s in target_segments
+            )
+            if has_f5:
+                f5_url = st.session_state.get("f5_tts_url", "http://127.0.0.1:7860")
+                ok, test_msg = TTSEngine.test_f5_tts_connection(f5_url)
+                if not ok:
+                    st.error(f"⚠️ Pinokio F5-TTS API 서버에 연결할 수 없습니다: {test_msg}\n\n피노키오 앱에서 `e2-f5-tts`가 실행 중인지 확인해주세요 (포트 7860).")
+                    return
+                for s in target_segments:
+                    spk_data = st.session_state["voice_settings"].get(s.speaker, {})
+                    if spk_data.get("engine") == "f5-tts":
+                        r_path = spk_data.get("ref_audio_path", "") or st.session_state.get(f"f5_saved_path_{s.speaker}", "")
+                        if not r_path or not os.path.exists(r_path):
+                            st.error(f"⚠️ 화자 '{s.speaker}'의 Pinokio F5-TTS 참조 오디오가 설정되지 않았거나 존재하지 않습니다. 화자 카드에서 참조 음성 파일을 등록해주세요!")
+                            return
+
             # GPT-SoVITS 사용 여부 체크
             has_sovits = any(
                 st.session_state["voice_settings"].get(s.speaker, {}).get("engine") == "gpt-sovits"
@@ -1773,6 +1976,20 @@ def main():
                         style=seg_style
                     )
                     eng_badge = "👑 Supertonic"
+                elif seg_engine == "f5-tts":
+                    actual_spk_ref = spk_cfg_data.get("ref_audio_path") or st.session_state.get(f"f5_saved_path_{seg.speaker}", "")
+                    actual_spk_prompt = spk_cfg_data.get("prompt_text") or st.session_state.get(f"f5_prompt_{seg.speaker}", "")
+                    cfg = VoiceConfig(
+                        engine="f5-tts",
+                        voice="F5-TTS",
+                        style=seg_style,
+                        f5_tts_url=st.session_state.get("f5_tts_url", "http://127.0.0.1:7860"),
+                        ref_audio_path=actual_spk_ref,
+                        prompt_text=actual_spk_prompt,
+                        speed_factor=float(spk_cfg_data.get("speed", 1.0)),
+                        nfe_steps=int(spk_cfg_data.get("nfe_steps", 32))
+                    )
+                    eng_badge = "✨ F5-TTS"
                 elif seg_engine == "gemini":
                     v_name = spk_cfg_data.get("voice", "Kore")
                     safe_gemini_model = gemini_model if gemini_model in gemini_model_options else "gemini-3.1-flash-tts-preview"

@@ -1241,7 +1241,15 @@ def main():
                         st.markdown("**🎙️ GPT-SoVITS 목소리 복제**")
                         ref_audio_val = current_cfg.get("ref_audio_path", "")
                         prompt_text_val = current_cfg.get("prompt_text", "")
-                        speed_val = current_cfg.get("speed", 1.0)
+                        speed_val = current_cfg.get("speed", 0.95)
+
+                        # 나레이션 화자이고 기본 등록된 참고 파일이 있으면 자동 연결
+                        if not ref_audio_val:
+                            candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav")
+                            if os.path.exists(candidate_ref):
+                                ref_audio_val = candidate_ref
+                                if not prompt_text_val:
+                                    prompt_text_val = "혼례 이레 만에 신랑이 자취를 감추자 신부는 하루아침에 파혼을 강요받았습니다."
 
                         saved_ref_key = f"sovits_saved_path_{spk}"
                         if saved_ref_key not in st.session_state and ref_audio_val:
@@ -1268,6 +1276,9 @@ def main():
                             st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}** (경로 입력 없이 바로 적용됩니다)")
                         elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
                             effective_ref_audio = st.session_state[saved_ref_key]
+                        elif ref_audio_val and os.path.exists(ref_audio_val):
+                            effective_ref_audio = ref_audio_val
+                            st.session_state[saved_ref_key] = ref_audio_val
 
                         # 2. 등록된 참조 오디오 플레이어 & 길이 점검
                         if effective_ref_audio and os.path.isfile(effective_ref_audio):
@@ -1521,6 +1532,25 @@ def main():
         with col_opt1:
             gen_mode = st.radio("생성 범위 선택", ["전체 대사 생성", "구간 테스트 생성 (일부만)"], horizontal=True)
             force_overwrite = st.checkbox("이전 생성 파일 무시하고 새로 덮어쓰기 (설정 변경 시 권장)", value=True)
+            if st.button("🧹 이전 음성 캐시 완전히 비우기", help="이전에 생성된 오디오 파일을 모두 삭제하여 100% 새 설정으로 깨끗하게 다시 생성합니다."):
+                seg_d = os.path.join(work_dir, "segments_all")
+                ref_c = os.path.join(work_dir, "ref_cache")
+                ref_c2 = os.path.join(seg_d, "ref_cache")
+                for d in [seg_d, ref_c, ref_c2]:
+                    if os.path.exists(d):
+                        for fn in os.listdir(d):
+                            fp = os.path.join(d, fn)
+                            if os.path.isfile(fp):
+                                try: os.remove(fp)
+                                except Exception: pass
+                for single_f in ["full_audio.mp3", "subtitles.srt", "subtitles.vtt", "tts_main_bundle.zip", "tts_segments_bundle.zip"]:
+                    p = os.path.join(work_dir, single_f)
+                    if os.path.exists(p):
+                        try: os.remove(p)
+                        except Exception: pass
+                st.session_state["generation_result"] = None
+                st.toast("✅ 이전 음성 캐시를 모두 비웠습니다! 이제 새로 생성하시면 100% 최신 음성으로 생성됩니다.")
+                st.rerun()
         
         with col_opt2:
             if gen_mode == "구간 테스트 생성 (일부만)":
@@ -1591,7 +1621,7 @@ def main():
                 # 화자 설정(엔진, 보이스, 스타일, 참조 오디오, 배속, 텍스트)의 고유 해시 생성
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
-                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}"
+                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v4_ko"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
                 seg_file_path = os.path.join(segments_dir, filename)
@@ -1623,7 +1653,7 @@ def main():
                         gpt_sovits_url=st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
                         ref_audio_path=spk_cfg_data.get("ref_audio_path", ""),
                         prompt_text=spk_cfg_data.get("prompt_text", ""),
-                        speed_factor=float(spk_cfg_data.get("speed", 1.0))
+                        speed_factor=float(spk_cfg_data.get("speed", 0.95))
                     )
                     eng_badge = "🎙️ GPT-SoVITS"
                 else:
@@ -1652,6 +1682,11 @@ def main():
 
                 need_generate = force_overwrite or (not os.path.exists(seg_file_path)) or is_corrupt
                 if need_generate:
+                    if force_overwrite:
+                        for old_f in os.listdir(segments_dir):
+                            if old_f.startswith(f"{seg.index:04d}_") and old_f != filename:
+                                try: os.remove(os.path.join(segments_dir, old_f))
+                                except Exception: pass
                     try:
                         TTSEngine.generate_speech(clean_text_to_speak, seg_file_path, cfg)
                     except Exception as e:
@@ -1741,6 +1776,8 @@ def main():
                     subprocess.Popen(["explorer", folder_path])
                     st.toast("✅ 윈도우 파일 탐색기를 열었습니다!")
 
+        import time
+        ts = int(time.time())
         col_main, col_down = st.columns([3, 2])
         with col_main:
             st.markdown("### 🎧 전체 병합 오디오 재생")
@@ -1754,23 +1791,23 @@ def main():
 
             # 1. 고속 직접 HTTP 스트리밍 링크 (WebSocket 200MB 버퍼링 한도 우회, 초당 40~300MB/s 속도)
             st.markdown(
-                """
+                f"""
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
-                    <a href="app/static/tts_main_bundle.zip" download="tts_main_bundle.zip" 
+                    <a href="app/static/tts_main_bundle.zip?t={ts}" download="tts_main_bundle.zip" 
                        style="display: block; text-align: center; background: linear-gradient(135deg, #7c3aed, #6366f1); color: white; padding: 12px 16px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 0.95rem; box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);">
                         ⚡ 완성본 초고속 다운로드 (.ZIP - 전체 오디오+자막)
                     </a>
                     <div style="display: flex; gap: 8px;">
-                        <a href="app/static/full_audio.mp3" download="full_audio.mp3" 
+                        <a href="app/static/full_audio.mp3?t={ts}" download="full_audio.mp3" 
                            style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
                             🎵 전체 오디오 (MP3)
                         </a>
-                        <a href="app/static/subtitles.srt" download="subtitles.srt" 
+                        <a href="app/static/subtitles.srt?t={ts}" download="subtitles.srt" 
                            style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
                             📝 자막 파일 (SRT)
                         </a>
                     </div>
-                    <a href="app/static/tts_segments_bundle.zip" download="tts_segments_bundle.zip" 
+                    <a href="app/static/tts_segments_bundle.zip?t={ts}" download="tts_segments_bundle.zip" 
                        style="display: block; text-align: center; background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 8px 12px; border-radius: 6px; text-decoration: none; font-size: 0.82rem;">
                         🗄️ 개별 분할 대사 압축팩 (전체 세그먼트 MP3)
                     </a>

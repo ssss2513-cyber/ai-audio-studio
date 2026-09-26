@@ -960,12 +960,32 @@ class TTSEngine:
         except Exception:
             pass
 
-        # prompt_text가 비어있으면 whisper로 실제 대사 자동 추출 시도
+        # prompt_text 동기화: 오디오가 앞부분으로 슬라이스된 경우 텍스트도 100% 일치하도록 보정
         prompt_txt = getattr(voice_config, "prompt_text", "").strip()
+        txt_cache = actual_ref_path + ".txt"
+        if os.path.exists(txt_cache):
+            try:
+                with open(txt_cache, "r", encoding="utf-8") as cf:
+                    cached_t = cf.read().strip()
+                    if cached_t:
+                        prompt_txt = cached_t
+            except Exception:
+                pass
+
         if not prompt_txt:
             auto_txt = cls.transcribe_audio_whisper(actual_ref_path)
             if auto_txt:
                 prompt_txt = auto_txt
+                try:
+                    with open(txt_cache, "w", encoding="utf-8") as cf:
+                        cf.write(prompt_txt)
+                except Exception:
+                    pass
+        elif info.duration > 10.0 and "." in prompt_txt:
+            # 10초 초과로 첫 문장만 슬라이스되었는데 텍스트가 전체 대사인 경우, 첫 문장만 정밀 매칭
+            first_sent = prompt_txt.split(".")[0].strip()
+            if len(first_sent) > 5:
+                prompt_txt = first_sent + "."
 
         # 원격 서버(Google Colab 등) 호환성을 위해 참조 오디오를 base64로도 인코딩하여 전송
         ref_b64 = None
@@ -982,14 +1002,21 @@ class TTSEngine:
         raw_p_lang = getattr(voice_config, "prompt_lang", "ko")
         target_p_lang = "all_ko" if raw_p_lang == "ko" else raw_p_lang
 
+        speed_val = float(getattr(voice_config, "speed_factor", 0.95))
+        if speed_val <= 0:
+            speed_val = 0.95
+
         payload = {
             "text": text,
             "text_lang": target_t_lang,
             "ref_audio_path": actual_ref_path,
             "prompt_text": prompt_txt,
             "prompt_lang": target_p_lang,
-            "text_split_method": "cut5",
-            "speed_factor": getattr(voice_config, "speed_factor", 1.0)
+            "text_split_method": "cut4",  # 마침표/문장 단위(cut4)로 분할하여 쉼표마다 어색하게 끊기는 억양 문제 해결
+            "speed_factor": speed_val,
+            "top_k": 15,
+            "top_p": 1.0,
+            "temperature": 1.0
         }
         if ref_b64:
             payload["ref_audio_base64"] = ref_b64
@@ -1012,10 +1039,7 @@ class TTSEngine:
                     if "pos" in res.text:
                         raise RuntimeError(
                             "GPT-SoVITS 한국어 형태소 분석기(Mecab) 미적용 오류.\n"
-                            "▶ 원인: 현재 접속 중인 Google Colab 서버가 이전 버전 상태로 계속 켜져 있어서 발생합니다.\n"
-                            "▶ 즉시 해결 방법 2가지:\n"
-                            "1) [가장 빠름] 구글 코랩 탭에서 상단 [런타임] -> [세션 다시 시작 및 모두 실행]을 눌러 새 주소를 받아 입력하세요.\n"
-                            "2) [또는] 사이드바 맨 위에서 'Supertonic 3 (로컬 무료)' 또는 'Edge-TTS'를 선택하시면 코랩 없이 즉시 무료로 생성됩니다!"
+                            "▶ 해결 방법: 구글 코랩 상단 메뉴 [런타임] -> [세션 다시 시작 및 모두 실행]을 누르신 후 새로 발급된 주소를 입력해주세요."
                         )
                     else:
                         raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")

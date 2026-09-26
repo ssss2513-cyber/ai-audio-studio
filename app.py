@@ -703,10 +703,10 @@ def main():
 
         # 1. 엔진 모드 선택
         engine_mode_options = [
-            "👑 Supertonic 3 (로컬) (무료)",
-            "⚡ Gemini 3.1 Flash TTS (선불/버텍스)",
-            "🌐 Edge-TTS (무료)",
-            "🎙️ GPT-SoVITS (로컬 보이스 클로닝 API, 무료)",
+            "👑 Supertonic 3 (로컬 무료 · 네이티브 완벽 한국어 발음)",
+            "⚡ Gemini 3.1 Flash TTS (스튜디오 성우급 감정 연기)",
+            "🌐 Edge-TTS (마이크로소프트 신경망 무료)",
+            "🎙️ GPT-SoVITS v4 (BigVGAN 48kHz 로컬 목소리 복제)",
             "🔀 하이브리드 (인물별 자유 선택)"
         ]
         curr_idx = 0
@@ -820,6 +820,7 @@ def main():
         # 4. GPT-SoVITS 로컬 API 전용 옵션
         if st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
             st.markdown("#### 🎙️ GPT-SoVITS API 설정")
+            st.success("🚀 **최신 v4 BigVGAN 48kHz 신경망 모델 탑재** (기계음/노이즈 대폭 저감)")
 
             # 구글 코랩 원클릭 실행 배지 및 안내
             st.markdown(

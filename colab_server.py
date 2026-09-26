@@ -48,7 +48,7 @@ packages = (
     "'torchaudio<2.9.0' lightning openai-whisper inflect pyworld-prebuilt "
     "onnxruntime-gpu HyperPyYAML conformer diffusers hydra-core omegaconf "
     "x-transformers wetext modelscope soundfile gradio librosa "
-    "gdown transformers networkx fastapi Cython wheel"
+    "gdown wget transformers networkx fastapi Cython wheel"
 )
 run(f"pip install {packages} 2>&1 | grep -E '(Successfully|already|ERROR|WARNING)' || true",
     "[5/7] Python AI 패키지 설치 (5~8분 소요)")
@@ -61,6 +61,15 @@ run(f"git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git {cosy_d
     if not os.path.exists(cosy_dir)
     else f"cd {cosy_dir} && git pull 2>&1 | tail -2",
     "[6/7] CosyVoice 소스코드 다운로드")
+
+# CosyVoice 의존성 설치 (Matcha-TTS + requirements.txt)
+print("  📦 CosyVoice 의존성 설치 중...")
+sys.stdout.flush()
+run(f"pip install -r {cosy_dir}/requirements.txt 2>&1 | grep -E '(Successfully|already|ERROR)' || true",
+    "CosyVoice requirements.txt 설치")
+run(f"pip install -e {cosy_dir}/third_party/Matcha-TTS 2>&1 | tail -3",
+    "Matcha-TTS 설치")
+run("pip install wget 2>&1 | tail -2", "wget 패키지 확인")
 
 print("\n⏳ [6/7] AI 모델 다운로드 중 (1~2GB, 5~10분)...")
 sys.stdout.flush()

@@ -60,6 +60,9 @@ class VoiceConfig:
     prompt_lang: str = "ko"               # GPT-SoVITS 참조 오디오 언어 (ko, en, zh, ja)
     text_lang: str = "ko"                 # GPT-SoVITS 생성할 대사 언어 (ko, en, zh, ja)
     speed_factor: float = 1.0             # GPT-SoVITS 배속 (0.5 ~ 2.0)
+    temperature: float = 0.65            # GPT-SoVITS 샘플링 온도 (0.65: 최고 싱크로율 및 잡음 방지)
+    top_k: int = 5                       # GPT-SoVITS Top-k
+    top_p: float = 0.85                  # GPT-SoVITS Top-p
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -952,71 +955,89 @@ class TTSEngine:
         actual_ref_path = os.path.abspath(ref_path)
         try:
             import soundfile as sf
+            import numpy as np
             info = sf.info(actual_ref_path)
-            # GPT-SoVITS v2pro 규격: 3초 ~ 10초 범위 내
-            if info.duration > 10.0 or info.duration < 3.0:
-                cache_dir = os.path.join(os.path.dirname(os.path.abspath(output_file)), "ref_cache")
-                os.makedirs(cache_dir, exist_ok=True)
-                safe_base = os.path.splitext(os.path.basename(actual_ref_path))[0]
-                safe_base = "".join(c for c in safe_base if c.isalnum() or c in ('_', '-'))
-                trimmed_path = os.path.join(cache_dir, f"{safe_base}_norm.wav")
+            
+            cache_dir = os.path.join(os.path.dirname(os.path.abspath(output_file)), "ref_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            safe_base = os.path.splitext(os.path.basename(actual_ref_path))[0]
+            safe_base = "".join(c for c in safe_base if c.isalnum() or c in ('_', '-'))
+            trimmed_path = os.path.join(cache_dir, f"{safe_base}_norm.wav")
+
+            # 1. 음원 로드 및 모노 변환
+            data, sr = sf.read(actual_ref_path)
+            if data.ndim > 1:
+                data = np.mean(data, axis=1)
+
+            # 2. 음원 길이 최적화 (3.5초 ~ 8.5초 사이의 무음 밸리 탐색)
+            duration = len(data) / sr
+            if duration > 9.5:
+                win = int(sr * 0.1)
+                hop = int(sr * 0.05)
+                rms = np.array([np.sqrt(np.mean(data[i:i+win]**2)) for i in range(0, len(data)-win, hop)])
+                times = np.arange(len(rms)) * (hop / sr)
                 
-                # 항상 최적의 무음 구간으로 정밀하게 정규화
-                data, sr = sf.read(actual_ref_path)
-                if info.duration > 10.0:
-                    import numpy as np
-                    win = int(sr * 0.1)
-                    hop = int(sr * 0.05)
-                    mono = data if data.ndim == 1 else np.mean(data, axis=1)
-                    rms = np.array([np.sqrt(np.mean(mono[i:i+win]**2)) for i in range(0, len(mono)-win, hop)])
-                    times = np.arange(len(rms)) * (hop / sr)
-                    
-                    # 4.5초 ~ 9.5초 사이에서 단어가 잘리지 않는 가장 조용한 무음 밸리 탐색
-                    mask = (times >= 4.5) & (times <= 9.5)
-                    if np.any(mask):
-                        sub_rms = rms[mask]
-                        sub_times = times[mask]
-                        best_cut_sec = float(sub_times[np.argmin(sub_rms)])
-                    else:
-                        best_cut_sec = 8.0
-                    cut_sample = int(best_cut_sec * sr)
-                    processed_data = data[:cut_sample]
+                # 4.5초 ~ 8.5초 사이에서 가장 조용한 지점(말이 끝나는 쉼표/마침표) 탐색
+                mask = (times >= 4.5) & (times <= 8.5)
+                if np.any(mask):
+                    sub_rms = rms[mask]
+                    sub_times = times[mask]
+                    best_cut_sec = float(sub_times[np.argmin(sub_rms)])
                 else:
-                    import numpy as np
-                    repeats = int(np.ceil(3.5 / (len(data) / sr)))
-                    tiled = np.tile(data, (repeats, 1) if data.ndim > 1 else repeats)
-                    processed_data = tiled[:int(3.5 * sr)]
-                sf.write(trimmed_path, processed_data, sr)
-                actual_ref_path = os.path.abspath(trimmed_path)
+                    best_cut_sec = min(8.0, duration)
+                data = data[:int(best_cut_sec * sr)]
+            elif duration < 3.2:
+                # 3초 미만 너무 짧은 음원은 자연스럽게 반복 타일링
+                repeats = int(np.ceil(3.5 / duration))
+                data = np.tile(data, repeats)[:int(3.5 * sr)]
+
+            # 3. 음량 정규화 (-1.0 dBFS Peak Normalization)
+            # 입력 음량이 너무 작거나 커서 발생하는 음질 왜곡 및 잡음 완벽 방지
+            max_amp = np.max(np.abs(data))
+            if max_amp > 0.001:
+                data = (data / max_amp) * 0.891  # 0.891 = -1.0 dBFS
+
+            sf.write(trimmed_path, data, sr)
+            actual_ref_path = os.path.abspath(trimmed_path)
         except Exception:
             pass
 
-        # prompt_text 동기화: 오디오가 앞부분으로 슬라이스된 경우 텍스트도 100% 일치하도록 보정
-        prompt_txt = getattr(voice_config, "prompt_text", "").strip()
+        # 4. prompt_text 정밀 동기화 (Whisper 검증)
+        user_prompt_txt = getattr(voice_config, "prompt_text", "").strip()
         txt_cache = actual_ref_path + ".txt"
+        
+        # 실제 음원을 Whisper로 직접 청취하여 정답 텍스트 추출
+        real_spoken_txt = ""
         if os.path.exists(txt_cache):
             try:
                 with open(txt_cache, "r", encoding="utf-8") as cf:
-                    cached_t = cf.read().strip()
-                    if cached_t:
-                        prompt_txt = cached_t
+                    real_spoken_txt = cf.read().strip()
             except Exception:
                 pass
-
-        if not prompt_txt:
-            auto_txt = cls.transcribe_audio_whisper(actual_ref_path)
-            if auto_txt:
-                prompt_txt = auto_txt
+        if not real_spoken_txt:
+            real_spoken_txt = cls.transcribe_audio_whisper(actual_ref_path)
+            if real_spoken_txt:
                 try:
                     with open(txt_cache, "w", encoding="utf-8") as cf:
-                        cf.write(prompt_txt)
+                        cf.write(real_spoken_txt)
                 except Exception:
                     pass
-        elif info.duration > 10.0 and "." in prompt_txt:
-            # 10초 초과로 첫 문장만 슬라이스되었는데 텍스트가 전체 대사인 경우, 첫 문장만 정밀 매칭
-            first_sent = prompt_txt.split(".")[0].strip()
-            if len(first_sent) > 5:
-                prompt_txt = first_sent + "."
+
+        # 검증: 사용자가 입력한 프롬프트가 실제 음원과 일치하는지 점검
+        # 만약 사용자가 소설 대본을 잘못 붙여넣었거나 비워둔 경우, 실제 음원에서 추출한 real_spoken_txt로 100% 교체
+        prompt_txt = real_spoken_txt
+        if user_prompt_txt and real_spoken_txt:
+            u_words = set(w for w in user_prompt_txt.replace(".", " ").split() if len(w) >= 2)
+            r_words = set(w for w in real_spoken_txt.replace(".", " ").split() if len(w) >= 2)
+            overlap = len(u_words & r_words)
+            if overlap >= 1 or len(u_words) == 0:
+                prompt_txt = user_prompt_txt
+            else:
+                prompt_txt = real_spoken_txt
+        elif user_prompt_txt:
+            prompt_txt = user_prompt_txt
+        elif real_spoken_txt:
+            prompt_txt = real_spoken_txt
 
         # 원격 서버(Google Colab 등) 호환성을 위해 참조 오디오를 base64로도 인코딩하여 전송
         ref_b64 = None
@@ -1037,6 +1058,14 @@ class TTSEngine:
         if speed_val <= 0:
             speed_val = 0.95
 
+        # 음성 복제 퀄리티를 극대화하는 샘플링 파라미터 (Top-k: 5, Top-p: 0.85, Temperature: 0.65)
+        # temperature 1.0은 환각/잡음/음색이탈이 심하므로, 0.65로 낮추어 원본 목소리와 억양을 최대한 똑같이 재현
+        temp_val = float(getattr(voice_config, "temperature", 0.65))
+        if temp_val <= 0 or temp_val > 1.2:
+            temp_val = 0.65
+        top_k_val = int(getattr(voice_config, "top_k", 5))
+        top_p_val = float(getattr(voice_config, "top_p", 0.85))
+
         payload = {
             "text": text,
             "text_lang": target_t_lang,
@@ -1045,9 +1074,10 @@ class TTSEngine:
             "prompt_lang": target_p_lang,
             "text_split_method": "cut4",  # 마침표/문장 단위(cut4)로 분할하여 쉼표마다 어색하게 끊기는 억양 문제 해결
             "speed_factor": speed_val,
-            "top_k": 15,
-            "top_p": 1.0,
-            "temperature": 1.0
+            "top_k": top_k_val,
+            "top_p": top_p_val,
+            "temperature": temp_val,
+            "repetition_penalty": 1.35
         }
         if ref_b64:
             payload["ref_audio_base64"] = ref_b64

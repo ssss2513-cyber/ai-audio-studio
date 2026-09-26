@@ -211,7 +211,10 @@ def apply_preset_to_speakers(speakers, engine_type):
                 "style": def_style,
                 "ref_audio_path": "",
                 "prompt_text": "",
-                "speed": 1.0
+                "speed": 0.95,
+                "temperature": 0.65,
+                "top_k": 5,
+                "top_p": 0.85
             }
         else:
             if spk in EDGE_CHARACTER_PRESETS:
@@ -245,6 +248,13 @@ def set_speakers_preset(engine_type: str):
             st.session_state[f"gemini_voice_{spk}"] = voice
         elif eng == "edge-tts":
             st.session_state[f"edge_voice_{spk}"] = voice
+        elif eng == "gpt-sovits":
+            st.session_state[f"sovits_speed_{spk}"] = sdata.get("speed", 0.95)
+            st.session_state[f"sovits_temp_{spk}"] = sdata.get("temperature", 0.65)
+            if sdata.get("prompt_text"):
+                st.session_state[f"sovits_prompt_{spk}"] = sdata.get("prompt_text")
+            if sdata.get("ref_audio_path"):
+                st.session_state[f"sovits_saved_path_{spk}"] = sdata.get("ref_audio_path")
         st.session_state[f"style_select_{spk}"] = style
 
 def main():
@@ -1120,14 +1130,33 @@ def main():
                             current_cfg = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
                             st.session_state[f"gemini_voice_{spk}"] = p["voice"]
                         elif chosen_engine == "gpt-sovits":
+                            candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav") if ("나레이션" in spk or "해설" in spk) else ""
+                            candidate_prompt = ""
+                            if candidate_ref and os.path.exists(candidate_ref):
+                                c_txt_file = candidate_ref + ".txt"
+                                if os.path.exists(c_txt_file):
+                                    try:
+                                        with open(c_txt_file, "r", encoding="utf-8") as cf:
+                                            candidate_prompt = cf.read().strip()
+                                    except Exception:
+                                        pass
                             current_cfg = {
                                 "engine": "gpt-sovits",
                                 "voice": "GPT-SoVITS 목소리 복제",
                                 "style": cur_style,
-                                "ref_audio_path": "",
-                                "prompt_text": "",
-                                "speed": 1.0
+                                "ref_audio_path": candidate_ref if (candidate_ref and os.path.exists(candidate_ref)) else "",
+                                "prompt_text": candidate_prompt,
+                                "speed": 0.95,
+                                "temperature": 0.65,
+                                "top_k": 5,
+                                "top_p": 0.85
                             }
+                            st.session_state[f"sovits_speed_{spk}"] = 0.95
+                            st.session_state[f"sovits_temp_{spk}"] = 0.65
+                            if candidate_prompt:
+                                st.session_state[f"sovits_prompt_{spk}"] = candidate_prompt
+                            if candidate_ref:
+                                st.session_state[f"sovits_saved_path_{spk}"] = candidate_ref
                         else:
                             p = EDGE_CHARACTER_PRESETS.get(spk, {"voice": "ko-KR-SunHiNeural", "style": cur_style, "rate": 0, "pitch": 0})
                             current_cfg = {"engine": "edge-tts", "voice": p["voice"], "style": p.get("style", cur_style), "rate": p.get("rate", 0), "pitch": p.get("pitch", 0)}
@@ -1255,10 +1284,11 @@ def main():
 
                     # 3. GPT-SoVITS 설정 폼 (목소리 복제)
                     elif spk_engine == "gpt-sovits":
-                        st.markdown("**🎙️ GPT-SoVITS 목소리 복제**")
+                        st.markdown("**🎙️ GPT-SoVITS 목소리 복제 (초고음질 · 싱크로율 최적화)**")
                         ref_audio_val = current_cfg.get("ref_audio_path", "")
                         prompt_text_val = current_cfg.get("prompt_text", "")
                         speed_val = current_cfg.get("speed", 0.95)
+                        temp_val = current_cfg.get("temperature", 0.65)
 
                         # 나레이션 화자이고 기본 등록된 참고 파일이 있으면 자동 연결
                         if not ref_audio_val:
@@ -1266,7 +1296,15 @@ def main():
                             if os.path.exists(candidate_ref):
                                 ref_audio_val = candidate_ref
                                 if not prompt_text_val:
-                                    prompt_text_val = "혼례 이레 만에 신랑이 자취를 감추자 신부는 하루아침에 파혼을 강요받았습니다."
+                                    c_txt_file = candidate_ref + ".txt"
+                                    if os.path.exists(c_txt_file):
+                                        try:
+                                            with open(c_txt_file, "r", encoding="utf-8") as cf:
+                                                prompt_text_val = cf.read().strip()
+                                        except Exception:
+                                            pass
+                                    if not prompt_text_val:
+                                        prompt_text_val = "혼례 이레 만에 신랑이 자취를 감추자 신부는 하루아침에 파혼을 강요받았습니다."
 
                         saved_ref_key = f"sovits_saved_path_{spk}"
                         if saved_ref_key not in st.session_state and ref_audio_val:
@@ -1290,7 +1328,30 @@ def main():
                                 f.write(ref_file.getvalue())
                             effective_ref_audio = uploaded_path
                             st.session_state[saved_ref_key] = uploaded_path
-                            st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}** (경로 입력 없이 바로 적용됩니다)")
+                            st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}**")
+
+                            # 업로드 즉시 Whisper로 대사 자동 분석 및 동기화
+                            txt_cache = uploaded_path + ".txt"
+                            auto_spoken = ""
+                            if os.path.exists(txt_cache):
+                                try:
+                                    with open(txt_cache, "r", encoding="utf-8") as cf:
+                                        auto_spoken = cf.read().strip()
+                                except Exception:
+                                    pass
+                            if not auto_spoken:
+                                with st.spinner("🎧 업로드된 음성을 AI(Whisper)가 듣고 실제 대사를 분석 중..."):
+                                    auto_spoken = TTSEngine.transcribe_audio_whisper(uploaded_path)
+                                    if auto_spoken:
+                                        try:
+                                            with open(txt_cache, "w", encoding="utf-8") as cf:
+                                                cf.write(auto_spoken)
+                                        except Exception:
+                                            pass
+                            if auto_spoken:
+                                prompt_text_val = auto_spoken
+                                st.session_state[f"sovits_prompt_{spk}"] = auto_spoken
+                                st.info(f"🎙️ AI 자동 인식 대사: **\"{auto_spoken}\"**")
                         elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
                             effective_ref_audio = st.session_state[saved_ref_key]
                         elif ref_audio_val and os.path.exists(ref_audio_val):
@@ -1305,6 +1366,7 @@ def main():
                             with col_a2:
                                 if st.button("🗑️ 오디오 변경", key=f"del_audio_{spk}", help="등록된 참조 오디오를 해제하고 새로 등록합니다."):
                                     st.session_state[saved_ref_key] = ""
+                                    st.session_state[f"sovits_prompt_{spk}"] = ""
                                     effective_ref_audio = ""
                                     st.rerun()
 
@@ -1316,7 +1378,7 @@ def main():
                                     a_info = sf.info(effective_ref_audio)
                                     dur = a_info.duration
                                     if dur > 10.0:
-                                        st.caption(f"⏱️ 파일 길이: **{dur:.1f}초** (10초 초과 시 앞부분 8초 자동 슬라이스 적용)")
+                                        st.caption(f"⏱️ 파일 길이: **{dur:.1f}초** (10초 초과 시 앞부분 4.5~8.5초 무음 밸리 자동 슬라이스)")
                                     elif dur < 3.0:
                                         st.warning(f"⚠️ 파일 길이가 **{dur:.1f}초**로 짧습니다. (권장: 3초~10초)")
                                     else:
@@ -1382,12 +1444,32 @@ def main():
                                     if auto_txt:
                                         prompt_text_val = auto_txt
                                         st.session_state[f"sovits_prompt_{spk}"] = auto_txt
+                                        txt_cache = effective_ref_audio + ".txt"
+                                        try:
+                                            with open(txt_cache, "w", encoding="utf-8") as cf:
+                                                cf.write(auto_txt)
+                                        except Exception:
+                                            pass
                                         st.toast(f"대사 자동 인식 완료: {auto_txt}")
                                         st.rerun()
                                     else:
                                         st.warning("대사를 추출하지 못했습니다. (직접 입력해주세요)")
                             else:
                                 st.warning("먼저 오디오 파일을 업로드해주세요.")
+
+                        # 현재 오디오에 대한 캐시된 실제 대사 확인
+                        known_real_txt = ""
+                        if effective_ref_audio and os.path.isfile(effective_ref_audio):
+                            txt_cache = effective_ref_audio + ".txt"
+                            if os.path.exists(txt_cache):
+                                try:
+                                    with open(txt_cache, "r", encoding="utf-8") as cf:
+                                        known_real_txt = cf.read().strip()
+                                except Exception:
+                                    pass
+                            if not prompt_text_val and known_real_txt:
+                                prompt_text_val = known_real_txt
+                                st.session_state[f"sovits_prompt_{spk}"] = known_real_txt
 
                         prompt_input = st.text_input(
                             "참조 오디오 실제 대사",
@@ -1397,16 +1479,31 @@ def main():
                             label_visibility="collapsed",
                             help="소설 대사가 아니라, 등록하신 참조 오디오 안에서 실제로 나오는 말을 적어주셔야 합니다. (비워두셔도 생성 시 AI가 자동 인식합니다)"
                         )
-                        st.caption("💡 **필독**: 이 칸에는 소설 대사가 아니라 **'등록하신 음성 파일 안에서 실제로 말하고 있는 문장'**을 적어야 목소리가 정상 복제됩니다! ('✨ 대사 자동 추출' 버튼을 누르면 AI가 알아서 적어줍니다)")
+                        if known_real_txt:
+                            st.caption(f"🎧 **AI 감지 실제 대사**: `{known_real_txt}` (음색 완벽 동기화 보장)")
+                        else:
+                            st.caption("💡 **필독**: 이 칸에는 소설 대사가 아니라 **'음성 파일 안에서 실제로 말한 문장'**을 적어야 목소리가 똑같이 복제됩니다! (위의 '✨ 대사 자동 추출' 클릭 시 자동 완성)")
 
-                        speed_slider = st.slider(
-                            "말하기 배속",
-                            min_value=0.5,
-                            max_value=2.0,
-                            value=float(speed_val),
-                            step=0.1,
-                            key=f"sovits_speed_{spk}"
-                        )
+                        col_s1, col_s2 = st.columns(2)
+                        with col_s1:
+                            speed_slider = st.slider(
+                                "말하기 속도",
+                                min_value=0.5,
+                                max_value=2.0,
+                                value=float(speed_val),
+                                step=0.05,
+                                key=f"sovits_speed_{spk}"
+                            )
+                        with col_s2:
+                            temp_slider = st.slider(
+                                "🎯 원음 싱크로율 (Temperature)",
+                                min_value=0.50,
+                                max_value=0.90,
+                                value=float(temp_val),
+                                step=0.05,
+                                key=f"sovits_temp_{spk}",
+                                help="낮을수록(0.60~0.70) 원본 목소리 톤과 억양을 최대한 똑같이 재현하고 환각/잡음이 차단됩니다. (기본 권장값: 0.65)"
+                            )
 
                         selected_style = st.selectbox(
                             "🎨 음성 스타일 (참고용)",
@@ -1421,7 +1518,10 @@ def main():
                             "style": selected_style,
                             "ref_audio_path": effective_ref_audio,
                             "prompt_text": prompt_input,
-                            "speed": speed_slider
+                            "speed": speed_slider,
+                            "temperature": temp_slider,
+                            "top_k": 5,
+                            "top_p": 0.85
                         }
 
                         # 목소리 미리듣기 버튼 (GPT-SoVITS)
@@ -1445,7 +1545,10 @@ def main():
                                     gpt_sovits_url=sovits_url,
                                     ref_audio_path=effective_ref_audio,
                                     prompt_text=prompt_input,
-                                    speed_factor=speed_slider
+                                    speed_factor=speed_slider,
+                                    temperature=temp_slider,
+                                    top_k=5,
+                                    top_p=0.85
                                 )
                                 with st.spinner(f"'{spk}' GPT-SoVITS 목소리 복제 생성 중 (서버 처리 중)..."):
                                     try:
@@ -1638,7 +1741,7 @@ def main():
                 # 화자 설정(엔진, 보이스, 스타일, 참조 오디오, 배속, 텍스트)의 고유 해시 생성
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
-                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v4_ko"
+                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v5_clean_ko"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
                 seg_file_path = os.path.join(segments_dir, filename)
@@ -1670,7 +1773,10 @@ def main():
                         gpt_sovits_url=st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
                         ref_audio_path=spk_cfg_data.get("ref_audio_path", ""),
                         prompt_text=spk_cfg_data.get("prompt_text", ""),
-                        speed_factor=float(spk_cfg_data.get("speed", 0.95))
+                        speed_factor=float(spk_cfg_data.get("speed", 0.95)),
+                        temperature=float(spk_cfg_data.get("temperature", 0.65)),
+                        top_k=int(spk_cfg_data.get("top_k", 5)),
+                        top_p=float(spk_cfg_data.get("top_p", 0.85))
                     )
                     eng_badge = "🎙️ GPT-SoVITS"
                 else:

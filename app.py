@@ -1332,9 +1332,12 @@ def main():
                             safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                             save_ref_dir = os.path.join(work_dir, "ref_audios")
                             os.makedirs(save_ref_dir, exist_ok=True)
-                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{ref_file.name}")
+                            raw_val = ref_file.getvalue()
+                            import hashlib
+                            raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
                             with open(uploaded_path, "wb") as f:
-                                f.write(ref_file.getvalue())
+                                f.write(raw_val)
                             effective_ref_audio = uploaded_path
                             st.session_state[saved_ref_key] = uploaded_path
                             st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}**")
@@ -1775,13 +1778,15 @@ def main():
                     )
                     eng_badge = "⚡ Gemini"
                 elif seg_engine == "gpt-sovits":
+                    actual_spk_ref = spk_cfg_data.get("ref_audio_path") or st.session_state.get(f"sovits_saved_path_{seg.speaker}", "")
+                    actual_spk_prompt = spk_cfg_data.get("prompt_text") or st.session_state.get(f"sovits_prompt_{seg.speaker}", "")
                     cfg = VoiceConfig(
                         engine="gpt-sovits",
                         voice="GPT-SoVITS",
                         style=seg_style,
                         gpt_sovits_url=st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
-                        ref_audio_path=spk_cfg_data.get("ref_audio_path", ""),
-                        prompt_text=spk_cfg_data.get("prompt_text", ""),
+                        ref_audio_path=actual_spk_ref,
+                        prompt_text=actual_spk_prompt,
                         speed_factor=float(spk_cfg_data.get("speed", 0.95)),
                         temperature=float(spk_cfg_data.get("temperature", 0.65)),
                         top_k=int(spk_cfg_data.get("top_k", 5)),

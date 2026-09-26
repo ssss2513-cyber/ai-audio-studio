@@ -1046,7 +1046,17 @@ class TTSEngine:
                 f"폴더 안의 실제 오디오 파일(예: sample.wav 또는 참고 TTS.wav) 전체 경로를 입력해주세요."
             )
 
+        import hashlib
         actual_ref_path = os.path.abspath(ref_path)
+        ref_file_hash = "default"
+        try:
+            with open(actual_ref_path, "rb") as rf:
+                ref_raw_bytes = rf.read()
+            ref_file_hash = hashlib.md5(ref_raw_bytes).hexdigest()[:12]
+        except Exception:
+            pass
+
+        was_trimmed = False
         try:
             import soundfile as sf
             import numpy as np
@@ -1056,23 +1066,22 @@ class TTSEngine:
             os.makedirs(cache_dir, exist_ok=True)
             safe_base = os.path.splitext(os.path.basename(actual_ref_path))[0]
             safe_base = "".join(c for c in safe_base if c.isalnum() or c in ('_', '-'))
-            trimmed_path = os.path.join(cache_dir, f"{safe_base}_norm.wav")
+            trimmed_path = os.path.join(cache_dir, f"{safe_base}_{ref_file_hash}_norm.wav")
 
             # 1. 음원 로드 및 모노 변환
             data, sr = sf.read(actual_ref_path)
             if data.ndim > 1:
                 data = np.mean(data, axis=1)
 
-            # 2. 음원 길이 최적화 (3.5초 ~ 8.5초 사이의 무음 밸리 탐색)
+            # 2. 음원 길이 최적화 (10초 초과 시에만 5.0초 ~ 8.5초 사이의 무음 밸리 탐색)
             duration = len(data) / sr
-            if duration > 9.5:
+            if duration > 10.0:
                 win = int(sr * 0.1)
                 hop = int(sr * 0.05)
                 rms = np.array([np.sqrt(np.mean(data[i:i+win]**2)) for i in range(0, len(data)-win, hop)])
                 times = np.arange(len(rms)) * (hop / sr)
                 
-                # 4.5초 ~ 8.5초 사이에서 가장 조용한 지점(말이 끝나는 쉼표/마침표) 탐색
-                mask = (times >= 4.5) & (times <= 8.5)
+                mask = (times >= 5.0) & (times <= 8.5)
                 if np.any(mask):
                     sub_rms = rms[mask]
                     sub_times = times[mask]
@@ -1080,13 +1089,9 @@ class TTSEngine:
                 else:
                     best_cut_sec = min(8.0, duration)
                 data = data[:int(best_cut_sec * sr)]
-            elif duration < 3.2:
-                # 3초 미만 너무 짧은 음원은 자연스럽게 반복 타일링
-                repeats = int(np.ceil(3.5 / duration))
-                data = np.tile(data, repeats)[:int(3.5 * sr)]
+                was_trimmed = True
 
             # 3. 음량 정규화 (-1.0 dBFS Peak Normalization)
-            # 입력 음량이 너무 작거나 커서 발생하는 음질 왜곡 및 잡음 완벽 방지
             max_amp = np.max(np.abs(data))
             if max_amp > 0.001:
                 data = (data / max_amp) * 0.891  # 0.891 = -1.0 dBFS
@@ -1094,7 +1099,7 @@ class TTSEngine:
             sf.write(trimmed_path, data, sr)
             actual_ref_path = os.path.abspath(trimmed_path)
         except Exception:
-            pass
+            was_trimmed = False
 
         # 4. prompt_text 정밀 동기화 (Whisper 검증)
         user_prompt_txt = getattr(voice_config, "prompt_text", "").strip()
@@ -1117,60 +1122,50 @@ class TTSEngine:
                 except Exception:
                     pass
 
-        # 검증: 사용자가 입력한 프롬프트가 실제 음원과 일치하는지 점검
-        # 만약 사용자가 소설 대본을 잘못 붙여넣었거나 비워둔 경우, 실제 음원에서 추출한 real_spoken_txt로 100% 교체
-        prompt_txt = real_spoken_txt
-        if user_prompt_txt and real_spoken_txt:
-            u_words = set(w for w in user_prompt_txt.replace(".", " ").split() if len(w) >= 2)
-            r_words = set(w for w in real_spoken_txt.replace(".", " ").split() if len(w) >= 2)
-            overlap = len(u_words & r_words)
-            if overlap >= 1 or len(u_words) == 0:
-                prompt_txt = user_prompt_txt
-            else:
-                prompt_txt = real_spoken_txt
+        # 검증: 음원이 10초 초과로 잘린 경우(was_trimmed),
+        # 반드시 잘린 음원에 실제로 발음된 real_spoken_txt를 사용하여 텍스트-음소 불일치 뭉개짐 방지
+        if was_trimmed and real_spoken_txt:
+            prompt_txt = real_spoken_txt
         elif user_prompt_txt:
             prompt_txt = user_prompt_txt
         elif real_spoken_txt:
             prompt_txt = real_spoken_txt
+        else:
+            prompt_txt = ""
 
-        # 원격 서버(Google Colab 등) 호환성을 위해 참조 오디오를 base64로도 인코딩하여 전송
-        ref_b64 = None
-        try:
-            if os.path.exists(actual_ref_path):
-                import base64
-                with open(actual_ref_path, "rb") as rf:
-                    ref_b64 = base64.b64encode(rf.read()).decode("utf-8")
-        except Exception:
-            pass
+        # prompt_txt의 실제 언어 자동 감지 (한글이 없고 알파벳이면 en으로 자동 전환하여 파열음/잡음 차단)
+        raw_p_lang = getattr(voice_config, "prompt_lang", "ko")
+        target_p_lang = "all_ko" if raw_p_lang == "ko" else raw_p_lang
+        has_ko = bool(re.search(r'[가-힣]', prompt_txt))
+        has_en = bool(re.search(r'[a-zA-Z]', prompt_txt))
+        if has_en and not has_ko:
+            target_p_lang = "all_en"
+        elif has_ko:
+            target_p_lang = "all_ko"
 
         raw_t_lang = getattr(voice_config, "text_lang", "ko")
         target_t_lang = "all_ko" if raw_t_lang == "ko" else raw_t_lang
-        raw_p_lang = getattr(voice_config, "prompt_lang", "ko")
-        target_p_lang = "all_ko" if raw_p_lang == "ko" else raw_p_lang
 
         speed_val = float(getattr(voice_config, "speed_factor", 0.95))
         if speed_val <= 0:
             speed_val = 0.95
 
-        # 음성 복제 퀄리티를 극대화하는 샘플링 파라미터 (Top-k: 5, Top-p: 0.85, Temperature: 0.65)
-        # temperature 1.0은 환각/잡음/음색이탈이 심하므로, 0.65로 낮추어 원본 목소리와 억양을 최대한 똑같이 재현
         temp_val = float(getattr(voice_config, "temperature", 0.65))
         if temp_val <= 0 or temp_val > 1.2:
             temp_val = 0.65
         top_k_val = int(getattr(voice_config, "top_k", 5))
         top_p_val = float(getattr(voice_config, "top_p", 0.85))
 
-        # GPT-SoVITS의 자기회귀(AR) 모델 특성상 문장이 35~40자 이상 길어지면
-        # 주의집중(Attention) 이탈로 인해 뒤로 갈수록 말이 빨라지고 발음이 심하게 뭉개집니다.
-        # 미리듣기(20~25자)처럼 또렷하고 선명한 품질을 유지하기 위해 긴 문장을 자연스러운 호흡 단위로 최적화 분할합니다.
         optimized_text = optimize_text_for_sovits(text, max_chunk_len=40)
         split_method = getattr(voice_config, "text_split_method", "cut5") or "cut5"
         frag_interval = float(getattr(voice_config, "fragment_interval", 0.2))
 
+        # 로컬 서버 vs 원격(Colab) 서버 최적 전송 전략
+        is_local_api = any(h in api_url for h in ["127.0.0.1", "localhost"])
+        
         payload = {
             "text": optimized_text,
             "text_lang": target_t_lang,
-            "ref_audio_path": actual_ref_path,
             "prompt_text": prompt_txt,
             "prompt_lang": target_p_lang,
             "text_split_method": split_method,
@@ -1182,8 +1177,21 @@ class TTSEngine:
             "fragment_interval": frag_interval,
             "parallel_infer": True
         }
-        if ref_b64:
-            payload["ref_audio_base64"] = ref_b64
+
+        if is_local_api:
+            # 로컬 서버: 디스크의 고유 해시 파일 경로를 직접 전달
+            # (base64 왕복 인코딩 오버헤드 0%, GPT-SoVITS 캐시 갱신 100% 보장)
+            payload["ref_audio_path"] = actual_ref_path
+        else:
+            # 원격 서버(Colab): base64 인코딩 전달 및 고유 해시 파일명 부여
+            payload["ref_audio_path"] = f"remote_ref_{ref_file_hash}.wav"
+            try:
+                if os.path.exists(actual_ref_path):
+                    import base64
+                    with open(actual_ref_path, "rb") as rf:
+                        payload["ref_audio_base64"] = base64.b64encode(rf.read()).decode("utf-8")
+            except Exception:
+                pass
 
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
         last_err = None

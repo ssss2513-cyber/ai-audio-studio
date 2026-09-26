@@ -1181,6 +1181,28 @@ class TTSEngine:
             if not prompt_txt:
                 prompt_txt = cls.transcribe_audio_whisper(actual_ref_path)
 
+        # 1. 참조 오디오 길이 자동 보정 (3.5초 미만일 경우 HiFT 보코더 conv1d kernel size 에러 방지를 위해 자동 루프 패딩)
+        clean_ref_path = actual_ref_path
+        try:
+            import soundfile as sf
+            import numpy as np
+            import tempfile
+            audio_info = sf.info(actual_ref_path)
+            if audio_info.duration < 3.5:
+                data, sr = sf.read(actual_ref_path)
+                repeats = int(np.ceil(4.0 / max(audio_info.duration, 0.1)))
+                padded_data = np.tile(data, (repeats, 1) if data.ndim > 1 else repeats)
+                padded_path = os.path.join(tempfile.gettempdir(), f"cosy_padded_{int(time.time()*1000)}.wav")
+                sf.write(padded_path, padded_data, sr)
+                clean_ref_path = padded_path
+        except Exception as e:
+            logger.warning(f"CosyVoice 참조 오디오 길이 보정 경고: {e}")
+
+        # 2. 텍스트 길이 보정 (2자 이하의 너무 짧은 단어는 보코더 프레임 부족 에러 방지)
+        send_text = text.strip()
+        if len(send_text) < 4 and not send_text.endswith((".", "!", "?", "~")):
+            send_text = send_text + "..."
+
         api_url = getattr(voice_config, "cosyvoice_url", "")
         if not api_url:
             raise ValueError("CosyVoice 코랩 접속 주소(URL)를 입력해주세요.")
@@ -1192,54 +1214,61 @@ class TTSEngine:
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
         last_err = None
 
+        # 3. 3초 고속 복제 시도 후 실패 시 跨语种复刻(크로스 링구얼 모드)로 자동 폴백
+        modes_to_try = [("3s极速复刻", prompt_txt), ("跨语种复刻", "")]
         for attempt in range(1, retries + 1):
-            try:
-                client = Client(api_url, verbose=False)
+            for mode_name, p_text in modes_to_try:
                 try:
-                    res = client.predict(
-                        text,                          # tts_text
-                        "3s极速复刻",                  # mode_checkbox_group
-                        "",                            # sft_dropdown
-                        prompt_txt,                    # prompt_text
-                        handle_file(actual_ref_path),  # prompt_wav_upload
-                        None,                          # prompt_wav_record
-                        "",                            # instruct_text
-                        0,                             # seed
-                        False,                         # stream (bool)
-                        speed_val,                     # speed
-                        api_name="/generate_audio"
-                    )
-                except Exception:
-                    res = client.predict(
-                        tts_text=text,
-                        mode_checkbox_group="3s极速复刻",
-                        sft_dropdown="",
-                        prompt_text=prompt_txt,
-                        prompt_wav_upload=handle_file(actual_ref_path),
-                        prompt_wav_record=None,
-                        instruct_text="",
-                        seed=0,
-                        stream=False,
-                        speed=speed_val,
-                        api_name="/generate_audio"
-                    )
+                    client = Client(api_url, verbose=False)
+                    try:
+                        res = client.predict(
+                            send_text,                     # tts_text
+                            mode_name,                     # mode_checkbox_group
+                            "",                            # sft_dropdown
+                            p_text,                        # prompt_text
+                            handle_file(clean_ref_path),   # prompt_wav_upload
+                            None,                          # prompt_wav_record
+                            "",                            # instruct_text
+                            0,                             # seed
+                            False,                         # stream (bool)
+                            speed_val,                     # speed
+                            api_name="/generate_audio"
+                        )
+                    except Exception:
+                        res = client.predict(
+                            tts_text=send_text,
+                            mode_checkbox_group=mode_name,
+                            sft_dropdown="",
+                            prompt_text=p_text,
+                            prompt_wav_upload=handle_file(clean_ref_path),
+                            prompt_wav_record=None,
+                            instruct_text="",
+                            seed=0,
+                            stream=False,
+                            speed=speed_val,
+                            api_name="/generate_audio"
+                        )
 
-                if not res:
-                    raise RuntimeError("CosyVoice 음성 파일 생성 실패 (결과 없음)")
+                    if not res:
+                        continue
 
-                temp_audio = res[0] if isinstance(res, (list, tuple)) else res
-                if output_file.lower().endswith(".mp3"):
-                    cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                else:
-                    shutil.copy2(temp_audio, output_file)
+                    temp_audio = res[0] if isinstance(res, (list, tuple)) else res
+                    if output_file.lower().endswith(".mp3"):
+                        cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    else:
+                        shutil.copy2(temp_audio, output_file)
 
-                return output_file
-            except Exception as e:
-                last_err = e
-                if attempt == retries:
-                    raise last_err
+                    return output_file
+                except Exception as e:
+                    last_err = e
+                    continue
+            if attempt < retries:
                 time.sleep(1.0)
+
+        if last_err:
+            raise last_err
+        raise RuntimeError("CosyVoice 음성 파일 생성 실패 (결과 없음)")
 
     @classmethod
     def generate_xtts_speech(

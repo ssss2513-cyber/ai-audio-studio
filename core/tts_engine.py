@@ -958,12 +958,17 @@ class TTSEngine:
         except Exception:
             pass
 
+        raw_t_lang = getattr(voice_config, "text_lang", "ko")
+        target_t_lang = "all_ko" if raw_t_lang == "ko" else raw_t_lang
+        raw_p_lang = getattr(voice_config, "prompt_lang", "ko")
+        target_p_lang = "all_ko" if raw_p_lang == "ko" else raw_p_lang
+
         payload = {
             "text": text,
-            "text_lang": getattr(voice_config, "text_lang", "ko"),
+            "text_lang": target_t_lang,
             "ref_audio_path": actual_ref_path,
             "prompt_text": prompt_txt,
-            "prompt_lang": getattr(voice_config, "prompt_lang", "ko"),
+            "prompt_lang": target_p_lang,
             "speed_factor": getattr(voice_config, "speed_factor", 1.0)
         }
         if ref_b64:

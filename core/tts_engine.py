@@ -148,8 +148,9 @@ class VoiceConfig:
     top_k: int = 5                       # GPT-SoVITS Top-k
     top_p: float = 0.85                  # GPT-SoVITS Top-p
     text_split_method: str = "cut5"      # GPT-SoVITS 텍스트 분할 (cut5)
-    fragment_interval: float = 0.2       # 절과 절 사이의 무음 간격(초)
     nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
+    cosyvoice_url: str = ""              # CosyVoice Colab/WebUI API 주소
+    xtts_url: str = ""                   # XTTS v2 Colab/WebUI API 주소
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -1122,7 +1123,174 @@ class TTSEngine:
                     raise last_err
                 time.sleep(1.0)
 
-        raise last_err
+    @classmethod
+    def test_cosyvoice_connection(cls, url: str) -> Tuple[bool, str]:
+        if not url:
+            return False, "CosyVoice 주소를 입력해주세요."
+        import requests
+        clean_url = url.rstrip("/")
+        try:
+            res = requests.get(clean_url, timeout=5)
+            return True, f"✅ CosyVoice 서버({clean_url})에 성공적으로 연결되었습니다!"
+        except Exception as e:
+            return False, f"서버 연결 실패: '{clean_url}' 에 연결할 수 없습니다. (구글 코랩 실행 상태를 확인해주세요: {str(e)})"
+
+    @classmethod
+    def test_xtts_connection(cls, url: str) -> Tuple[bool, str]:
+        if not url:
+            return False, "XTTS v2 주소를 입력해주세요."
+        import requests
+        clean_url = url.rstrip("/")
+        try:
+            res = requests.get(clean_url, timeout=5)
+            return True, f"✅ XTTS v2 서버({clean_url})에 성공적으로 연결되었습니다!"
+        except Exception as e:
+            return False, f"서버 연결 실패: '{clean_url}' 에 연결할 수 없습니다. (구글 코랩 실행 상태를 확인해주세요: {str(e)})"
+
+    @classmethod
+    def generate_cosyvoice_speech(
+        cls,
+        text: str,
+        output_file: str,
+        voice_config: VoiceConfig,
+        retries: int = 2
+    ) -> str:
+        """
+        CosyVoice 3.0 / 2.0 (Google Colab Gradio API)를 통한 음성 합성 (Voice Cloning)
+        """
+        text = clean_spoken_text(text)
+        if not text:
+            raise ValueError("생성할 텍스트가 비어 있습니다.")
+
+        ref_path = getattr(voice_config, "ref_audio_path", "")
+        if not ref_path:
+            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
+        if not os.path.exists(ref_path):
+            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
+
+        actual_ref_path = os.path.abspath(ref_path)
+        prompt_txt = getattr(voice_config, "prompt_text", "").strip()
+        if not prompt_txt:
+            txt_cache = actual_ref_path + ".txt"
+            if os.path.exists(txt_cache):
+                try:
+                    with open(txt_cache, "r", encoding="utf-8") as cf:
+                        prompt_txt = cf.read().strip()
+                except Exception:
+                    pass
+            if not prompt_txt:
+                prompt_txt = cls.transcribe_audio_whisper(actual_ref_path)
+
+        api_url = getattr(voice_config, "cosyvoice_url", "")
+        if not api_url:
+            raise ValueError("CosyVoice 코랩 접속 주소(URL)를 입력해주세요.")
+        api_url = api_url.rstrip("/")
+
+        speed_val = float(getattr(voice_config, "speed_factor", 1.0) or 1.0)
+
+        from gradio_client import Client, handle_file
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+        last_err = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                client = Client(api_url, verbose=False)
+                try:
+                    res = client.predict(
+                        text,
+                        "3s极速复刻",
+                        prompt_txt,
+                        handle_file(actual_ref_path),
+                        None,
+                        0,
+                        speed_val,
+                        api_name="/generate_audio"
+                    )
+                except Exception:
+                    res = client.predict(
+                        text,
+                        "3s极速复刻",
+                        prompt_txt,
+                        handle_file(actual_ref_path),
+                        None,
+                        0,
+                        api_name="/generate_audio"
+                    )
+
+                if not res:
+                    raise RuntimeError("CosyVoice 음성 파일 생성 실패 (결과 없음)")
+
+                temp_audio = res[0] if isinstance(res, (list, tuple)) else res
+                if output_file.lower().endswith(".mp3"):
+                    cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                else:
+                    shutil.copy2(temp_audio, output_file)
+
+                return output_file
+            except Exception as e:
+                last_err = e
+                if attempt == retries:
+                    raise last_err
+                time.sleep(1.0)
+
+    @classmethod
+    def generate_xtts_speech(
+        cls,
+        text: str,
+        output_file: str,
+        voice_config: VoiceConfig,
+        retries: int = 2
+    ) -> str:
+        """
+        XTTS v2 (Google Colab Gradio API)를 통한 음성 합성 (Voice Cloning)
+        """
+        text = clean_spoken_text(text)
+        if not text:
+            raise ValueError("생성할 텍스트가 비어 있습니다.")
+
+        ref_path = getattr(voice_config, "ref_audio_path", "")
+        if not ref_path:
+            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
+        if not os.path.exists(ref_path):
+            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
+
+        actual_ref_path = os.path.abspath(ref_path)
+        api_url = getattr(voice_config, "xtts_url", "")
+        if not api_url:
+            raise ValueError("XTTS v2 코랩 접속 주소(URL)를 입력해주세요.")
+        api_url = api_url.rstrip("/")
+
+        from gradio_client import Client, handle_file
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+        last_err = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                client = Client(api_url, verbose=False)
+                res = client.predict(
+                    handle_file(actual_ref_path),
+                    text,
+                    "ko",
+                    api_name="/predict"
+                )
+                if not res:
+                    raise RuntimeError("XTTS v2 음성 파일 생성 실패 (결과 없음)")
+
+                temp_audio = res[0] if isinstance(res, (list, tuple)) else res
+                if output_file.lower().endswith(".mp3"):
+                    cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                else:
+                    shutil.copy2(temp_audio, output_file)
+
+                return output_file
+            except Exception as e:
+                last_err = e
+                if attempt == retries:
+                    raise last_err
+                time.sleep(1.0)
+
 
     @classmethod
     def test_gpt_sovits_connection(cls, api_url: str = "http://127.0.0.1:9880") -> Tuple[bool, str]:
@@ -1418,6 +1586,12 @@ class TTSEngine:
         elif voice_config.engine == "f5-tts":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_f5_tts_speech(text, output_file, voice_config))
+        elif voice_config.engine == "cosyvoice":
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: cls.generate_cosyvoice_speech(text, output_file, voice_config))
+        elif voice_config.engine == "xtts":
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: cls.generate_xtts_speech(text, output_file, voice_config))
         elif voice_config.engine == "gpt-sovits":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_gpt_sovits_speech(text, output_file, voice_config))
@@ -1437,11 +1611,15 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
-        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits", "f5-tts"):
+        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits", "f5-tts", "cosyvoice", "xtts"):
             if voice_config.engine == "supertonic":
                 return cls.generate_supertonic_speech(text, output_file, voice_config)
             elif voice_config.engine == "f5-tts":
                 return cls.generate_f5_tts_speech(text, output_file, voice_config)
+            elif voice_config.engine == "cosyvoice":
+                return cls.generate_cosyvoice_speech(text, output_file, voice_config)
+            elif voice_config.engine == "xtts":
+                return cls.generate_xtts_speech(text, output_file, voice_config)
             else:
                 return cls.generate_gpt_sovits_speech(text, output_file, voice_config)
 
@@ -1482,6 +1660,8 @@ class TTSEngine:
                 rate=str(rate),
                 pitch=str(pitch),
                 style=str(style),
+                cosyvoice_url=kwargs.get("cosyvoice_url", ""),
+                xtts_url=kwargs.get("xtts_url", ""),
                 gpt_sovits_url=kwargs.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
                 f5_tts_url=kwargs.get("f5_tts_url", "http://127.0.0.1:7860"),
                 ref_audio_path=kwargs.get("ref_audio_path", ""),

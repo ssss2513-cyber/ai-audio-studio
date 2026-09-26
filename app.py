@@ -1125,7 +1125,7 @@ def main():
                         "음성 엔진 선택",
                         options=engine_choices,
                         index=engine_choices.index(spk_engine) if spk_engine in engine_choices else 0,
-                        format_func=lambda e: "👑 Supertonic (로컬 무료)" if e == "supertonic" else ("⚡ Gemini Flash" if e == "gemini" else ("🌐 Edge-TTS (무료)" if e == "edge-tts" else "🎙️ GPT-SoVITS (API)")),
+                        format_func=lambda e: "👑 Supertonic 3 (로컬 무료)" if e == "supertonic" else ("⚡ Gemini Flash" if e == "gemini" else ("🌐 Edge-TTS (무료)" if e == "edge-tts" else "🎙️ GPT-SoVITS v4 (BigVGAN 48kHz)")),
                         key=f"engine_select_{spk}"
                     )
                     
@@ -1300,7 +1300,7 @@ def main():
 
                     # 3. GPT-SoVITS 설정 폼 (목소리 복제)
                     elif spk_engine == "gpt-sovits":
-                        st.markdown("**🎙️ GPT-SoVITS 목소리 복제 (초고음질 · 싱크로율 최적화)**")
+                        st.markdown("**🎙️ GPT-SoVITS v4 목소리 복제 (BigVGAN 48kHz 초고음질)**")
                         ref_audio_val = current_cfg.get("ref_audio_path", "")
                         prompt_text_val = current_cfg.get("prompt_text", "")
                         speed_val = current_cfg.get("speed", 0.95)

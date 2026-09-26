@@ -689,40 +689,22 @@ class TTSEngine:
                 try:
                     loop = asyncio.get_event_loop()
                     def _call_gemini(m=current_model):
-                        try:
-                            return client.models.generate_content(
-                                model=m,
-                                contents=text,
-                                config=types.GenerateContentConfig(
-                                    system_instruction=sys_instruct,
-                                    response_modalities=["AUDIO"],
-                                    speech_config=types.SpeechConfig(
-                                        voice_config=types.VoiceConfig(
-                                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                                voice_name=v_name
-                                            )
+                        # CRITICAL: Google Gemini TTS 모델은 system_instruction을 지원하지 않으며,
+                        # 주입 시 500 INTERNAL 오류를 반환하므로 순수한 response_modalities=["AUDIO"] 및 speech_config만 전달합니다.
+                        return client.models.generate_content(
+                            model=m,
+                            contents=text,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name=v_name
                                         )
                                     )
                                 )
                             )
-                        except Exception as e_inner:
-                            # 만약 특정 모델에서 system_instruction을 지원하지 않는 경우 대비 폴백
-                            if "system_instruction" in str(e_inner).lower():
-                                return client.models.generate_content(
-                                    model=m,
-                                    contents=text,
-                                    config=types.GenerateContentConfig(
-                                        response_modalities=["AUDIO"],
-                                        speech_config=types.SpeechConfig(
-                                            voice_config=types.VoiceConfig(
-                                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                                    voice_name=v_name
-                                                )
-                                            )
-                                        )
-                                    )
-                                )
-                            raise e_inner
+                        )
 
                     response = await loop.run_in_executor(None, _call_gemini)
 
@@ -782,6 +764,14 @@ class TTSEngine:
                     # 429: 분당 쿼터 초과 시 다른 TTS 모델은 독립 쿼터를 가지므로 즉시 다음 모델 시도
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
                         break
+                    # 500 INTERNAL: Google 공식 문서에 명시된 임의 텍스트 토큰 반환 오류 (재시도 및 모델 전환)
+                    if "500" in err_str or "INTERNAL" in err_str:
+                        if attempt < retries:
+                            await asyncio.sleep(1.0 * attempt)
+                            continue
+                        else:
+                            # 3회 연속 500 지속 시 다른 후보 모델(gemini-2.5-flash-preview-tts 등)로 즉시 전환
+                            break
                     if attempt < retries:
                         await asyncio.sleep(0.5)
 
@@ -798,7 +788,6 @@ class TTSEngine:
                                 model=m,
                                 contents=text,  # text 변수 정상 전달
                                 config=types.GenerateContentConfig(
-                                    system_instruction=sys_instruct,
                                     response_modalities=["AUDIO"],
                                     speech_config=types.SpeechConfig(
                                         voice_config=types.VoiceConfig(
@@ -844,17 +833,25 @@ class TTSEngine:
                         if "429" not in str(fb_err):
                             break
 
-        if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
-            if "limit: 0" in str(last_err) and "pro" in str(last_err).lower():
+        if last_err:
+            err_str = str(last_err)
+            if any(k in err_str for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
+                if "limit: 0" in err_str and "pro" in err_str.lower():
+                    raise RuntimeError(
+                        "선택하신 'Gemini 2.5 Pro TTS' 모델은 Google Cloud 유료 결제(Billing) 계정 전용 모델입니다.\n"
+                        "현재 사용 중이신 무료 API 키에서는 한도가 0(limit: 0)으로 설정되어 있습니다.\n"
+                        "▶ 해결 방법: 사이드바에서 무료 지원 모델인 '⚡ Gemini 3.1 Flash'를 선택하시거나, 완전 무료인 'Supertonic 3' 엔진을 사용해주세요."
+                    )
                 raise RuntimeError(
-                    "선택하신 'Gemini 2.5 Pro TTS' 모델은 Google Cloud 유료 결제(Billing) 계정 전용 모델입니다.\n"
-                    "현재 사용 중이신 무료 API 키에서는 한도가 0(limit: 0)으로 설정되어 있습니다.\n"
-                    "▶ 해결 방법: 사이드바에서 무료 지원 모델인 '⚡ Gemini 3.1 Flash'를 선택하시거나, 완전 무료인 'Supertonic 3' 엔진을 사용해주세요."
+                    "Gemini API 분당 요청 한도(무료 키 기준 15 RPM)에 도달했습니다.\n"
+                    "잠시(약 30초) 후 다시 시도하시거나, 분당 제한 없이 100% 무제한 무료로 즉시 생성되는 '👑 Supertonic 3' 로컬 엔진을 사용해주세요."
                 )
-            raise RuntimeError(
-                "Gemini API 분당 요청 한도(무료 키 기준 15 RPM)에 도달했습니다.\n"
-                "잠시(약 30초) 후 다시 시도하시거나, 분당 제한 없이 100% 무제한 무료로 즉시 생성되는 '👑 Supertonic 3' 로컬 엔진을 사용해주세요."
-            )
+            if "500" in err_str or "INTERNAL" in err_str:
+                raise RuntimeError(
+                    "Google Gemini 서버에서 일시적 내부 오류(500 INTERNAL)가 발생했습니다.\n"
+                    "구글 TTS 프리뷰 서버의 일시적 지연일 수 있으니 잠시 후 다시 시도해주시거나,\n"
+                    "서버 통신 오류가 없는 완전 무료 오프라인 엔진 '👑 Supertonic' 또는 '🌐 Edge-TTS'를 사용해주세요."
+                )
 
         raise last_err or RuntimeError("모든 Gemini TTS 모델 시도 실패")
 

@@ -280,8 +280,11 @@ def parse_story_with_gemini(
         raise ValueError("Gemini API 키가 설정되지 않았습니다. 사이드바에 키를 입력해주세요.")
         
     from google import genai
+    import re
 
-    client = genai.Client(api_key=api_key)
+    keys_list = [k.strip() for k in re.split(r'[,;\s\n]+', api_key) if k.strip()]
+    first_key = keys_list[0] if keys_list else api_key
+    client = genai.Client(api_key=first_key)
 
     char_guide = ""
     if custom_characters:

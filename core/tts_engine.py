@@ -629,6 +629,8 @@ def get_supertonic_engine():
     return _supertonic_instance
 
 class TTSEngine:
+    _gemini_key_counter: int = 0
+
     def __init__(self):
         pass
 
@@ -722,11 +724,20 @@ class TTSEngine:
         from google import genai
         from google.genai import types
 
-        api_key = voice_config.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
+        raw_key = voice_config.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not raw_key:
             raise ValueError("Gemini API 키가 필요합니다. 사이드바에 키를 입력해주세요.")
 
-        client = genai.Client(api_key=api_key)
+        # 다중 API 키 지원: 쉼표(,), 공백, 줄바꿈으로 구분된 여러 개의 키 추출
+        api_keys = [k.strip() for k in re.split(r'[,;\s\n]+', raw_key) if k.strip()]
+        if not api_keys:
+            raise ValueError("유효한 Gemini API 키가 없습니다. 사이드바에 올바른 키를 입력해주세요.")
+
+        # 키 순환 및 로드 밸런싱 (화자/세그먼트별 분산으로 15 RPM 한도 도달 방지)
+        cls._gemini_key_counter = (getattr(cls, "_gemini_key_counter", 0) + 1) % len(api_keys)
+        start_idx = cls._gemini_key_counter
+        ordered_keys = [api_keys[(start_idx + i) % len(api_keys)] for i in range(len(api_keys))]
+
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
         v_name = voice_config.voice if voice_config.voice in GEMINI_VOICES else "Kore"
@@ -736,7 +747,6 @@ class TTSEngine:
         style_prompt = style_info.get("gemini_prompt", "Read clearly, naturally, and expressively.")
 
         # CRITICAL: contents에는 오직 낭독해야 할 한국어 대본 텍스트만 전달!
-        # 프롬프트나 영문 연기 지시문이 contents에 들어가면 모델이 이를 영어로 소리 내어 읽어버림.
         if style_key == "🎤 기본":
             sys_instruct = (
                 "You are an expert Korean voice actor. "
@@ -767,109 +777,18 @@ class TTSEngine:
                 models_to_try.append(m)
 
         last_err = None
-        for current_model in models_to_try:
-            for attempt in range(1, retries + 1):
-                try:
-                    loop = asyncio.get_event_loop()
-                    def _call_gemini(m=current_model):
-                        # CRITICAL: Google Gemini TTS 모델은 system_instruction을 지원하지 않으며,
-                        # 주입 시 500 INTERNAL 오류를 반환하므로 순수한 response_modalities=["AUDIO"] 및 speech_config만 전달합니다.
-                        return client.models.generate_content(
-                            model=m,
-                            contents=text,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=v_name
-                                        )
-                                    )
-                                )
-                            )
-                        )
+        loop = asyncio.get_event_loop()
 
-                    response = await loop.run_in_executor(None, _call_gemini)
-
-                    audio_bytes = None
-                    rejection_msgs = []
-                    if response and response.candidates:
-                        for candidate in response.candidates:
-                            if candidate.finish_reason and str(candidate.finish_reason) not in ("FinishReason.STOP", "1", "STOP"):
-                                rejection_msgs.append(f"종료 사유: {candidate.finish_reason}")
-                            if candidate.content and candidate.content.parts:
-                                for part in candidate.content.parts:
-                                    if getattr(part, "inline_data", None) and part.inline_data.data:
-                                        audio_bytes = part.inline_data.data
-                                        break
-                                    elif getattr(part, "text", None):
-                                        rejection_msgs.append(f"텍스트 응답: {part.text[:60]}")
-                            if audio_bytes:
-                                break
-
-                    if not audio_bytes:
-                        err_detail = "; ".join(rejection_msgs) if rejection_msgs else "오디오 데이터 없음"
-                        raise RuntimeError(f"모델 '{current_model}'에서 오디오 미수신 ({err_detail})")
-
-                    # PCM 또는 WAV 오디오 데이터 MP3로 변환
-                    temp_wav = output_file + f".{attempt}.wav"
-                    if audio_bytes.startswith(b"RIFF"):
-                        with open(temp_wav, "wb") as f:
-                            f.write(audio_bytes)
-                    else:
-                        # Google Gemini TTS의 기본 출력은 24kHz 16비트 모노 PCM
-                        with wave.open(temp_wav, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(24000)
-                            wf.writeframes(audio_bytes)
-
-                    # ffmpeg로 mp3 표준화 변환
-                    cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-
-                    if os.path.exists(temp_wav):
-                        try:
-                            os.remove(temp_wav)
-                        except Exception:
-                            pass
-
-                    return output_file
-                except Exception as e:
-                    last_err = e
-                    err_str = str(e)
-                    # 만약 Pro 모델에서 무료 키(limit: 0) 오류가 발생하면, 재시도 대기 없이 즉시 무료 지원 Flash 모델로 자동 전환
-                    if "limit: 0" in err_str or ("pro" in current_model.lower() and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str)):
-                        break
-                    # 404: 만료/미지원 모델은 재시도하지 않고 다음 후보 모델로 즉시 건너뜀
-                    if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
-                        break
-                    # 429: 분당 쿼터 초과 시 다른 TTS 모델은 독립 쿼터를 가지므로 즉시 다음 모델 시도
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
-                        break
-                    # 500 INTERNAL: Google 공식 문서에 명시된 임의 텍스트 토큰 반환 오류 (재시도 및 모델 전환)
-                    if "500" in err_str or "INTERNAL" in err_str:
-                        if attempt < retries:
-                            await asyncio.sleep(1.0 * attempt)
-                            continue
-                        else:
-                            # 3회 연속 500 지속 시 다른 후보 모델(gemini-2.5-flash-preview-tts 등)로 즉시 전환
-                            break
-                    if attempt < retries:
-                        await asyncio.sleep(0.5)
-
-        # 모든 모델 시도 후 429 쿼터 한도인 경우 (15 RPM 무료 쿼터 해제 대기 후 Flash 모델로 자동 복구 재시도)
-        if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
-            fallback_candidates = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
-            for wait_sec in [4.0, 8.0]:
-                await asyncio.sleep(wait_sec)
-                for fallback_model in fallback_candidates:
+        # 1단계: 등록된 API 키들을 순회하며 생성 시도 (로드밸런싱 및 즉각 키 전환)
+        for current_key in ordered_keys:
+            client = genai.Client(api_key=current_key)
+            for current_model in models_to_try:
+                for attempt in range(1, retries + 1):
                     try:
-                        loop = asyncio.get_event_loop()
-                        def _call_fb(m=fallback_model):
-                            return client.models.generate_content(
+                        def _call_gemini(m=current_model, c=client):
+                            return c.models.generate_content(
                                 model=m,
-                                contents=text,  # text 변수 정상 전달
+                                contents=text,
                                 config=types.GenerateContentConfig(
                                     response_modalities=["AUDIO"],
                                     speech_config=types.SpeechConfig(
@@ -881,40 +800,140 @@ class TTSEngine:
                                     )
                                 )
                             )
-                        response = await loop.run_in_executor(None, _call_fb)
+
+                        response = await loop.run_in_executor(None, _call_gemini)
+
                         audio_bytes = None
+                        rejection_msgs = []
                         if response and response.candidates:
                             for candidate in response.candidates:
+                                if candidate.finish_reason and str(candidate.finish_reason) not in ("FinishReason.STOP", "1", "STOP"):
+                                    rejection_msgs.append(f"종료 사유: {candidate.finish_reason}")
                                 if candidate.content and candidate.content.parts:
                                     for part in candidate.content.parts:
                                         if getattr(part, "inline_data", None) and part.inline_data.data:
                                             audio_bytes = part.inline_data.data
                                             break
-                                if audio_bytes:
-                                    break
-                        if audio_bytes:
-                            temp_wav = output_file + ".retry.wav"
-                            if audio_bytes.startswith(b"RIFF"):
-                                with open(temp_wav, "wb") as f:
-                                    f.write(audio_bytes)
-                            else:
-                                with wave.open(temp_wav, "wb") as wf:
-                                    wf.setnchannels(1)
-                                    wf.setsampwidth(2)
-                                    wf.setframerate(24000)
-                                    wf.writeframes(audio_bytes)
-                            cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
-                            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                            if os.path.exists(temp_wav):
-                                try:
-                                    os.remove(temp_wav)
-                                except Exception:
-                                    pass
-                            return output_file
-                    except Exception as fb_err:
-                        last_err = fb_err
-                        if "429" not in str(fb_err):
+                                        elif getattr(part, "text", None):
+                                            rejection_msgs.append(f"텍스트 응답: {part.text[:60]}")
+                                    if audio_bytes:
+                                        break
+
+                        if not audio_bytes:
+                            err_detail = "; ".join(rejection_msgs) if rejection_msgs else "오디오 데이터 없음"
+                            raise RuntimeError(f"모델 '{current_model}'에서 오디오 미수신 ({err_detail})")
+
+                        # PCM 또는 WAV 오디오 데이터 MP3로 변환
+                        temp_wav = output_file + f".{attempt}.wav"
+                        if audio_bytes.startswith(b"RIFF"):
+                            with open(temp_wav, "wb") as f:
+                                f.write(audio_bytes)
+                        else:
+                            # Google Gemini TTS의 기본 출력은 24kHz 16비트 모노 PCM
+                            with wave.open(temp_wav, "wb") as wf:
+                                wf.setnchannels(1)
+                                wf.setsampwidth(2)
+                                wf.setframerate(24000)
+                                wf.writeframes(audio_bytes)
+
+                        # ffmpeg로 mp3 표준화 변환
+                        cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+                        if os.path.exists(temp_wav):
+                            try:
+                                os.remove(temp_wav)
+                            except Exception:
+                                pass
+
+                        return output_file
+                    except Exception as e:
+                        last_err = e
+                        err_str = str(e)
+                        # 만약 Pro 모델에서 무료 키(limit: 0) 오류가 발생하면, 즉시 Flash 모델로 전환
+                        if "limit: 0" in err_str or ("pro" in current_model.lower() and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str)):
                             break
+                        # 404: 만료/미지원 모델은 재시도하지 않고 다음 후보 모델로 즉시 건너뜀
+                        if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
+                            break
+                        # 429: 분당 쿼터 초과 시 다른 등록된 키가 있다면 즉시 다음 키로 전환
+                        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str:
+                            break
+                        # 500 INTERNAL: 구글 프리뷰 일시 오류 재시도
+                        if "500" in err_str or "INTERNAL" in err_str:
+                            if attempt < retries:
+                                await asyncio.sleep(1.0 * attempt)
+                                continue
+                            else:
+                                break
+                        if attempt < retries:
+                            await asyncio.sleep(0.5)
+
+                # 현재 키가 429 한도에 걸렸다면 다음 모델 대신 다음 API 키로 즉시 전환
+                if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
+                    if not ("limit: 0" in str(last_err) and "pro" in str(last_err).lower()):
+                        break
+
+        # 2단계: 모든 키에서 429 쿼터 한도가 발생한 경우
+        # (구글의 15 RPM 한도는 60초 롤링 윈도우이므로, 10초/15초/25초 대기하며 만료 즉시 자동 복구 재시도)
+        if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
+            if not ("limit: 0" in str(last_err) and "pro" in str(last_err).lower()):
+                fallback_candidates = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
+                for wait_sec in [10.0, 15.0, 25.0]:
+                    await asyncio.sleep(wait_sec)
+                    for key_candidate in ordered_keys:
+                        fb_client = genai.Client(api_key=key_candidate)
+                        for fallback_model in fallback_candidates:
+                            try:
+                                def _call_fb(m=fallback_model, c=fb_client):
+                                    return c.models.generate_content(
+                                        model=m,
+                                        contents=text,
+                                        config=types.GenerateContentConfig(
+                                            response_modalities=["AUDIO"],
+                                            speech_config=types.SpeechConfig(
+                                                voice_config=types.VoiceConfig(
+                                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                                        voice_name=v_name
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                response = await loop.run_in_executor(None, _call_fb)
+                                audio_bytes = None
+                                if response and response.candidates:
+                                    for candidate in response.candidates:
+                                        if candidate.content and candidate.content.parts:
+                                            for part in candidate.content.parts:
+                                                if getattr(part, "inline_data", None) and part.inline_data.data:
+                                                    audio_bytes = part.inline_data.data
+                                                    break
+                                        if audio_bytes:
+                                            break
+                                if audio_bytes:
+                                    temp_wav = output_file + ".retry.wav"
+                                    if audio_bytes.startswith(b"RIFF"):
+                                        with open(temp_wav, "wb") as f:
+                                            f.write(audio_bytes)
+                                    else:
+                                        with wave.open(temp_wav, "wb") as wf:
+                                            wf.setnchannels(1)
+                                            wf.setsampwidth(2)
+                                            wf.setframerate(24000)
+                                            wf.writeframes(audio_bytes)
+                                    cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
+                                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                                    if os.path.exists(temp_wav):
+                                        try:
+                                            os.remove(temp_wav)
+                                        except Exception:
+                                            pass
+                                    return output_file
+                            except Exception as fb_err:
+                                last_err = fb_err
+                                if "429" not in str(fb_err) and "RESOURCE_EXHAUSTED" not in str(fb_err):
+                                    break
 
         if last_err:
             err_str = str(last_err)
@@ -926,8 +945,10 @@ class TTSEngine:
                         "▶ 해결 방법: 사이드바에서 무료 지원 모델인 '⚡ Gemini 3.1 Flash'를 선택하시거나, 완전 무료인 'Supertonic 3' 엔진을 사용해주세요."
                     )
                 raise RuntimeError(
-                    "Gemini API 분당 요청 한도(무료 키 기준 15 RPM)에 도달했습니다.\n"
-                    "잠시(약 30초) 후 다시 시도하시거나, 분당 제한 없이 100% 무제한 무료로 즉시 생성되는 '👑 Supertonic 3' 로컬 엔진을 사용해주세요."
+                    "Gemini API 요청 한도(무료 키 기준 15 RPM 또는 일일 쿼터)에 도달했습니다.\n"
+                    "💡 해결 방법:\n"
+                    "1. Google AI Studio(aistudio.google.com)에서 무료 API 키를 1~2개 더 발급받아, 사이드바 키 입력창에 쉼표(,)로 구분해 여러 개 등록하시면(예: 키1, 키2) 즉시 한도가 늘어나 무제한 연속 생성이 가능합니다.\n"
+                    "2. 또는 분당 요청 제한이 전혀 없는 100% 무제한 무료 오프라인 고속 엔진 '👑 Supertonic 3'을 사용해주세요."
                 )
             if "500" in err_str or "INTERNAL" in err_str:
                 raise RuntimeError(

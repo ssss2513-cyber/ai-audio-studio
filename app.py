@@ -766,11 +766,11 @@ def main():
             st.markdown("#### ⚡ Gemini Flash API 설정")
             saved_key = st.session_state.get("gemini_api_key", "")
             g_key = st.text_input(
-                "Gemini API Key (선불/무료키)",
+                "Gemini API Key (선불/무료키 또는 쉼표 구분 다중 키)",
                 value=saved_key,
                 type="password",
-                placeholder="AIzaSy...",
-                help="Google AI Studio 또는 Vertex AI API 키를 입력하세요.",
+                placeholder="AIzaSy... (여러 개 입력 시 쉼표로 구분: key1, key2)",
+                help="Google AI Studio 무료 API 키를 입력하세요. 쉼표(,)로 여러 개 입력 시 15 RPM 한도 없이 자동 분산(로드밸런싱)됩니다.",
                 key="input_gemini_api_key"
             )
             st.session_state["gemini_api_key"] = g_key
@@ -795,11 +795,15 @@ def main():
             if g_model == "gemini-2.5-pro-preview-tts":
                 st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
-            if not g_key and st.session_state["active_engine_mode"] == "gemini":
+            parsed_keys = [k.strip() for k in re.split(r'[,;\s\n]+', g_key) if k.strip()]
+            if len(parsed_keys) > 1:
+                st.success(f"✅ Gemini API Key {len(parsed_keys)}개 멀티 등록 완료 (최대 {len(parsed_keys)*15} RPM 자동 분산)")
+            elif len(parsed_keys) == 1:
+                st.success("✅ Gemini API Key 준비 완료 (15 RPM 지원)")
+                st.caption("💡 꿀팁: AI Studio에서 무료 키를 1개 더 받아 쉼표(,)로 넣으시면(예: 키1, 키2) 15 RPM 한도 없이 2배 빠르게 생성됩니다.")
+            elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
-                st.markdown("[👉 Google AI Studio에서 무료 키 받기](https://aistudio.google.com/)")
-            elif g_key:
-                st.success("✅ Gemini API Key 준비 완료")
+                st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")
             return g_key, g_model
 
         if show_gemini_prominent:
@@ -1825,9 +1829,14 @@ def main():
                                 try: os.remove(os.path.join(segments_dir, old_f))
                                 except Exception: pass
                     if seg_engine == "gemini" and i > 1:
-                        # Gemini 무료 API 키 분당 15회(15 RPM) 한도 초과 방지 스마트 페이싱 (2.5초)
+                        # Gemini 무료 API 키 분당 15회(15 RPM) 한도 초과 방지 스마트 페이싱
+                        # 1개 키: 최소 4.2초 대기로 15 RPM 초과를 사전에 100% 차단
+                        # 다중 키 등록 시: 키 개수만큼 나누어 초고속 병합 대기
                         import time
-                        time.sleep(2.5)
+                        parsed_g_keys = [k for k in re.split(r'[,;\s\n]+', gemini_api_key) if k.strip()]
+                        g_keys_count = len(parsed_g_keys) if parsed_g_keys else 1
+                        pace_delay = max(1.0, 4.2 / g_keys_count)
+                        time.sleep(pace_delay)
                     try:
                         TTSEngine.generate_speech(clean_text_to_speak, seg_file_path, cfg)
                     except Exception as e:

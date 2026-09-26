@@ -29,10 +29,10 @@ os.system("nvidia-smi | head -12")
 sys.stdout.flush()
 
 # ─── 2. 시스템 패키지 ─────────────────────────────────────────
-run("apt-get update -qq 2>&1 | tail -2",
+run("apt-get update -q 2>&1 | tail -3",
     "[1/7] 시스템 업데이트")
 
-run("apt-get install -y -q ffmpeg sox libsox-dev build-essential python3-dev git-lfs curl wget 2>&1 | tail -3",
+run("apt-get install -y -q ffmpeg sox libsox-dev build-essential python3-dev git-lfs curl wget 2>&1 | tail -5",
     "[2/7] 시스템 패키지 (ffmpeg, sox, build-essential...)")
 
 # ─── 3. Cloudflare 터널 ───────────────────────────────────────

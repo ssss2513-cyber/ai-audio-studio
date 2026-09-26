@@ -1197,23 +1197,30 @@ class TTSEngine:
                 client = Client(api_url, verbose=False)
                 try:
                     res = client.predict(
-                        text,
-                        "3s极速复刻",
-                        prompt_txt,
-                        handle_file(actual_ref_path),
-                        None,
-                        0,
-                        speed_val,
+                        text,                          # tts_text
+                        "3s极速复刻",                  # mode_checkbox_group
+                        "",                            # sft_dropdown
+                        prompt_txt,                    # prompt_text
+                        handle_file(actual_ref_path),  # prompt_wav_upload
+                        None,                          # prompt_wav_record
+                        "",                            # instruct_text
+                        0,                             # seed
+                        False,                         # stream (bool)
+                        speed_val,                     # speed
                         api_name="/generate_audio"
                     )
                 except Exception:
                     res = client.predict(
-                        text,
-                        "3s极速复刻",
-                        prompt_txt,
-                        handle_file(actual_ref_path),
-                        None,
-                        0,
+                        tts_text=text,
+                        mode_checkbox_group="3s极速复刻",
+                        sft_dropdown="",
+                        prompt_text=prompt_txt,
+                        prompt_wav_upload=handle_file(actual_ref_path),
+                        prompt_wav_record=None,
+                        instruct_text="",
+                        seed=0,
+                        stream=False,
+                        speed=speed_val,
                         api_name="/generate_audio"
                     )
 

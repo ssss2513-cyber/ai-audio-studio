@@ -1050,8 +1050,12 @@ def main():
                             new_s = target_name if seg.speaker == merge_from else seg.speaker
                             updated_script_lines.append(f"{new_s}: {seg.text}")
                         new_script_text = "\n".join(updated_script_lines)
-                        st.session_state["script_editor"] = new_script_text
-                        ok, msg = process_and_setup_script(new_script_text, remove_stage_dirs=remove_stage, custom_characters=custom_chars_list)
+                        st.session_state["pending_script_text"] = new_script_text
+                        try:
+                            st.session_state["script_editor"] = new_script_text
+                        except Exception:
+                            pass
+                        ok, msg = process_and_setup_script(new_script_text, remove_stage_dirs=remove_stage, custom_characters=custom_chars_list, update_editor=False)
                         st.toast(f"'{merge_from}' 화자가 '{target_name}'(으)로 통합되었습니다!")
                         st.rerun()
 
@@ -1160,7 +1164,6 @@ def main():
                             p = EDGE_CHARACTER_PRESETS.get(spk, {"voice": "ko-KR-SunHiNeural", "style": cur_style, "rate": 0, "pitch": 0})
                             current_cfg = {"engine": "edge-tts", "voice": p["voice"], "style": p.get("style", cur_style), "rate": p.get("rate", 0), "pitch": p.get("pitch", 0)}
                             st.session_state[f"edge_voice_{spk}"] = p["voice"]
-                        st.session_state[f"engine_select_{spk}"] = chosen_engine
                         st.session_state["voice_settings"][spk] = current_cfg
                         spk_engine = chosen_engine
                         st.rerun()

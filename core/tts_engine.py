@@ -35,6 +35,12 @@ def clean_spoken_text(text: str) -> str:
     text = re.sub(r'^\s*\[[^\]]+\]\s*', '', text)
     text = re.sub(r'^\s*\([가-힣a-zA-Z0-9_\-\s]{1,15}\)\s*', '', text)
     
+    # 5. 문장 시작 부분의 마침표/쉼표/말줄임표/기호 제거 (TTS 말더듬 "어...", "티..." 잡음 방지)
+    text = re.sub(r'^[.,?!~…\s]+', '', text)
+    # 6. 연속된 말줄임표(...)를 깔끔한 단일 마침표(.)로 정규화
+    text = re.sub(r'\.{2,}', '.', text)
+    text = re.sub(r'…+', '.', text)
+    
     return text.strip()
 
 @dataclass
@@ -924,19 +930,32 @@ class TTSEngine:
                 safe_base = "".join(c for c in safe_base if c.isalnum() or c in ('_', '-'))
                 trimmed_path = os.path.join(cache_dir, f"{safe_base}_norm.wav")
                 
-                if not os.path.exists(trimmed_path):
-                    data, sr = sf.read(actual_ref_path)
-                    if info.duration > 10.0:
-                        # 10초 초과 시 앞부분 8초 슬라이스
-                        max_samples = int(8.0 * sr)
-                        processed_data = data[:max_samples]
+                # 항상 최적의 무음 구간으로 정밀하게 정규화
+                data, sr = sf.read(actual_ref_path)
+                if info.duration > 10.0:
+                    import numpy as np
+                    win = int(sr * 0.1)
+                    hop = int(sr * 0.05)
+                    mono = data if data.ndim == 1 else np.mean(data, axis=1)
+                    rms = np.array([np.sqrt(np.mean(mono[i:i+win]**2)) for i in range(0, len(mono)-win, hop)])
+                    times = np.arange(len(rms)) * (hop / sr)
+                    
+                    # 4.5초 ~ 9.5초 사이에서 단어가 잘리지 않는 가장 조용한 무음 밸리 탐색
+                    mask = (times >= 4.5) & (times <= 9.5)
+                    if np.any(mask):
+                        sub_rms = rms[mask]
+                        sub_times = times[mask]
+                        best_cut_sec = float(sub_times[np.argmin(sub_rms)])
                     else:
-                        # 3초 미만 시 3.5초가 되도록 타일링
-                        import numpy as np
-                        repeats = int(np.ceil(3.5 / (len(data) / sr)))
-                        tiled = np.tile(data, (repeats, 1) if data.ndim > 1 else repeats)
-                        processed_data = tiled[:int(3.5 * sr)]
-                    sf.write(trimmed_path, processed_data, sr)
+                        best_cut_sec = 8.0
+                    cut_sample = int(best_cut_sec * sr)
+                    processed_data = data[:cut_sample]
+                else:
+                    import numpy as np
+                    repeats = int(np.ceil(3.5 / (len(data) / sr)))
+                    tiled = np.tile(data, (repeats, 1) if data.ndim > 1 else repeats)
+                    processed_data = tiled[:int(3.5 * sr)]
+                sf.write(trimmed_path, processed_data, sr)
                 actual_ref_path = os.path.abspath(trimmed_path)
         except Exception:
             pass
@@ -969,6 +988,7 @@ class TTSEngine:
             "ref_audio_path": actual_ref_path,
             "prompt_text": prompt_txt,
             "prompt_lang": target_p_lang,
+            "text_split_method": "cut5",
             "speed_factor": getattr(voice_config, "speed_factor", 1.0)
         }
         if ref_b64:

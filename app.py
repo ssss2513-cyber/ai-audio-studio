@@ -227,6 +227,13 @@ def apply_preset_to_speakers(speakers, engine_type):
                 new_settings[spk] = {"engine": "edge-tts", "voice": EDGE_VOICE_KEYS[v_idx], "style": def_style, "rate": 0, "pitch": 0}
     return new_settings
 
+def set_state_safe(key: str, value: Any) -> None:
+    """StreamlitWidgetAlreadyInstantiatedError 등 위젯 키 수정 예외 방어용 안전 세션 상태 저장기"""
+    try:
+        st.session_state[key] = value
+    except Exception:
+        pass
+
 def set_speakers_preset(engine_type: str):
     """모든 화자의 엔진, 보이스, 스타일 설정을 일괄 변경하고 Streamlit 위젯 상태까지 강제 동기화"""
     speakers = st.session_state.get("speakers", [])
@@ -239,23 +246,23 @@ def set_speakers_preset(engine_type: str):
 
     for spk, sdata in new_settings.items():
         eng = sdata.get("engine", engine_type)
-        st.session_state[f"engine_select_{spk}"] = eng
+        set_state_safe(f"engine_select_{spk}", eng)
         voice = sdata.get("voice", "")
         style = sdata.get("style", "🎤 기본")
         if eng == "supertonic":
-            st.session_state[f"supertonic_voice_{spk}"] = voice
+            set_state_safe(f"supertonic_voice_{spk}", voice)
         elif eng == "gemini":
-            st.session_state[f"gemini_voice_{spk}"] = voice
+            set_state_safe(f"gemini_voice_{spk}", voice)
         elif eng == "edge-tts":
-            st.session_state[f"edge_voice_{spk}"] = voice
+            set_state_safe(f"edge_voice_{spk}", voice)
         elif eng == "gpt-sovits":
-            st.session_state[f"sovits_speed_{spk}"] = sdata.get("speed", 0.95)
-            st.session_state[f"sovits_temp_{spk}"] = sdata.get("temperature", 0.65)
+            set_state_safe(f"sovits_speed_{spk}", sdata.get("speed", 0.95))
+            set_state_safe(f"sovits_temp_{spk}", sdata.get("temperature", 0.65))
             if sdata.get("prompt_text"):
-                st.session_state[f"sovits_prompt_{spk}"] = sdata.get("prompt_text")
+                set_state_safe(f"sovits_prompt_{spk}", sdata.get("prompt_text"))
             if sdata.get("ref_audio_path"):
-                st.session_state[f"sovits_saved_path_{spk}"] = sdata.get("ref_audio_path")
-        st.session_state[f"style_select_{spk}"] = style
+                set_state_safe(f"sovits_saved_path_{spk}", sdata.get("ref_audio_path"))
+        set_state_safe(f"style_select_{spk}", style)
 
 def main():
     # 크롬 브라우저 자동 번역으로 인한 React removeChild 크래시 원천 차단
@@ -1127,11 +1134,11 @@ def main():
                         if chosen_engine == "supertonic":
                             p = SUPERTONIC_CHARACTER_PRESETS.get(spk, {"voice": "F1", "style": cur_style})
                             current_cfg = {"engine": "supertonic", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
-                            st.session_state[f"supertonic_voice_{spk}"] = p["voice"]
+                            set_state_safe(f"supertonic_voice_{spk}", p["voice"])
                         elif chosen_engine == "gemini":
                             p = GEMINI_CHARACTER_PRESETS.get(spk, {"voice": "Kore", "style": cur_style})
                             current_cfg = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
-                            st.session_state[f"gemini_voice_{spk}"] = p["voice"]
+                            set_state_safe(f"gemini_voice_{spk}", p["voice"])
                         elif chosen_engine == "gpt-sovits":
                             candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav") if ("나레이션" in spk or "해설" in spk) else ""
                             candidate_prompt = ""
@@ -1154,16 +1161,16 @@ def main():
                                 "top_k": 5,
                                 "top_p": 0.85
                             }
-                            st.session_state[f"sovits_speed_{spk}"] = 0.95
-                            st.session_state[f"sovits_temp_{spk}"] = 0.65
+                            set_state_safe(f"sovits_speed_{spk}", 0.95)
+                            set_state_safe(f"sovits_temp_{spk}", 0.65)
                             if candidate_prompt:
-                                st.session_state[f"sovits_prompt_{spk}"] = candidate_prompt
+                                set_state_safe(f"sovits_prompt_{spk}", candidate_prompt)
                             if candidate_ref:
-                                st.session_state[f"sovits_saved_path_{spk}"] = candidate_ref
+                                set_state_safe(f"sovits_saved_path_{spk}", candidate_ref)
                         else:
                             p = EDGE_CHARACTER_PRESETS.get(spk, {"voice": "ko-KR-SunHiNeural", "style": cur_style, "rate": 0, "pitch": 0})
                             current_cfg = {"engine": "edge-tts", "voice": p["voice"], "style": p.get("style", cur_style), "rate": p.get("rate", 0), "pitch": p.get("pitch", 0)}
-                            st.session_state[f"edge_voice_{spk}"] = p["voice"]
+                            set_state_safe(f"edge_voice_{spk}", p["voice"])
                         st.session_state["voice_settings"][spk] = current_cfg
                         spk_engine = chosen_engine
                         st.rerun()
@@ -1352,7 +1359,7 @@ def main():
                                             pass
                             if auto_spoken:
                                 prompt_text_val = auto_spoken
-                                st.session_state[f"sovits_prompt_{spk}"] = auto_spoken
+                                set_state_safe(f"sovits_prompt_{spk}", auto_spoken)
                                 st.info(f"🎙️ AI 자동 인식 대사: **\"{auto_spoken}\"**")
                         elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
                             effective_ref_audio = st.session_state[saved_ref_key]
@@ -1367,8 +1374,8 @@ def main():
                                 st.info(f"🎧 등록된 참조 음성: **{os.path.basename(effective_ref_audio)}**")
                             with col_a2:
                                 if st.button("🗑️ 오디오 변경", key=f"del_audio_{spk}", help="등록된 참조 오디오를 해제하고 새로 등록합니다."):
-                                    st.session_state[saved_ref_key] = ""
-                                    st.session_state[f"sovits_prompt_{spk}"] = ""
+                                    set_state_safe(saved_ref_key, "")
+                                    set_state_safe(f"sovits_prompt_{spk}", "")
                                     effective_ref_audio = ""
                                     st.rerun()
 
@@ -1445,7 +1452,7 @@ def main():
                                     auto_txt = TTSEngine.transcribe_audio_whisper(effective_ref_audio)
                                     if auto_txt:
                                         prompt_text_val = auto_txt
-                                        st.session_state[f"sovits_prompt_{spk}"] = auto_txt
+                                        set_state_safe(f"sovits_prompt_{spk}", auto_txt)
                                         txt_cache = effective_ref_audio + ".txt"
                                         try:
                                             with open(txt_cache, "w", encoding="utf-8") as cf:
@@ -1471,7 +1478,7 @@ def main():
                                     pass
                             if not prompt_text_val and known_real_txt:
                                 prompt_text_val = known_real_txt
-                                st.session_state[f"sovits_prompt_{spk}"] = known_real_txt
+                                set_state_safe(f"sovits_prompt_{spk}", known_real_txt)
 
                         prompt_input = st.text_input(
                             "참조 오디오 실제 대사",

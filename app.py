@@ -743,9 +743,7 @@ def main():
         # 3. Gemini Flash TTS 및 AI 화자 분석 설정
         gemini_model_options = [
             "gemini-3.1-flash-tts-preview",
-            "gemini-3.8-flash-tts",
             "gemini-2.5-flash-preview-tts",
-            "gemini-3.8-flash-lite-tts",
             "gemini-2.5-pro-preview-tts"
         ]
         curr_model = st.session_state.get("gemini_model", "gemini-3.1-flash-tts-preview")
@@ -772,11 +770,9 @@ def main():
 
             def _format_model_name(m: str) -> str:
                 labels = {
-                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (구글 추천 최신 고품질 전용 모델)",
-                    "gemini-3.8-flash-tts": "🚀 Gemini 3.8 Flash TTS (최신 3.8 고음질 음성 모델)",
-                    "gemini-2.5-flash-preview-tts": "🌟 Gemini 2.5 Flash TTS (안정형 고속 모델)",
-                    "gemini-3.8-flash-lite-tts": "⚡ Gemini 3.8 Flash Lite TTS (초고속 경량 음성 모델)",
-                    "gemini-2.5-pro-preview-tts": "👑 Gemini 2.5 Pro TTS (최고 음질 프로 모델)"
+                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (추천 · 최신 고음질 · 무료/유료 공용)",
+                    "gemini-2.5-flash-preview-tts": "🚀 Gemini 2.5 Flash TTS (안정형 고속 · 무료/유료 공용)",
+                    "gemini-2.5-pro-preview-tts": "💎 Gemini 2.5 Pro TTS (유료 결제 계정 전용 · 무료 키는 한도 0)"
                 }
                 return labels.get(m, m)
 
@@ -788,6 +784,9 @@ def main():
                 key="select_gemini_model"
             )
             st.session_state["gemini_model"] = g_model
+
+            if g_model == "gemini-2.5-pro-preview-tts":
+                st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
             if not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
@@ -1810,6 +1809,10 @@ def main():
                             if old_f.startswith(f"{seg.index:04d}_") and old_f != filename:
                                 try: os.remove(os.path.join(segments_dir, old_f))
                                 except Exception: pass
+                    if seg_engine == "gemini" and i > 1:
+                        # Gemini 무료 API 키 분당 15회(15 RPM) 한도 초과 방지 스마트 페이싱 (2.5초)
+                        import time
+                        time.sleep(2.5)
                     try:
                         TTSEngine.generate_speech(clean_text_to_speak, seg_file_path, cfg)
                     except Exception as e:

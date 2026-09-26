@@ -669,21 +669,19 @@ class TTSEngine:
                 "Output purely the voiced Korean narration or dialogue."
             )
 
-        # 사용 가능한 공식 Google Gemini TTS 모델 목록 (우선순위 순)
+        # 사용 가능한 공식 Google Gemini TTS 모델 목록 (무료/유료 공용 Flash 모델 우선)
         VALID_GEMINI_TTS_MODELS = [
             "gemini-3.1-flash-tts-preview",
-            "gemini-3.8-flash-tts",
             "gemini-2.5-flash-preview-tts",
-            "gemini-3.8-flash-lite-tts",
-            "gemini-2.5-pro-preview-tts",
         ]
 
         req_model = (voice_config.model or "").strip()
-        # 요청 모델이 유효한 TTS 모델이면 최우선 사용
-        if req_model in VALID_GEMINI_TTS_MODELS:
-            models_to_try = [req_model] + [m for m in VALID_GEMINI_TTS_MODELS if m != req_model]
-        else:
-            models_to_try = list(VALID_GEMINI_TTS_MODELS)
+        models_to_try = []
+        if req_model:
+            models_to_try.append(req_model)
+        for m in VALID_GEMINI_TTS_MODELS:
+            if m not in models_to_try:
+                models_to_try.append(m)
 
         last_err = None
         for current_model in models_to_try:
@@ -775,6 +773,9 @@ class TTSEngine:
                 except Exception as e:
                     last_err = e
                     err_str = str(e)
+                    # 만약 Pro 모델에서 무료 키(limit: 0) 오류가 발생하면, 재시도 대기 없이 즉시 무료 지원 Flash 모델로 자동 전환
+                    if "limit: 0" in err_str or ("pro" in current_model.lower() and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str)):
+                        break
                     # 404: 만료/미지원 모델은 재시도하지 않고 다음 후보 모델로 즉시 건너뜀
                     if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
                         break
@@ -784,63 +785,76 @@ class TTSEngine:
                     if attempt < retries:
                         await asyncio.sleep(0.5)
 
-        # 모든 모델 시도 후 429 쿼터 한도인 경우 5초 대기 후 1회 추가 폴백 재시도
+        # 모든 모델 시도 후 429 쿼터 한도인 경우 (15 RPM 무료 쿼터 해제 대기 후 Flash 모델로 자동 복구 재시도)
         if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
-            await asyncio.sleep(5.0)
-            for fallback_model in models_to_try:
-                try:
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda m=fallback_model: client.models.generate_content(
-                            model=m,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=v_name
+            fallback_candidates = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
+            for wait_sec in [4.0, 8.0]:
+                await asyncio.sleep(wait_sec)
+                for fallback_model in fallback_candidates:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        def _call_fb(m=fallback_model):
+                            return client.models.generate_content(
+                                model=m,
+                                contents=text,  # text 변수 정상 전달
+                                config=types.GenerateContentConfig(
+                                    system_instruction=sys_instruct,
+                                    response_modalities=["AUDIO"],
+                                    speech_config=types.SpeechConfig(
+                                        voice_config=types.VoiceConfig(
+                                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                                voice_name=v_name
+                                            )
                                         )
                                     )
                                 )
                             )
-                        )
-                    )
-                    audio_bytes = None
-                    if response and response.candidates:
-                        for candidate in response.candidates:
-                            if candidate.content and candidate.content.parts:
-                                for part in candidate.content.parts:
-                                    if getattr(part, "inline_data", None) and part.inline_data.data:
-                                        audio_bytes = part.inline_data.data
-                                        break
-                            if audio_bytes:
-                                break
-                    if audio_bytes:
-                        temp_wav = output_file + ".retry.wav"
-                        if audio_bytes.startswith(b"RIFF"):
-                            with open(temp_wav, "wb") as f:
-                                f.write(audio_bytes)
-                        else:
-                            with wave.open(temp_wav, "wb") as wf:
-                                wf.setnchannels(1)
-                                wf.setsampwidth(2)
-                                wf.setframerate(24000)
-                                wf.writeframes(audio_bytes)
-                        cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                        if os.path.exists(temp_wav):
-                            try:
-                                os.remove(temp_wav)
-                            except Exception:
-                                pass
-                        return output_file
-                except Exception:
-                    continue
+                        response = await loop.run_in_executor(None, _call_fb)
+                        audio_bytes = None
+                        if response and response.candidates:
+                            for candidate in response.candidates:
+                                if candidate.content and candidate.content.parts:
+                                    for part in candidate.content.parts:
+                                        if getattr(part, "inline_data", None) and part.inline_data.data:
+                                            audio_bytes = part.inline_data.data
+                                            break
+                                if audio_bytes:
+                                    break
+                        if audio_bytes:
+                            temp_wav = output_file + ".retry.wav"
+                            if audio_bytes.startswith(b"RIFF"):
+                                with open(temp_wav, "wb") as f:
+                                    f.write(audio_bytes)
+                            else:
+                                with wave.open(temp_wav, "wb") as wf:
+                                    wf.setnchannels(1)
+                                    wf.setsampwidth(2)
+                                    wf.setframerate(24000)
+                                    wf.writeframes(audio_bytes)
+                            cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
+                            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                            if os.path.exists(temp_wav):
+                                try:
+                                    os.remove(temp_wav)
+                                except Exception:
+                                    pass
+                            return output_file
+                    except Exception as fb_err:
+                        last_err = fb_err
+                        if "429" not in str(fb_err):
+                            break
 
         if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
-            raise RuntimeError(f"Gemini API 분당 요청 한도(Quota)에 일시적으로 도달했습니다. 잠시 후 다시 생성하시거나, 완전 무료인 Supertonic 엔진을 선택해주세요. ({last_err})")
+            if "limit: 0" in str(last_err) and "pro" in str(last_err).lower():
+                raise RuntimeError(
+                    "선택하신 'Gemini 2.5 Pro TTS' 모델은 Google Cloud 유료 결제(Billing) 계정 전용 모델입니다.\n"
+                    "현재 사용 중이신 무료 API 키에서는 한도가 0(limit: 0)으로 설정되어 있습니다.\n"
+                    "▶ 해결 방법: 사이드바에서 무료 지원 모델인 '⚡ Gemini 3.1 Flash'를 선택하시거나, 완전 무료인 'Supertonic 3' 엔진을 사용해주세요."
+                )
+            raise RuntimeError(
+                "Gemini API 분당 요청 한도(무료 키 기준 15 RPM)에 도달했습니다.\n"
+                "잠시(약 30초) 후 다시 시도하시거나, 분당 제한 없이 100% 무제한 무료로 즉시 생성되는 '👑 Supertonic 3' 로컬 엔진을 사용해주세요."
+            )
 
         raise last_err or RuntimeError("모든 Gemini TTS 모델 시도 실패")
 

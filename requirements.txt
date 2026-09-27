@@ -11,3 +11,4 @@ mutagen>=1.47.0
 scipy>=1.11.0
 onnxruntime>=1.16.0
 huggingface-hub>=0.20.0
+gradio_client

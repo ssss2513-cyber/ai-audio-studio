@@ -884,7 +884,7 @@ class TTSEngine:
         if last_err and any(k in str(last_err) for k in ("429", "RESOURCE_EXHAUSTED", "Quota exceeded")):
             if not ("limit: 0" in str(last_err) and "pro" in str(last_err).lower()):
                 fallback_candidates = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
-                for wait_sec in [10.0, 15.0, 25.0]:
+                for wait_sec in [35.0, 35.0, 70.0]:
                     await asyncio.sleep(wait_sec)
                     for key_candidate in ordered_keys:
                         fb_client = genai.Client(api_key=key_candidate)

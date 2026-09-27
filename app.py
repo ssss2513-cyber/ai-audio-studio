@@ -1764,11 +1764,20 @@ def main():
                                             output_file=preview_file,
                                             sample_text=sample_text
                                         )
-                                        if os.path.exists(preview_file):
+                                        if os.path.exists(preview_file) and os.path.getsize(preview_file) > 0:
                                             st.audio(preview_file, format="audio/mp3")
                                             st.caption(f'💬 샘플: "{sample_text}"')
+                                        else:
+                                            st.error("❌ 오디오 파일이 생성되지 않았습니다.\n\n"
+                                                     "**확인 사항:**\n"
+                                                     "1. 코랩 탭에서 서버가 실행 중인지 확인\n"
+                                                     "2. 사이드바 URL이 최신 trycloudflare 주소인지 확인\n"
+                                                     "3. 참조 오디오가 3초 이상인지 확인")
                                     except Exception as e:
-                                        st.error(f"음성 생성 실패: {str(e)}")
+                                        err_msg = str(e)
+                                        st.error(f"❌ 음성 생성 실패:\n\n`{err_msg}`\n\n"
+                                                 f"**원인 추정:**\n"
+                                                 f"{'코랩 서버 꺼짐 또는 URL 만료' if 'connect' in err_msg.lower() or 'connection' in err_msg.lower() else '코랩 API 오류 - 코랩 로그 확인 필요'}")
 
                     # 2.7. XTTS v2 설정 폼 (구글 코랩 16GB GPU 제로샷 복제)
                     elif spk_engine == "xtts":

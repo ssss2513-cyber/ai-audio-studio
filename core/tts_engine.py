@@ -1267,6 +1267,14 @@ class TTSEngine:
                     else:
                         shutil.copy2(temp_audio, output_file)
 
+                    # 빈 오디오 감지 (0kB = 모델 오류) → 즉시 실패, 재시도 안 함
+                    out_size = os.path.getsize(output_file) if os.path.exists(output_file) else 0
+                    if out_size < 2000:
+                        raise RuntimeError(
+                            f"❌ CosyVoice 빈 오디오({out_size}B) - 코랩 세션 재시작 필요\n"
+                            "코랩 → [런타임 → 런타임 다시 시작 및 모두 실행] 후 새 URL 입력"
+                        )
+
                     return output_file
                 except Exception as e:
                     last_err = e

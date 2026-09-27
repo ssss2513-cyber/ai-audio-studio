@@ -146,12 +146,24 @@ if os.path.exists(webui):
     if n2 != t: t = n2; c = True
     if c: open(webui, "w", encoding="utf-8").write(t); print("  ✅ [D] webui.py 패치")
 
-# 패치E: model.py autocast
+# 패치E: model.py autocast → 최신 torch.amp.autocast('cuda') API (빈 오디오 방지)
 mp = f"{cosy_dir}/cosyvoice/cli/model.py"
 if os.path.exists(mp):
     t = open(mp, encoding="utf-8").read()
-    n2 = t.replace("torch.cuda.amp.autocast(self.fp16)", "torch.cuda.amp.autocast(enabled=False)")
-    if n2 != t: open(mp, "w", encoding="utf-8").write(n2); print("  ✅ [E] model.py autocast off")
+    changed = False
+    # 구 API → 신 API (torch.cuda.amp → torch.amp)
+    for old, new in [
+        ("torch.cuda.amp.autocast(self.fp16)", "torch.amp.autocast('cuda', enabled=False)"),
+        ("torch.cuda.amp.autocast(enabled=False)", "torch.amp.autocast('cuda', enabled=False)"),
+        ("torch.cuda.amp.autocast()", "torch.amp.autocast('cuda', enabled=False)"),
+    ]:
+        n2 = t.replace(old, new)
+        if n2 != t:
+            t = n2
+            changed = True
+    if changed:
+        open(mp, "w", encoding="utf-8").write(t)
+        print("  ✅ [E] model.py autocast → torch.amp.autocast('cuda') 최신 API 패치")
 
 # torchaudio.info 패치
 try:

@@ -1253,6 +1253,14 @@ class TTSEngine:
                         continue
 
                     temp_audio = res[0] if isinstance(res, (list, tuple)) else res
+                    # 새 Gradio 버전: 오디오를 dict로 반환 {'path':..., 'url':..., 'name':...}
+                    if isinstance(temp_audio, dict):
+                        temp_audio = (temp_audio.get("path")
+                                      or temp_audio.get("name")
+                                      or temp_audio.get("url")
+                                      or "")
+                    if not temp_audio or not str(temp_audio).strip():
+                        continue
                     if output_file.lower().endswith(".mp3"):
                         cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
                         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)

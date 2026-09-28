@@ -47,7 +47,7 @@ def clean_spoken_text(text: str) -> str:
 
 @dataclass
 class VoiceConfig:
-    engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits", "f5-tts", "xtts"
+    engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits", "f5-tts"
     voice: str = "F1"                     # 보이스 ID (Supertonic: F1~F5, M1~M5 / Gemini: Kore, Charon... / Edge: SunHi...)
     model: str = "gemini-3.1-flash-tts-preview"       # Gemini TTS 전용 모델명
     style: str = "🎤 기본"                # 음성 스타일 (34종 감정/연령/톤)
@@ -71,7 +71,6 @@ class VoiceConfig:
     fragment_interval: float = 0.3       # GPT-SoVITS 문장 사이 간격
     nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
     cosyvoice_url: str = ""              # CosyVoice Colab/WebUI API 주소
-    xtts_url: str = ""                   # XTTS v2 Colab/WebUI API 주소
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -1050,11 +1049,6 @@ class TTSEngine:
         ok, message, _ = check_connection(url)
         return ok, message
 
-    @classmethod
-    def test_xtts_connection(cls, url: str) -> Tuple[bool, str]:
-        from .cosy_colab_client import check_connection
-        ok, message, _ = check_connection(url, engine="xtts")
-        return ok, message
 
     @classmethod
     def generate_cosyvoice_speech(
@@ -1073,17 +1067,6 @@ class TTSEngine:
             float(getattr(voice_config, "speed_factor", 1.0)), output_file,
         )
 
-    @classmethod
-    def generate_xtts_speech(
-        cls, text: str, output_file: str, voice_config: VoiceConfig, retries: int = 2
-    ) -> str:
-        """XTTS v2 Colab API; one request, Korean voice cloning, no transcript required."""
-        from .cosy_colab_client import synthesize
-        return synthesize(
-            getattr(voice_config, "xtts_url", ""), clean_spoken_text(text),
-            getattr(voice_config, "ref_audio_path", ""), "",
-            float(getattr(voice_config, "speed_factor", 1.0)), output_file, engine="xtts",
-        )
 
     @classmethod
     def test_gpt_sovits_connection(cls, api_url: str = "http://127.0.0.1:9880") -> Tuple[bool, str]:
@@ -1148,16 +1131,15 @@ class TTSEngine:
         elif voice_config.engine == "cosyvoice":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_cosyvoice_speech(text, output_file, voice_config))
-        elif voice_config.engine == "xtts":
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, lambda: cls.generate_xtts_speech(text, output_file, voice_config))
         elif voice_config.engine == "gpt-sovits":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_gpt_sovits_speech(text, output_file, voice_config))
         elif voice_config.engine == "gemini":
             return await cls.generate_gemini_speech_async(text, output_file, voice_config)
-        else:
+        elif voice_config.engine == "edge-tts":
             return await cls.generate_edge_speech_async(text, output_file, voice_config)
+        else:
+            raise ValueError("지원하지 않는 음성 엔진입니다. 화자 카드에서 엔진을 다시 선택해주세요.")
 
     @classmethod
     def generate_speech(
@@ -1170,15 +1152,13 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
-        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits", "f5-tts", "cosyvoice", "xtts"):
+        if voice_config and voice_config.engine in ("supertonic", "gpt-sovits", "f5-tts", "cosyvoice"):
             if voice_config.engine == "supertonic":
                 return cls.generate_supertonic_speech(text, output_file, voice_config)
             elif voice_config.engine == "f5-tts":
                 return cls.generate_f5_tts_speech(text, output_file, voice_config)
             elif voice_config.engine == "cosyvoice":
                 return cls.generate_cosyvoice_speech(text, output_file, voice_config)
-            elif voice_config.engine == "xtts":
-                return cls.generate_xtts_speech(text, output_file, voice_config)
             else:
                 return cls.generate_gpt_sovits_speech(text, output_file, voice_config)
 
@@ -1220,7 +1200,6 @@ class TTSEngine:
                 pitch=str(pitch),
                 style=str(style),
                 cosyvoice_url=kwargs.get("cosyvoice_url", ""),
-                xtts_url=kwargs.get("xtts_url", ""),
                 gpt_sovits_url=kwargs.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
                 f5_tts_url=kwargs.get("f5_tts_url", "http://127.0.0.1:7860"),
                 ref_audio_path=kwargs.get("ref_audio_path", ""),

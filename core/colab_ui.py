@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parent.parent
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
-    "xtts": ("XTTS v2", "xtts_url", "input_xtts_url", TTSEngine.test_xtts_connection),
 }
 
 
@@ -22,8 +21,8 @@ def render_connections(mode):
     st.info("이용자마다 본인 구글 계정으로 코랩을 실행합니다. 내 코랩 주소를 아래에 넣어주세요.")
     with st.expander("처음 이용할 때 · 연결 순서", expanded=not any(st.session_state.get(ENGINES[e][1]) for e in selected)):
         st.markdown(
-            "1. 아래에서 사용할 엔진의 **코랩 파일을 다운로드**합니다.\n"
-            "2. **Google Colab 열기** → 본인 구글 계정 로그인 → **파일 → 노트북 업로드**로 파일을 엽니다.\n"
+            "1. 아래에서 사용할 엔진의 **코랩 바로 열기**를 누릅니다.\n"
+            "2. 본인 구글 계정으로 로그인합니다. 파일로 받았다면 **파일 → 노트북 업로드**로 엽니다.\n"
             "3. **런타임 → 런타임 유형 변경 → T4 GPU**를 선택하고 **1번 설치 셀**을 실행합니다.\n"
             "4. 준비 완료 후 **4번 연결 셀**에서 연결 항목을 체크하고 실행합니다.\n"
             "5. 출력된 **프로그램 연결 주소 전체**를 아래에 붙여넣고 **연결 확인**을 누릅니다.\n"
@@ -34,19 +33,18 @@ def render_connections(mode):
     notebooks = []
     if "gpt-sovits" in selected:
         notebooks.append(("GPT-SoVITS v4 코랩 받기", "GPT_SoVITS_Colab_API.ipynb"))
-    if any(e in selected for e in ("cosyvoice", "xtts")):
-        notebooks.append(("CosyVoice + XTTS 코랩 받기", "CosyVoice_XTTS_Colab_API.ipynb"))
+    if "cosyvoice" in selected:
+        notebooks.append(("CosyVoice 2 코랩 받기", "CosyVoice_Colab_API.ipynb"))
     for label, filename in notebooks:
+        st.link_button(label.replace(" 받기", " 바로 열기 ↗"),
+                       "https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/" + filename,
+                       use_container_width=True)
         path = ROOT / filename
         if path.is_file():
             st.download_button("⬇️ " + label, data=path.read_bytes(), file_name=filename,
                                mime="application/x-ipynb+json", key="notebook_" + filename,
                                use_container_width=True)
     st.link_button("Google Colab 열기 ↗", "https://colab.research.google.com/", use_container_width=True)
-    if mode in ("cosyvoice", "xtts"):
-        st.caption("통합 코랩 1번에서 지금 사용할 엔진만 선택할 수 있습니다.")
-    if "xtts" in selected:
-        st.caption("XTTS 공개 모델은 비상업용입니다. [이용 조건](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt)")
     for engine in selected:
         label, setting, widget, checker = ENGINES[engine]
         if widget not in st.session_state:

@@ -1,4 +1,4 @@
-"""Client for the self-contained CosyVoice / XTTS Colab notebook (API v1)."""
+"""Client for the self-contained CosyVoice 2 Colab notebook (API v1)."""
 import io
 import math
 import os
@@ -13,9 +13,7 @@ import requests
 
 ENGINES = {
     "cosyvoice": ("ai-voice-studio-cosyvoice", "CosyVoice 2"),
-    "xtts": ("ai-voice-studio-xtts", "XTTS v2"),
 }
-XTTS_LICENSE_URL = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"
 
 
 
@@ -56,7 +54,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
     base = normalize_url(url)
     if not text.strip():
         raise ValueError("생성할 대사를 입력해주세요.")
-    if engine == "cosyvoice" and not prompt_text.strip():
+    if not prompt_text.strip():
         raise ValueError("'참조 오디오 실제 대사'에 녹음에서 말한 내용을 그대로 입력해주세요.")
     if not math.isfinite(speed) or not 0.5 <= speed <= 2.0:
         raise ValueError("말하기 속도는 0.5~2.0 사이로 설정해주세요.")
@@ -113,10 +111,5 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                 raise RuntimeError("MP3 변환 실패: " + result.stderr[-600:])
         else:
             completed = wav_path
-        if engine == "xtts":
-            notice = Path(folder) / "license.txt"
-            notice.write_text("XTTS v2 model and output: Coqui Public Model License (non-commercial).\n"
-                              + XTTS_LICENSE_URL + "\n", encoding="utf-8")
-            os.replace(notice, str(target) + ".license.txt")
         os.replace(completed, target)
     return str(output_file)

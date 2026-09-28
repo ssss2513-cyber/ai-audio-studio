@@ -135,6 +135,8 @@ def setup():
     if missing:
         raise RuntimeError('모델 다운로드가 완전하지 않습니다: ' + ', '.join(missing))
     env = os.environ.copy()
+    # The isolated worker renders no notebook plots and may not have matplotlib_inline installed.
+    env['MPLBACKEND'] = 'Agg'
     env['PYTHONPATH'] = os.pathsep.join([str(SOURCE), str(SOURCE / 'third_party/Matcha-TTS')])
     libs = [str(p) for p in (ROOT / 'venv/lib/python3.10/site-packages/nvidia').glob('*/lib')]
     env['LD_LIBRARY_PATH'] = os.pathsep.join(libs + [env.get('LD_LIBRARY_PATH', '')])

@@ -205,6 +205,8 @@ def setup():
     }}
     (ROOT / 'tts-v4.json').write_text(json.dumps(config))
     env = os.environ.copy()
+    # Use a non-interactive backend in the isolated worker instead of inheriting Colab's inline backend.
+    env['MPLBACKEND'] = 'Agg'
     env.update(USE_TF='0', TRANSFORMERS_NO_TF='1', TOKENIZERS_PARALLELISM='false',
                SOVITS_ACCESS_TOKEN=secrets.token_urlsafe(24))
     env['PYTHONPATH'] = os.pathsep.join([str(SOURCE), str(SOURCE / 'GPT_SoVITS')])

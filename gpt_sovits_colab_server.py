@@ -7,18 +7,21 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.parse
+import zipfile
 
 SOURCE_REVISION = '48b1a0169a28582a8984402f82cf438d3bfa6aca'
 MODEL_REVISION = '336b2ec4e8d4ac74740798dd40af44e74659ecaf'
@@ -28,17 +31,96 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'GPT_SoVITS/pretrained_models'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-gpt-sovits'
+NLTK_DATA_REVISION = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
+# Official nltk_data/index.xml at the revision above supplies sizes and SHA-256.
+NLTK_PACKAGES = (
+    ('taggers', 'averaged_perceptron_tagger', 2526731,
+     'e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9'),
+    ('taggers', 'averaged_perceptron_tagger_eng', 1539115,
+     '6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b'),
+    ('corpora', 'cmudict', 896069,
+     'd07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6'),
+    ('tokenizers', 'punkt', 13905355,
+     '51c3078994aeaf650bfc8e028be4fb42b4a0d177d41c012b6a983979653660ec'),
+    ('tokenizers', 'punkt_tab', 4319076,
+     'e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106'),
+)
+
+
+class _NoDictionaryRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError('발음 사전 다운로드 주소가 변경되었습니다. 최신 코랩 파일을 사용해주세요.')
+
+
+def prepare_nltk_data():
+    """Install fixed, verified official archives without the remote NLTK index.
+
+    This follows NLTK's manual installation route. Proxy and TLS settings are
+    preserved; no NLTK security opt-outs or dependency downgrades are applied.
+    """
+    data_root = ROOT / 'nltk_data'
+    data_root.mkdir(parents=True, exist_ok=True)
+    os.environ['NLTK_DATA'] = str(data_root)
+    opener = urllib.request.build_opener(_NoDictionaryRedirect())
+    for number, (subdir, name, size, digest) in enumerate(NLTK_PACKAGES, 1):
+        destination = data_root / subdir
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / name
+        archive_path = destination / (name + '.zip')
+        archive_bytes = archive_path.read_bytes() if archive_path.is_file() else b''
+        archive_valid = (len(archive_bytes) == size
+                         and hashlib.sha256(archive_bytes).hexdigest() == digest)
+        marker = data_root / (name + '.sha256')
+        if (archive_valid and target.is_dir() and marker.is_file()
+                and marker.read_text().strip() == digest):
+            print(f'✅ 발음 사전 {number}/{len(NLTK_PACKAGES)} 준비됨: {name}', flush=True)
+            continue
+        print(f'▶ 발음 사전 {number}/{len(NLTK_PACKAGES)} 다운로드: {name}', flush=True)
+        url = (f'https://raw.githubusercontent.com/nltk/nltk_data/{NLTK_DATA_REVISION}'
+               f'/packages/{subdir}/{name}.zip')
+        if not archive_valid:
+            with opener.open(url, timeout=60) as response:
+                archive_bytes = response.read(size + 1)
+        if len(archive_bytes) != size or hashlib.sha256(archive_bytes).hexdigest() != digest:
+            raise RuntimeError(f'발음 사전 파일 검증 실패: {name}. 다운로드를 다시 확인해주세요.')
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            members = archive.infolist()
+            if sum(member.file_size for member in members) > 100 * 1024 * 1024:
+                raise RuntimeError(f'발음 사전 압축 크기 오류: {name}')
+            for member in members:
+                path = PurePosixPath(member.filename)
+                if (path.is_absolute() or '..' in path.parts or not path.parts
+                        or path.parts[0] != name or '\\' in member.filename
+                        or stat.S_ISLNK(member.external_attr >> 16)):
+                    raise RuntimeError(f'발음 사전 압축 경로 오류: {name}')
+            with tempfile.TemporaryDirectory(prefix='nltk-', dir=data_root) as stage:
+                archive.extractall(stage)
+                extracted = Path(stage) / name
+                if not extracted.is_dir():
+                    raise RuntimeError(f'발음 사전 압축 내용 오류: {name}')
+                if target.is_dir():
+                    shutil.rmtree(target)
+                extracted.replace(target)
+        # g2p_en checks for the .zip itself before deciding whether to download.
+        temporary_archive = archive_path.with_suffix('.zip.tmp')
+        temporary_archive.write_bytes(archive_bytes)
+        temporary_archive.replace(archive_path)
+        marker.write_text(digest, encoding='ascii')
+        print(f'✅ 발음 사전 {number}/{len(NLTK_PACKAGES)} 설치 완료: {name}', flush=True)
 
 
 def run(args, label):
     print('\n▶ ' + label, flush=True)
     with (ROOT / 'setup.log').open('a', encoding='utf-8') as log:
+        log.write('\n▶ ' + label + '\n')
+        log.flush()
         process = subprocess.Popen([str(x) for x in args], stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
         try:
             for line in process.stdout:
                 print(line, end='', flush=True)
                 log.write(line)
+                log.flush()
             code = process.wait()
         except BaseException:
             process.terminate()
@@ -99,8 +181,13 @@ def setup():
              'soundfile', 'requests', 'huggingface-hub==0.36.0'], '공식 의존성 설치 (한국어 발음 변환 포함)')
         run([PYTHON, '-m', 'pip', 'check'], '의존성 확인')
         marker.write_text(stamp)
-    run([PYTHON, '-c', "import nltk; [nltk.download(x, raise_on_error=True) for x in "
-         "['averaged_perceptron_tagger','averaged_perceptron_tagger_eng','cmudict','punkt','punkt_tab']]"], '발음 사전 준비')
+    prepare_nltk_data()
+    run([PYTHON, '-c',
+         "import nltk; from nltk.corpus import cmudict; "
+         "assert cmudict.words(); "
+         "assert nltk.pos_tag(['voice', 'studio']); "
+         "assert nltk.word_tokenize('Voice studio is ready.'); "
+         "print('발음 사전 읽기 정상')"], '발음 사전 읽기 확인')
     files = ['s1v3.ckpt', 'gsv-v4-pretrained/s2Gv4.pth', 'gsv-v4-pretrained/vocoder.pth',
              'chinese-roberta-wwm-ext-large/*', 'chinese-hubert-base/*']
     run([PYTHON, '-c', 'from huggingface_hub import snapshot_download; '
@@ -317,7 +404,13 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=9880)
     args = parser.parse_args()
     if args.setup:
-        setup()
+        try:
+            setup()
+        except Exception:
+            ROOT.mkdir(parents=True, exist_ok=True)
+            with (ROOT / 'setup.log').open('a', encoding='utf-8') as log:
+                log.write('\n' + traceback.format_exc())
+            raise
     elif args.serve:
         serve(args.port)
     else:

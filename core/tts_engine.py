@@ -45,87 +45,6 @@ def clean_spoken_text(text: str) -> str:
     
     return text.strip()
 
-def optimize_text_for_sovits(text: str, max_chunk_len: int = 40) -> str:
-    """
-    GPT-SoVITS의 자기회귀(AR) 모델 특성상 문장이 35~40자 이상 길어지면
-    호흡 조절 실패, 주의집중(Attention) 이탈로 인해 뒤로 갈수록 말이 빨라지고
-    발음 뭉개짐(slurring), 씹힘, 톤 변형이 발생합니다.
-    
-    미리듣기(20~25자)처럼 또렷하고 선명한 고음질을 전체 생성에서도 유지하기 위해,
-    쉼표(,)나 마침표 없이 40자를 초과하는 긴 절(Clause)을
-    한국어 문맥(접속사, 연결어미, 띄어쓰기)을 고려해 자연스럽게 쉼표(,)로 분할합니다.
-    """
-    if not text or len(text) <= max_chunk_len:
-        return text
-
-    # 문장부호 단위로 1차 분할
-    tokens = re.split(r'([,.:;?!~…\n]+)', text)
-    result_parts = []
-    
-    # 한국어에서 호흡을 쉬어가기 가장 자연스러운 연결어미 및 접속어
-    endings = (
-        '있었고', '있으며', '있지만', '있는데', '하는데', '였는데', '되었고', '보았고',
-        '그리고', '하지만', '그러나', '그런데', '때문에', '따라서',
-        '고', '며', '면서', '면', '지만', '는데', '은데', '인데', '하여', '하고', '더니', '거든', '려고'
-    )
-    
-    for token in tokens:
-        if not token:
-            continue
-        if re.match(r'^[,.:;?!~…\n]+$', token):
-            result_parts.append(token)
-            continue
-            
-        cur = token.strip()
-        while len(cur) > max_chunk_len:
-            search_window_start = 20
-            search_window_end = min(len(cur), max_chunk_len + 5)
-            sub = cur[:search_window_end]
-            
-            words = sub.split(' ')
-            split_pos = -1
-            
-            # 1순위: 긴 연결어미 패턴 일치
-            acc_len = 0
-            for w in words[:-1]:
-                acc_len += len(w) + 1
-                if acc_len >= search_window_start:
-                    clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                    for e in endings:
-                        if clean_w.endswith(e):
-                            split_pos = acc_len - 1
-                            break
-                    if split_pos != -1:
-                        break
-            
-            # 2순위: 20자 ~ max_chunk_len 사이의 일반 띄어쓰기 위치
-            if split_pos == -1:
-                acc_len = 0
-                best_space = -1
-                for w in words[:-1]:
-                    acc_len += len(w) + 1
-                    if search_window_start <= acc_len <= max_chunk_len + 5:
-                        best_space = acc_len - 1
-                if best_space != -1:
-                    split_pos = best_space
-            
-            # 3순위: 그래도 없으면 max_chunk_len 위치
-            if split_pos == -1 or split_pos <= 5:
-                split_pos = max_chunk_len
-            
-            part = cur[:split_pos].strip()
-            if part:
-                if not part.endswith((',', '.', '!', '?', ';', ':')):
-                    result_parts.append(part + ', ')
-                else:
-                    result_parts.append(part + ' ')
-            cur = cur[split_pos:].strip()
-            
-        if cur:
-            result_parts.append(cur)
-            
-    return ''.join(result_parts).strip()
-
 @dataclass
 class VoiceConfig:
     engine: str = "supertonic"            # "supertonic", "gemini", "edge-tts", "gpt-sovits", "f5-tts", "xtts"
@@ -144,10 +63,12 @@ class VoiceConfig:
     prompt_lang: str = "ko"               # 참조 오디오 언어 (ko, en, zh, ja)
     text_lang: str = "ko"                 # 생성할 대사 언어 (ko, en, zh, ja)
     speed_factor: float = 1.0             # 배속 (0.5 ~ 2.0)
-    temperature: float = 0.65            # GPT-SoVITS 샘플링 온도
-    top_k: int = 5                       # GPT-SoVITS Top-k
-    top_p: float = 0.85                  # GPT-SoVITS Top-p
+    temperature: float = 1.0            # GPT-SoVITS 샘플링 온도
+    top_k: int = 15                       # GPT-SoVITS Top-k
+    top_p: float = 1.0                  # GPT-SoVITS Top-p
     text_split_method: str = "cut5"      # GPT-SoVITS 텍스트 분할 (cut5)
+    sample_steps: int = 32               # GPT-SoVITS v4 생성 단계
+    fragment_interval: float = 0.3       # GPT-SoVITS 문장 사이 간격
     nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
     cosyvoice_url: str = ""              # CosyVoice Colab/WebUI API 주소
     xtts_url: str = ""                   # XTTS v2 Colab/WebUI API 주소
@@ -1125,469 +1046,55 @@ class TTSEngine:
 
     @classmethod
     def test_cosyvoice_connection(cls, url: str) -> Tuple[bool, str]:
-        if not url:
-            return False, "CosyVoice 주소를 입력해주세요."
-        import requests
-        clean_url = url.rstrip("/")
-        try:
-            res = requests.get(clean_url, timeout=5)
-            return True, f"✅ CosyVoice 서버({clean_url})에 성공적으로 연결되었습니다!"
-        except Exception as e:
-            return False, f"서버 연결 실패: '{clean_url}' 에 연결할 수 없습니다. (구글 코랩 실행 상태를 확인해주세요: {str(e)})"
+        from .cosy_colab_client import check_connection
+        ok, message, _ = check_connection(url)
+        return ok, message
 
     @classmethod
     def test_xtts_connection(cls, url: str) -> Tuple[bool, str]:
-        if not url:
-            return False, "XTTS v2 주소를 입력해주세요."
-        import requests
-        clean_url = url.rstrip("/")
-        try:
-            res = requests.get(clean_url, timeout=5)
-            return True, f"✅ XTTS v2 서버({clean_url})에 성공적으로 연결되었습니다!"
-        except Exception as e:
-            return False, f"서버 연결 실패: '{clean_url}' 에 연결할 수 없습니다. (구글 코랩 실행 상태를 확인해주세요: {str(e)})"
+        from .cosy_colab_client import check_connection
+        ok, message, _ = check_connection(url, engine="xtts")
+        return ok, message
 
     @classmethod
     def generate_cosyvoice_speech(
-        cls,
-        text: str,
-        output_file: str,
-        voice_config: VoiceConfig,
-        retries: int = 2
+        cls, text: str, output_file: str, voice_config: VoiceConfig, retries: int = 2
     ) -> str:
-        """
-        CosyVoice 3.0 / 2.0 (Google Colab Gradio API)를 통한 음성 합성 (Voice Cloning)
-        """
+        """CosyVoice 2 standalone Colab API; errors do not trigger duplicate GPU jobs."""
+        from .cosy_colab_client import synthesize
         text = clean_spoken_text(text)
-        if not text:
-            raise ValueError("생성할 텍스트가 비어 있습니다.")
-
         ref_path = getattr(voice_config, "ref_audio_path", "")
-        if not ref_path:
-            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
-        if not os.path.exists(ref_path):
-            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
-
-        actual_ref_path = os.path.abspath(ref_path)
-        prompt_txt = getattr(voice_config, "prompt_text", "").strip()
-        if not prompt_txt:
-            txt_cache = actual_ref_path + ".txt"
-            if os.path.exists(txt_cache):
-                try:
-                    with open(txt_cache, "r", encoding="utf-8") as cf:
-                        prompt_txt = cf.read().strip()
-                except Exception:
-                    pass
-            if not prompt_txt:
-                prompt_txt = cls.transcribe_audio_whisper(actual_ref_path)
-
-        # 1. 참조 오디오 길이 자동 보정 (3.5초 미만일 경우 HiFT 보코더 conv1d kernel size 에러 방지를 위해 자동 루프 패딩)
-        clean_ref_path = actual_ref_path
-        try:
-            import soundfile as sf
-            import numpy as np
-            import tempfile
-            audio_info = sf.info(actual_ref_path)
-            if audio_info.duration < 3.5:
-                data, sr = sf.read(actual_ref_path)
-                repeats = int(np.ceil(4.0 / max(audio_info.duration, 0.1)))
-                padded_data = np.tile(data, (repeats, 1) if data.ndim > 1 else repeats)
-                padded_path = os.path.join(tempfile.gettempdir(), f"cosy_padded_{int(time.time()*1000)}.wav")
-                sf.write(padded_path, padded_data, sr)
-                clean_ref_path = padded_path
-        except Exception as e:
-            logger.warning(f"CosyVoice 참조 오디오 길이 보정 경고: {e}")
-
-        # 2. 텍스트 길이 보정 (2자 이하의 너무 짧은 단어는 보코더 프레임 부족 에러 방지)
-        send_text = text.strip()
-        if len(send_text) < 4 and not send_text.endswith((".", "!", "?", "~")):
-            send_text = send_text + "..."
-
-        api_url = getattr(voice_config, "cosyvoice_url", "")
-        if not api_url:
-            raise ValueError("CosyVoice 코랩 접속 주소(URL)를 입력해주세요.")
-        api_url = api_url.rstrip("/")
-
-        speed_val = float(getattr(voice_config, "speed_factor", 1.0) or 1.0)
-
-        from gradio_client import Client, handle_file
-        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-        last_err = None
-
-        # 3. 3초 고속 복제 시도 후 실패 시 跨语种复刻(크로스 링구얼 모드)로 자동 폴백
-        modes_to_try = [("3s极速复刻", prompt_txt), ("跨语种复刻", "")]
-        for attempt in range(1, retries + 1):
-            for mode_name, p_text in modes_to_try:
-                try:
-                    client = Client(api_url, verbose=False)
-                    try:
-                        res = client.predict(
-                            send_text,                     # tts_text
-                            mode_name,                     # mode_checkbox_group
-                            "",                            # sft_dropdown
-                            p_text,                        # prompt_text
-                            handle_file(clean_ref_path),   # prompt_wav_upload
-                            None,                          # prompt_wav_record
-                            "",                            # instruct_text
-                            0,                             # seed
-                            False,                         # stream (bool)
-                            speed_val,                     # speed
-                            api_name="/generate_audio"
-                        )
-                    except Exception:
-                        res = client.predict(
-                            tts_text=send_text,
-                            mode_checkbox_group=mode_name,
-                            sft_dropdown="",
-                            prompt_text=p_text,
-                            prompt_wav_upload=handle_file(clean_ref_path),
-                            prompt_wav_record=None,
-                            instruct_text="",
-                            seed=0,
-                            stream=False,
-                            speed=speed_val,
-                            api_name="/generate_audio"
-                        )
-
-                    if not res:
-                        continue
-
-                    temp_audio = res[0] if isinstance(res, (list, tuple)) else res
-                    # 새 Gradio 버전: 오디오를 dict로 반환 {'path':..., 'url':..., 'name':...}
-                    if isinstance(temp_audio, dict):
-                        temp_audio = (temp_audio.get("path")
-                                      or temp_audio.get("name")
-                                      or temp_audio.get("url")
-                                      or "")
-                    if not temp_audio or not str(temp_audio).strip():
-                        continue
-                    if output_file.lower().endswith(".mp3"):
-                        cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                    else:
-                        shutil.copy2(temp_audio, output_file)
-
-                    # 빈 오디오 감지 (0kB = 모델 오류) → 즉시 실패, 재시도 안 함
-                    out_size = os.path.getsize(output_file) if os.path.exists(output_file) else 0
-                    if out_size < 2000:
-                        raise RuntimeError(
-                            f"❌ CosyVoice 빈 오디오({out_size}B) - 코랩 세션 재시작 필요\n"
-                            "코랩 → [런타임 → 런타임 다시 시작 및 모두 실행] 후 새 URL 입력"
-                        )
-
-                    return output_file
-                except Exception as e:
-                    last_err = e
-                    continue
-            if attempt < retries:
-                time.sleep(1.0)
-
-        if last_err:
-            raise last_err
-        raise RuntimeError("CosyVoice 음성 파일 생성 실패 (결과 없음)")
+        prompt = (getattr(voice_config, "prompt_text", "") or "").strip()
+        if not prompt and ref_path and os.path.isfile(ref_path + ".txt"):
+            with open(ref_path + ".txt", encoding="utf-8") as saved:
+                prompt = saved.read().strip()
+        return synthesize(
+            getattr(voice_config, "cosyvoice_url", ""), text, ref_path, prompt,
+            float(getattr(voice_config, "speed_factor", 1.0)), output_file,
+        )
 
     @classmethod
     def generate_xtts_speech(
-        cls,
-        text: str,
-        output_file: str,
-        voice_config: VoiceConfig,
-        retries: int = 2
+        cls, text: str, output_file: str, voice_config: VoiceConfig, retries: int = 2
     ) -> str:
-        """
-        XTTS v2 (Google Colab Gradio API)를 통한 음성 합성 (Voice Cloning)
-        """
-        text = clean_spoken_text(text)
-        if not text:
-            raise ValueError("생성할 텍스트가 비어 있습니다.")
-
-        ref_path = getattr(voice_config, "ref_audio_path", "")
-        if not ref_path:
-            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
-        if not os.path.exists(ref_path):
-            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
-
-        actual_ref_path = os.path.abspath(ref_path)
-        api_url = getattr(voice_config, "xtts_url", "")
-        if not api_url:
-            raise ValueError("XTTS v2 코랩 접속 주소(URL)를 입력해주세요.")
-        api_url = api_url.rstrip("/")
-
-        from gradio_client import Client, handle_file
-        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-        last_err = None
-
-        for attempt in range(1, retries + 1):
-            try:
-                client = Client(api_url, verbose=False)
-                res = client.predict(
-                    handle_file(actual_ref_path),
-                    text,
-                    "ko",
-                    api_name="/predict"
-                )
-                if not res:
-                    raise RuntimeError("XTTS v2 음성 파일 생성 실패 (결과 없음)")
-
-                temp_audio = res[0] if isinstance(res, (list, tuple)) else res
-                if output_file.lower().endswith(".mp3"):
-                    cmd = ["ffmpeg", "-y", "-i", temp_audio, "-b:a", "192k", output_file]
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                else:
-                    shutil.copy2(temp_audio, output_file)
-
-                return output_file
-            except Exception as e:
-                last_err = e
-                if attempt == retries:
-                    raise last_err
-                time.sleep(1.0)
-
+        """XTTS v2 Colab API; one request, Korean voice cloning, no transcript required."""
+        from .cosy_colab_client import synthesize
+        return synthesize(
+            getattr(voice_config, "xtts_url", ""), clean_spoken_text(text),
+            getattr(voice_config, "ref_audio_path", ""), "",
+            float(getattr(voice_config, "speed_factor", 1.0)), output_file, engine="xtts",
+        )
 
     @classmethod
     def test_gpt_sovits_connection(cls, api_url: str = "http://127.0.0.1:9880") -> Tuple[bool, str]:
-        """
-        GPT-SoVITS API 서버 연결 가능 여부 테스트
-        """
-        import requests
-        base_url = api_url.replace("/tts", "").rstrip("/")
-        try:
-            res = requests.get(f"{base_url}/", timeout=3)
-            return True, f"GPT-SoVITS 서버({base_url})에 성공적으로 연결되었습니다!"
-        except Exception:
-            try:
-                res = requests.get(f"{base_url}/tts", timeout=3)
-                return True, f"GPT-SoVITS 서버({base_url}) 연결 확인 완료!"
-            except requests.exceptions.ConnectionError:
-                return False, f"서버 연결 실패: '{base_url}' 주소에 응답하는 GPT-SoVITS API 서버가 없습니다. (포트 9880 실행 여부를 확인해주세요)"
-            except Exception as e:
-                return False, f"서버 연결 실패: {str(e)}"
+        from .sovits_client import check_connection
+        return check_connection(api_url)
 
     @classmethod
-    def generate_gpt_sovits_speech(
-        cls,
-        text: str,
-        output_file: str,
-        voice_config: VoiceConfig,
-        retries: int = 2
-    ) -> str:
-        """
-        GPT-SoVITS 로컬/원격 API를 통한 음성 합성 (Voice Cloning)
-        """
-        text = clean_spoken_text(text)
-        import requests
-        api_url = getattr(voice_config, "gpt_sovits_url", "http://127.0.0.1:9880/tts")
-        if not api_url.endswith("/tts"):
-            api_url = api_url.rstrip("/") + "/tts"
-
-        ref_path = getattr(voice_config, "ref_audio_path", "")
-        if not ref_path:
-            raise ValueError("참조 오디오(.wav 또는 .mp3) 파일이 지정되지 않았습니다.")
-        if not os.path.exists(ref_path):
-            raise FileNotFoundError(f"참조 오디오 파일을 찾을 수 없습니다: '{ref_path}'")
-        if os.path.isdir(ref_path):
-            raise IsADirectoryError(
-                f"입력하신 경로('{ref_path}')는 파일이 아니라 폴더(디렉토리)입니다.\n"
-                f"폴더 안의 실제 오디오 파일(예: sample.wav 또는 참고 TTS.wav) 전체 경로를 입력해주세요."
-            )
-
-        import hashlib
-        actual_ref_path = os.path.abspath(ref_path)
-        ref_file_hash = "default"
-        try:
-            with open(actual_ref_path, "rb") as rf:
-                ref_raw_bytes = rf.read()
-            ref_file_hash = hashlib.md5(ref_raw_bytes).hexdigest()[:12]
-        except Exception:
-            pass
-
-        was_trimmed = False
-        try:
-            import soundfile as sf
-            import numpy as np
-            info = sf.info(actual_ref_path)
-            
-            cache_dir = os.path.join(os.path.dirname(os.path.abspath(output_file)), "ref_cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            safe_base = os.path.splitext(os.path.basename(actual_ref_path))[0]
-            safe_base = "".join(c for c in safe_base if c.isalnum() or c in ('_', '-'))
-            trimmed_path = os.path.join(cache_dir, f"{safe_base}_{ref_file_hash}_norm.wav")
-
-            # 1. 음원 로드 및 모노 변환
-            data, sr = sf.read(actual_ref_path)
-            if data.ndim > 1:
-                data = np.mean(data, axis=1)
-
-            # 2. 음원 길이 최적화 (10초 초과 시에만 5.0초 ~ 8.5초 사이의 무음 밸리 탐색)
-            duration = len(data) / sr
-            if duration > 10.0:
-                win = int(sr * 0.1)
-                hop = int(sr * 0.05)
-                rms = np.array([np.sqrt(np.mean(data[i:i+win]**2)) for i in range(0, len(data)-win, hop)])
-                times = np.arange(len(rms)) * (hop / sr)
-                
-                mask = (times >= 5.0) & (times <= 8.5)
-                if np.any(mask):
-                    sub_rms = rms[mask]
-                    sub_times = times[mask]
-                    best_cut_sec = float(sub_times[np.argmin(sub_rms)])
-                else:
-                    best_cut_sec = min(8.0, duration)
-                data = data[:int(best_cut_sec * sr)]
-                was_trimmed = True
-
-            # 3. 음량 정규화 (-1.0 dBFS Peak Normalization)
-            max_amp = np.max(np.abs(data))
-            if max_amp > 0.001:
-                data = (data / max_amp) * 0.891  # 0.891 = -1.0 dBFS
-
-            sf.write(trimmed_path, data, sr)
-            actual_ref_path = os.path.abspath(trimmed_path)
-        except Exception:
-            was_trimmed = False
-
-        # 4. prompt_text 정밀 동기화 (Whisper 검증)
-        user_prompt_txt = getattr(voice_config, "prompt_text", "").strip()
-        txt_cache = actual_ref_path + ".txt"
-        
-        # 실제 음원을 Whisper로 직접 청취하여 정답 텍스트 추출
-        real_spoken_txt = ""
-        if os.path.exists(txt_cache):
-            try:
-                with open(txt_cache, "r", encoding="utf-8") as cf:
-                    real_spoken_txt = cf.read().strip()
-            except Exception:
-                pass
-        if not real_spoken_txt:
-            real_spoken_txt = cls.transcribe_audio_whisper(actual_ref_path)
-            if real_spoken_txt:
-                try:
-                    with open(txt_cache, "w", encoding="utf-8") as cf:
-                        cf.write(real_spoken_txt)
-                except Exception:
-                    pass
-
-        # 검증: 음원이 10초 초과로 잘린 경우(was_trimmed),
-        # 반드시 잘린 음원에 실제로 발음된 real_spoken_txt를 사용하여 텍스트-음소 불일치 뭉개짐 방지
-        if was_trimmed and real_spoken_txt:
-            prompt_txt = real_spoken_txt
-        elif user_prompt_txt:
-            prompt_txt = user_prompt_txt
-        elif real_spoken_txt:
-            prompt_txt = real_spoken_txt
-        else:
-            prompt_txt = ""
-
-        # prompt_txt의 실제 언어 자동 감지 (한글이 없고 알파벳이면 en으로 자동 전환하여 파열음/잡음 차단)
-        raw_p_lang = getattr(voice_config, "prompt_lang", "ko")
-        target_p_lang = "all_ko" if raw_p_lang == "ko" else raw_p_lang
-        has_ko = bool(re.search(r'[가-힣]', prompt_txt))
-        has_en = bool(re.search(r'[a-zA-Z]', prompt_txt))
-        if has_en and not has_ko:
-            target_p_lang = "all_en"
-        elif has_ko:
-            target_p_lang = "all_ko"
-
-        raw_t_lang = getattr(voice_config, "text_lang", "ko")
-        target_t_lang = "all_ko" if raw_t_lang == "ko" else raw_t_lang
-
-        speed_val = float(getattr(voice_config, "speed_factor", 0.95))
-        if speed_val <= 0:
-            speed_val = 0.95
-
-        temp_val = float(getattr(voice_config, "temperature", 0.65))
-        if temp_val <= 0 or temp_val > 1.2:
-            temp_val = 0.65
-        top_k_val = int(getattr(voice_config, "top_k", 5))
-        top_p_val = float(getattr(voice_config, "top_p", 0.85))
-
-        optimized_text = optimize_text_for_sovits(text, max_chunk_len=40)
-        split_method = getattr(voice_config, "text_split_method", "cut5") or "cut5"
-        frag_interval = float(getattr(voice_config, "fragment_interval", 0.2))
-
-        # 로컬 서버 vs 원격(Colab) 서버 최적 전송 전략
-        is_local_api = any(h in api_url for h in ["127.0.0.1", "localhost"])
-        
-        payload = {
-            "text": optimized_text,
-            "text_lang": target_t_lang,
-            "prompt_text": prompt_txt,
-            "prompt_lang": target_p_lang,
-            "text_split_method": split_method,
-            "speed_factor": speed_val,
-            "top_k": top_k_val,
-            "top_p": top_p_val,
-            "temperature": temp_val,
-            "repetition_penalty": 1.35,
-            "fragment_interval": frag_interval,
-            "parallel_infer": True
-        }
-
-        if is_local_api:
-            # 로컬 서버: 디스크의 고유 해시 파일 경로를 직접 전달
-            # (base64 왕복 인코딩 오버헤드 0%, GPT-SoVITS 캐시 갱신 100% 보장)
-            payload["ref_audio_path"] = actual_ref_path
-        else:
-            # 원격 서버(Colab): base64 인코딩 전달 및 고유 해시 파일명 부여
-            payload["ref_audio_path"] = f"remote_ref_{ref_file_hash}.wav"
-            try:
-                if os.path.exists(actual_ref_path):
-                    import base64
-                    with open(actual_ref_path, "rb") as rf:
-                        payload["ref_audio_base64"] = base64.b64encode(rf.read()).decode("utf-8")
-            except Exception:
-                pass
-
-        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-        last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                res = requests.post(api_url, json=payload, timeout=90)
-                audio_bytes = None
-                if res.status_code == 200 and len(res.content) > 100:
-                    audio_bytes = res.content
-                else:
-                    if res.status_code == 502:
-                        raise RuntimeError(
-                            "GPT-SoVITS 서버 응답 없음 (502 Bad Gateway).\n"
-                            "원인: Google Colab에서 AI 서버가 아직 준비 중이거나 실행되지 않았습니다.\n"
-                            "해결: 구글 코랩의 4단계 셀이 완전히 실행 완료될 때까지 기다린 후 다시 시도해주세요."
-                        )
-                    if "pos" in res.text:
-                        raise RuntimeError(
-                            "GPT-SoVITS 한국어 형태소 분석기(Mecab) 미적용 오류.\n"
-                            "▶ 해결 방법: 구글 코랩 상단 메뉴 [런타임] -> [세션 다시 시작 및 모두 실행]을 누르신 후 새로 발급된 주소를 입력해주세요."
-                        )
-                    else:
-                        raise RuntimeError(f"GPT-SoVITS API 오류 (상태코드: {res.status_code}): {res.text[:200]}")
-
-                if audio_bytes:
-                    if output_file.lower().endswith(".mp3"):
-                        temp_wav = output_file + ".temp.wav"
-                        with open(temp_wav, "wb") as f:
-                            f.write(audio_bytes)
-                        cmd = ["ffmpeg", "-y", "-i", temp_wav, "-b:a", "192k", output_file]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                        if os.path.exists(temp_wav):
-                            try:
-                                os.remove(temp_wav)
-                            except Exception:
-                                pass
-                    else:
-                        with open(output_file, "wb") as f:
-                            f.write(audio_bytes)
-                    return output_file
-            except requests.exceptions.ConnectionError:
-                raise ConnectionError(
-                    f"GPT-SoVITS API 서버({api_url})에 연결할 수 없습니다.\n"
-                    f"로컬에서 GPT-SoVITS API 서버가 실행 중인지 확인해주세요.\n"
-                    f"(명령어: python api_v2.py -a 127.0.0.1 -p 9880)"
-                )
-            except Exception as e:
-                last_err = e
-                if attempt == retries:
-                    raise last_err
-        raise last_err
+    def generate_gpt_sovits_speech(cls, text: str, output_file: str,
+                                  voice_config: VoiceConfig, retries: int = 1) -> str:
+        from .sovits_client import synthesize
+        return synthesize(clean_spoken_text(text), output_file, voice_config)
 
     @classmethod
     def transcribe_audio_whisper(cls, audio_path: str) -> str:
@@ -1719,6 +1226,10 @@ class TTSEngine:
                 ref_audio_path=kwargs.get("ref_audio_path", ""),
                 prompt_text=kwargs.get("prompt_text", ""),
                 speed_factor=kwargs.get("speed_factor", 1.0),
+                temperature=kwargs.get("temperature", 1.0),
+                top_k=kwargs.get("top_k", 15),
+                top_p=kwargs.get("top_p", 1.0),
+                sample_steps=kwargs.get("sample_steps", 32),
                 nfe_steps=kwargs.get("nfe_steps", 32)
             )
         return cls.generate_speech(sample_text, output_file, voice_config)

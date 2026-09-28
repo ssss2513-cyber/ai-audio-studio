@@ -10,12 +10,6 @@ from typing import List, Optional, Dict, Any, Tuple, Set
 import streamlit as st
 import streamlit.components.v1 as components
 
-import importlib
-import core.tts_engine
-try:
-    importlib.reload(core.tts_engine)
-except Exception:
-    pass
 from core.tts_engine import (
     TTSEngine,
     VoiceConfig,
@@ -25,18 +19,15 @@ from core.tts_engine import (
     KOREAN_EDGE_VOICES,
     VOICE_STYLES
 )
+from core.personal_colab import session_workspace, upload_name
+from core.colab_ui import render_connections, render_reset
 from core.audio_processor import AudioProcessor
 from core.subtitle import SubtitleGenerator
 from core.parser import ScriptParser, ScriptSegment
-import core.story_precise_parser
-try:
-    importlib.reload(core.story_precise_parser)
-except Exception:
-    pass
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.6 (Gemini 3.1/3.8 지원 패치 완료)"
+APP_VERSION = "v2.7 · 개인 코랩 연결"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -219,7 +210,7 @@ def apply_preset_to_speakers(speakers, engine_type):
         elif engine_type == "cosyvoice":
             new_settings[spk] = {
                 "engine": "cosyvoice",
-                "voice": "CosyVoice 3.0 목소리 복제",
+                "voice": "CosyVoice 2 목소리 복제",
                 "style": def_style,
                 "ref_audio_path": "",
                 "prompt_text": "",
@@ -241,10 +232,10 @@ def apply_preset_to_speakers(speakers, engine_type):
                 "style": def_style,
                 "ref_audio_path": "",
                 "prompt_text": "",
-                "speed": 0.95,
-                "temperature": 0.65,
-                "top_k": 5,
-                "top_p": 0.85
+                "speed": 1.0,
+                "temperature": 1.0,
+                "top_k": 15,
+                "top_p": 1.0
             }
         else:
             if spk in SUPERTONIC_CHARACTER_PRESETS:
@@ -303,8 +294,8 @@ def set_speakers_preset(engine_type: str):
         elif eng == "edge-tts":
             set_state_safe(f"edge_voice_{spk}", voice)
         elif eng == "gpt-sovits":
-            set_state_safe(f"sovits_speed_{spk}", sdata.get("speed", 0.95))
-            set_state_safe(f"sovits_temp_{spk}", sdata.get("temperature", 0.65))
+            set_state_safe(f"sovits_speed_{spk}", sdata.get("speed", 1.0))
+            set_state_safe(f"sovits_temp_{spk}", sdata.get("temperature", 1.0))
             if sdata.get("prompt_text"):
                 set_state_safe(f"sovits_prompt_{spk}", sdata.get("prompt_text"))
             if sdata.get("ref_audio_path"):
@@ -627,35 +618,22 @@ def main():
             <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
         </div>
         <div style="background: rgba(34, 197, 94, 0.15); border: 1px solid #22c55e; border-radius: 8px; padding: 8px 14px; margin: 12px auto 0 auto; max-width: 650px; color: #86efac; font-size: 13px; font-weight: 600; text-align: center;">
-            🚀 시스템 패치 v2.6 적용 완료 (Gemini 3.8 / 3.1 Flash 전용 모델 탑재 및 자동 다중 폴백)
+            ☁️ 개인 코랩 연결 · 본인 구글 계정으로 실행 · 접속별 작업 공간
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     # 작업 디렉토리 설정
-    work_dir = os.path.abspath("outputs/web_session")
-    os.makedirs(work_dir, exist_ok=True)
+    work_dir = session_workspace(st.session_state)
 
     # 지연된 대본 텍스트가 있다면 위젯 생성 전에 안전하게 적용
     if "pending_script_text" in st.session_state:
         st.session_state["script_editor"] = st.session_state.pop("pending_script_text")
 
-    # 세션 상태 기본값 초기화 (Streamlit Secrets / 환경변수 자동 연동)
-    if "gemini_api_key" not in st.session_state:
-        sec_key = ""
-        try:
-            sec_key = st.secrets.get("GEMINI_API_KEY", "") or st.secrets.get("GOOGLE_API_KEY", "")
-        except Exception:
-            pass
-        st.session_state["gemini_api_key"] = sec_key or os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
-
-    if "gpt_sovits_url" not in st.session_state:
-        sec_url = ""
-        try:
-            sec_url = st.secrets.get("GPT_SOVITS_URL", "")
-        except Exception:
-            pass
-        st.session_state["gpt_sovits_url"] = sec_url or "http://127.0.0.1:9880/tts"
+    # Personal connections and optional API keys belong only to this browser session.
+    for setting in ("gemini_api_key", "gpt_sovits_url", "cosyvoice_url", "xtts_url"):
+        if setting not in st.session_state:
+            st.session_state[setting] = ""
 
     if "gemini_model" not in st.session_state or "tts" not in str(st.session_state.get("gemini_model", "")) or "2.0" in str(st.session_state.get("gemini_model", "")):
         st.session_state["gemini_model"] = "gemini-3.1-flash-tts-preview"
@@ -669,7 +647,7 @@ def main():
     if "voice_settings" not in st.session_state:
         st.session_state["voice_settings"] = {}
     if "active_engine_mode" not in st.session_state:
-        st.session_state["active_engine_mode"] = "supertonic"  # "supertonic", "gemini", "edge", "custom"
+        st.session_state["active_engine_mode"] = "gpt-sovits"
     if "generation_result" not in st.session_state:
         st.session_state["generation_result"] = None
     if "last_processed_file_id" not in st.session_state:
@@ -749,9 +727,9 @@ def main():
         engine_mode_options = [
             "👑 Supertonic 3 (로컬 무료 · 네이티브 완벽 한국어)",
             "⚡ Gemini 3.1 Flash TTS (스튜디오 성우급 감정 연기)",
-            "🔥 CosyVoice 3.0 (구글 코랩 16GB GPU 초고음질 복제)",
-            "🦎 XTTS v2 (구글 코랩 16GB GPU 제로샷 복제)",
-            "🎙️ GPT-SoVITS v4 (로컬/코랩 GPU 목소리 복제)",
+            "🔥 CosyVoice 2 (구글 코랩 목소리 복제)",
+            "🦎 XTTS v2 (구글 코랩 목소리 복제)",
+            "🎙️ GPT-SoVITS v4 (내 코랩 목소리 복제)",
             "✨ Pinokio F5-TTS (피노키오 초고음질 제로샷 복제)",
             "🔀 하이브리드 (인물별 자유 선택)"
         ]
@@ -773,7 +751,7 @@ def main():
             "🎙️ TTS 기본 엔진 선택",
             options=engine_mode_options,
             index=curr_idx,
-            help="Supertonic 3, CosyVoice, XTTS v2, GPT-SoVITS는 완전 무료입니다."
+            help="목소리 복제는 본인 코랩을 연결해서 사용합니다. 코랩 GPU 할당과 사용 시간은 계정 상태에 따라 달라집니다."
         )
 
         new_mode = "supertonic"
@@ -868,98 +846,10 @@ def main():
             with st.expander("⚡ Gemini API 키 등록 / 화자 분석 연동", expanded=bool(st.session_state.get("gemini_api_key"))):
                 gemini_api_key, gemini_model = render_gemini_section()
 
-        # 4. 목소리 복제 (Colab / 로컬 API) 통합 섹션
-        show_cloning = st.session_state["active_engine_mode"] in ["cosyvoice", "xtts", "gpt-sovits", "custom"]
-        if show_cloning:
-            st.markdown("#### 🎙️ AI 목소리 복제 (Colab GPU / 로컬) 설정")
-            
-            # 구글 코랩 원클릭 실행 배지 및 안내
-            st.markdown(
-                """
-                <div style="background: rgba(66, 133, 244, 0.08); border: 1px solid rgba(66, 133, 244, 0.25); border-radius: 8px; padding: 10px; margin-bottom: 12px;">
-                    <div style="font-weight: 600; font-size: 0.86rem; color: #4285F4; margin-bottom: 3px;">
-                        ☁️ Google Colab 16GB GPU 무료 서버 서비스
-                    </div>
-                    <div style="font-size: 0.80rem; color: #aaa; margin-bottom: 8px; line-height: 1.35;">
-                        내 GPU 컴퓨터 없이 Google 무료 16GB GPU로 음성을 초고속 복제합니다.
-                    </div>
-                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/CosyVoice_XTTS_Colab_API.ipynb" target="_blank">
-                            <span style="display:inline-block; padding:5px 10px; background:#4f46e5; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🔥 CosyVoice & XTTS 코랩 열기</span>
-                        </a>
-                        <a href="https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/main/GPT_SoVITS_Colab_API.ipynb" target="_blank">
-                            <span style="display:inline-block; padding:5px 10px; background:#2563eb; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🎙️ GPT-SoVITS 코랩 열기</span>
-                        </a>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # CosyVoice 설정 필드
-            if st.session_state["active_engine_mode"] in ["cosyvoice", "custom"]:
-                saved_cosy = st.session_state.get("cosyvoice_url", "")
-                cosy_url = st.text_input(
-                    "🔥 CosyVoice 코랩 접속 주소",
-                    value=saved_cosy,
-                    placeholder="예: https://xxxx.trycloudflare.com 또는 https://xxxx.gradio.live",
-                    help="코랩에서 생성된 CosyVoice 링크(trycloudflare 또는 gradio.live)를 넣으세요.",
-                    key="input_cosyvoice_url"
-                )
-                st.session_state["cosyvoice_url"] = cosy_url
-                c_c1, c_c2 = st.columns(2)
-                with c_c1:
-                    if st.button("🔌 Cosy 연결 테스트", use_container_width=True, key="btn_test_cosy"):
-                        ok, msg = TTSEngine.test_cosyvoice_connection(cosy_url)
-                        if ok: st.success(msg)
-                        else: st.error(msg)
-                with c_c2:
-                    if cosy_url:
-                        st.markdown(f'<a href="{cosy_url}" target="_blank" style="display:block; text-align:center; padding:7px; background:#4f46e5; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🌐 웹 화면 열기</a>', unsafe_allow_html=True)
-
-            # XTTS v2 설정 필드
-            if st.session_state["active_engine_mode"] in ["xtts", "custom"]:
-                saved_xtts = st.session_state.get("xtts_url", "")
-                xtts_url = st.text_input(
-                    "🦎 XTTS v2 코랩 접속 주소",
-                    value=saved_xtts,
-                    placeholder="예: https://xxxx.gradio.live 또는 https://xxxx.trycloudflare.com",
-                    help="코랩에서 생성된 XTTS v2 링크(gradio.live 또는 trycloudflare)를 넣으세요.",
-                    key="input_xtts_url"
-                )
-                st.session_state["xtts_url"] = xtts_url
-                x_c1, x_c2 = st.columns(2)
-                with x_c1:
-                    if st.button("🔌 XTTS 연결 테스트", use_container_width=True, key="btn_test_xtts"):
-                        ok, msg = TTSEngine.test_xtts_connection(xtts_url)
-                        if ok: st.success(msg)
-                        else: st.error(msg)
-                with x_c2:
-                    if xtts_url:
-                        st.markdown(f'<a href="{xtts_url}" target="_blank" style="display:block; text-align:center; padding:7px; background:#2563eb; color:white; border-radius:6px; font-size:12px; font-weight:bold; text-decoration:none;">🌐 웹 화면 열기</a>', unsafe_allow_html=True)
-
-            # GPT-SoVITS 설정 필드
-            if st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
-                saved_sovits = st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts")
-                sovits_url = st.text_input(
-                    "🎙️ GPT-SoVITS API 주소",
-                    value=saved_sovits,
-                    help="로컬 또는 서버에서 실행 중인 GPT-SoVITS API 주소 (예: https://xxx.trycloudflare.com/tts 또는 http://127.0.0.1:9880/tts)",
-                    key="input_gpt_sovits_url"
-                )
-                st.session_state["gpt_sovits_url"] = sovits_url
-
-                if st.button("🔌 GPT-SoVITS 서버 연결 테스트", use_container_width=True, key="btn_test_sovits"):
-                    ok, msg = TTSEngine.test_gpt_sovits_connection(sovits_url)
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-                        st.info(
-                            "💡 **서버 연결 방법**:\n"
-                            "1. **구글 코랩(무료 GPU)**: 상단의 [GPT-SoVITS 코랩 열기]를 눌러 서버를 켜고 나온 주소를 붙여넣기\n"
-                            "2. **내 컴퓨터(로컬 PC)**: 터미널에서 `python api_v2.py -a 127.0.0.1 -p 9880` 실행"
-                        )
+        # Visitors connect their own GPU runtime; URLs stay in session state.
+        if st.session_state["active_engine_mode"] in ["cosyvoice", "xtts", "gpt-sovits", "custom"]:
+            render_connections(st.session_state["active_engine_mode"])
+        render_reset()
 
         st.divider()
         st.markdown("#### 🎚️ 재생 및 자막 설정")
@@ -1223,7 +1113,7 @@ def main():
                         format_func=lambda e: (
                             "👑 Supertonic 3 (로컬 무료)" if e == "supertonic" else
                             ("⚡ Gemini Flash" if e == "gemini" else
-                            ("🔥 CosyVoice 3.0 (코랩 GPU 복제)" if e == "cosyvoice" else
+                            ("🔥 CosyVoice 2 (코랩 GPU 복제)" if e == "cosyvoice" else
                             ("🦎 XTTS v2 (코랩 GPU 복제)" if e == "xtts" else
                             ("🎙️ GPT-SoVITS (복제)" if e == "gpt-sovits" else "✨ Pinokio F5-TTS (복제)"))))
                         ),
@@ -1256,7 +1146,7 @@ def main():
                                         pass
                             current_cfg = {
                                 "engine": "cosyvoice",
-                                "voice": "CosyVoice 3.0 목소리 복제",
+                                "voice": "CosyVoice 2 목소리 복제",
                                 "style": cur_style,
                                 "ref_audio_path": candidate_ref if (candidate_ref and os.path.exists(candidate_ref)) else "",
                                 "prompt_text": candidate_prompt,
@@ -1338,13 +1228,13 @@ def main():
                                 "style": cur_style,
                                 "ref_audio_path": candidate_ref if (candidate_ref and os.path.exists(candidate_ref)) else "",
                                 "prompt_text": candidate_prompt,
-                                "speed": 0.95,
-                                "temperature": 0.65,
-                                "top_k": 5,
-                                "top_p": 0.85
+                                "speed": 1.0,
+                                "temperature": 1.0,
+                                "top_k": 15,
+                                "top_p": 1.0
                             }
-                            set_state_safe(f"sovits_speed_{spk}", 0.95)
-                            set_state_safe(f"sovits_temp_{spk}", 0.65)
+                            set_state_safe(f"sovits_speed_{spk}", 1.0)
+                            set_state_safe(f"sovits_temp_{spk}", 1.0)
                             if candidate_prompt:
                                 set_state_safe(f"sovits_prompt_{spk}", candidate_prompt)
                             if candidate_ref:
@@ -1515,7 +1405,7 @@ def main():
                             raw_val = ref_file.getvalue()
                             import hashlib
                             raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
-                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{upload_name(ref_file.name)}")
                             with open(uploaded_path, "wb") as f:
                                 f.write(raw_val)
                             effective_ref_audio = uploaded_path
@@ -1623,9 +1513,9 @@ def main():
                                     except Exception as e:
                                         st.error(f"음성 생성 실패: {str(e)}")
 
-                    # 2.6. CosyVoice 3.0 설정 폼 (구글 코랩 16GB GPU 복제)
+                    # 2.6. CosyVoice 2 설정 폼 (구글 코랩 16GB GPU 복제)
                     elif spk_engine == "cosyvoice":
-                        st.markdown("**🔥 CosyVoice 3.0 목소리 복제 (구글 코랩 16GB GPU)**")
+                        st.markdown("**🔥 CosyVoice 2 목소리 복제 (구글 코랩 GPU)**")
                         cosy_url = st.session_state.get("cosyvoice_url", "")
                         if not cosy_url:
                             st.warning("⚠️ 좌측 사이드바에 **'🔥 CosyVoice 코랩 접속 주소'**를 먼저 입력해주세요!")
@@ -1667,34 +1557,26 @@ def main():
                             raw_val = ref_file.getvalue()
                             import hashlib
                             raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
-                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{upload_name(ref_file.name)}")
                             with open(uploaded_path, "wb") as f:
                                 f.write(raw_val)
                             effective_ref_audio = uploaded_path
+                            previous_ref = st.session_state.get(saved_ref_key, "")
                             st.session_state[saved_ref_key] = uploaded_path
                             st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}**")
 
                             txt_cache = uploaded_path + ".txt"
-                            auto_spoken = ""
-                            if os.path.exists(txt_cache):
+                            cached_prompt = ""
+                            if os.path.isfile(txt_cache):
                                 try:
-                                    with open(txt_cache, "r", encoding="utf-8") as cf:
-                                        auto_spoken = cf.read().strip()
-                                except Exception:
+                                    with open(txt_cache, encoding="utf-8") as cf:
+                                        cached_prompt = cf.read().strip()
+                                except OSError:
                                     pass
-                            if not auto_spoken:
-                                with st.spinner("🎧 업로드된 음성을 AI(Whisper)가 듣고 실제 대사를 분석 중..."):
-                                    auto_spoken = TTSEngine.transcribe_audio_whisper(uploaded_path)
-                                    if auto_spoken:
-                                        try:
-                                            with open(txt_cache, "w", encoding="utf-8") as cf:
-                                                cf.write(auto_spoken)
-                                        except Exception:
-                                            pass
-                            if auto_spoken:
-                                prompt_text_val = auto_spoken
-                                set_state_safe(f"cosy_prompt_{spk}", auto_spoken)
-                                st.info(f"🎙️ AI 자동 인식 대사: **\"{auto_spoken}\"**")
+                            if previous_ref != uploaded_path:
+                                prompt_text_val = cached_prompt
+                                set_state_safe(f"cosy_prompt_{spk}", cached_prompt)
+                            st.caption("아래 '참조 오디오 실제 대사'에 녹음에서 말한 내용을 그대로 입력해주세요.")
                         elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
                             effective_ref_audio = st.session_state[saved_ref_key]
                         elif ref_audio_val and os.path.exists(ref_audio_val):
@@ -1732,7 +1614,7 @@ def main():
 
                         st.session_state["voice_settings"][spk] = {
                             "engine": "cosyvoice",
-                            "voice": "CosyVoice 3.0 목소리 복제",
+                            "voice": "CosyVoice 2 목소리 복제",
                             "style": selected_style,
                             "ref_audio_path": effective_ref_audio,
                             "prompt_text": prompt_input,
@@ -1757,7 +1639,7 @@ def main():
                                     prompt_text=prompt_input,
                                     speed_factor=speed_cosy
                                 )
-                                with st.spinner(f"'{spk}' CosyVoice 3.0 고음질 음성 복제 생성 중 (코랩 GPU)..."):
+                                with st.spinner(f"'{spk}' CosyVoice 2 고음질 음성 복제 생성 중 (코랩 GPU)..."):
                                     try:
                                         TTSEngine.generate_preview(
                                             voice_config=cfg,
@@ -1781,7 +1663,8 @@ def main():
 
                     # 2.7. XTTS v2 설정 폼 (구글 코랩 16GB GPU 제로샷 복제)
                     elif spk_engine == "xtts":
-                        st.markdown("**🦎 XTTS v2 목소리 복제 (구글 코랩 16GB GPU)**")
+                        st.markdown("**🦎 XTTS v2 목소리 복제 (구글 코랩 GPU)**")
+                        st.caption("한국어 · 참고 음성 3~30초 · 실제 대사 입력 없이 복제 · 속도 조절 가능")
                         xtts_url = st.session_state.get("xtts_url", "")
                         if not xtts_url:
                             st.warning("⚠️ 좌측 사이드바에 **'🦎 XTTS v2 코랩 접속 주소'**를 먼저 입력해주세요!")
@@ -1814,7 +1697,7 @@ def main():
                             raw_val = ref_file.getvalue()
                             import hashlib
                             raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
-                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{upload_name(ref_file.name)}")
                             with open(uploaded_path, "wb") as f:
                                 f.write(raw_val)
                             effective_ref_audio = uploaded_path
@@ -1886,14 +1769,21 @@ def main():
 
                     # 3. GPT-SoVITS 설정 폼 (목소리 복제)
                     elif spk_engine == "gpt-sovits":
-                        st.markdown("**🎙️ GPT-SoVITS v4 목소리 복제 (BigVGAN 48kHz 초고음질)**")
+                        st.markdown("**🎙️ GPT-SoVITS 목소리 복제 (수정 코랩: v4 · 48kHz)**")
                         ref_audio_val = current_cfg.get("ref_audio_path", "")
                         prompt_text_val = current_cfg.get("prompt_text", "")
-                        speed_val = current_cfg.get("speed", 0.95)
-                        temp_val = current_cfg.get("temperature", 0.65)
+                        speed_val = current_cfg.get("speed", 1.0)
+                        temp_val = current_cfg.get("temperature", 1.0)
+
+                        st.caption("배경음 없이 한 사람만 말하는 3~10초 음성과, 그 음성의 정확한 대사를 함께 등록하세요.")
+                        if st.button("↺ 기본 생성 설정으로 복원", key=f"sovits_reset_{spk}"):
+                            speed_val = temp_val = 1.0
+                            set_state_safe(f"sovits_speed_{spk}", 1.0)
+                            set_state_safe(f"sovits_temp_{spk}", 1.0)
+                            set_state_safe(f"sovits_steps_{spk}", 32)
 
                         # 나레이션 화자이고 기본 등록된 참고 파일이 있으면 자동 연결
-                        if not ref_audio_val:
+                        if not ref_audio_val and ("나레이션" in spk or "해설" in spk) and f"sovits_saved_path_{spk}" not in st.session_state:
                             candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav")
                             if os.path.exists(candidate_ref):
                                 ref_audio_val = candidate_ref
@@ -1905,8 +1795,6 @@ def main():
                                                 prompt_text_val = cf.read().strip()
                                         except Exception:
                                             pass
-                                    if not prompt_text_val:
-                                        prompt_text_val = "혼례 이레 만에 신랑이 자취를 감추자 신부는 하루아침에 파혼을 강요받았습니다."
 
                         saved_ref_key = f"sovits_saved_path_{spk}"
                         if saved_ref_key not in st.session_state and ref_audio_val:
@@ -1916,7 +1804,7 @@ def main():
                         ref_file = st.file_uploader(
                             "🎙️ 참조 오디오 파일 (.wav, .mp3) 업로드",
                             type=["wav", "mp3"],
-                            key=f"sovits_upload_{spk}",
+                            key=f"sovits_upload_{spk}_{st.session_state.get(f'sovits_upload_version_{spk}', 0)}",
                             help="복제할 인물의 3~10초 길이 목소리 음원 파일 (업로드 시 경로 입력은 일절 필요 없습니다!)"
                         )
                         
@@ -1928,35 +1816,13 @@ def main():
                             raw_val = ref_file.getvalue()
                             import hashlib
                             raw_hash = hashlib.md5(raw_val).hexdigest()[:8]
-                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{ref_file.name}")
+                            uploaded_path = os.path.join(save_ref_dir, f"{safe_spk}_{raw_hash}_{upload_name(ref_file.name)}")
                             with open(uploaded_path, "wb") as f:
                                 f.write(raw_val)
                             effective_ref_audio = uploaded_path
                             st.session_state[saved_ref_key] = uploaded_path
                             st.success(f"✅ 오디오 파일 업로드 완료: **{ref_file.name}**")
 
-                            # 업로드 즉시 Whisper로 대사 자동 분석 및 동기화
-                            txt_cache = uploaded_path + ".txt"
-                            auto_spoken = ""
-                            if os.path.exists(txt_cache):
-                                try:
-                                    with open(txt_cache, "r", encoding="utf-8") as cf:
-                                        auto_spoken = cf.read().strip()
-                                except Exception:
-                                    pass
-                            if not auto_spoken:
-                                with st.spinner("🎧 업로드된 음성을 AI(Whisper)가 듣고 실제 대사를 분석 중..."):
-                                    auto_spoken = TTSEngine.transcribe_audio_whisper(uploaded_path)
-                                    if auto_spoken:
-                                        try:
-                                            with open(txt_cache, "w", encoding="utf-8") as cf:
-                                                cf.write(auto_spoken)
-                                        except Exception:
-                                            pass
-                            if auto_spoken:
-                                prompt_text_val = auto_spoken
-                                set_state_safe(f"sovits_prompt_{spk}", auto_spoken)
-                                st.info(f"🎙️ AI 자동 인식 대사: **\"{auto_spoken}\"**")
                         elif st.session_state.get(saved_ref_key) and os.path.exists(st.session_state[saved_ref_key]):
                             effective_ref_audio = st.session_state[saved_ref_key]
                         elif ref_audio_val and os.path.exists(ref_audio_val):
@@ -1972,6 +1838,10 @@ def main():
                                 if st.button("🗑️ 오디오 변경", key=f"del_audio_{spk}", help="등록된 참조 오디오를 해제하고 새로 등록합니다."):
                                     set_state_safe(saved_ref_key, "")
                                     set_state_safe(f"sovits_prompt_{spk}", "")
+                                    st.session_state["voice_settings"][spk]["ref_audio_path"] = ""
+                                    st.session_state["voice_settings"][spk]["prompt_text"] = ""
+                                    st.session_state[f"sovits_upload_version_{spk}"] = st.session_state.get(f"sovits_upload_version_{spk}", 0) + 1
+                                    set_state_safe(f"sovits_manual_path_{spk}", "")
                                     effective_ref_audio = ""
                                     st.rerun()
 
@@ -1983,7 +1853,7 @@ def main():
                                     a_info = sf.info(effective_ref_audio)
                                     dur = a_info.duration
                                     if dur > 10.0:
-                                        st.caption(f"⏱️ 파일 길이: **{dur:.1f}초** (10초 초과 시 앞부분 4.5~8.5초 무음 밸리 자동 슬라이스)")
+                                        st.warning(f"파일 길이 {dur:.1f}초: 문장이 끝나는 지점에서 3~10초로 잘라 다시 등록해주세요. 자동으로 자르지 않습니다.")
                                     elif dur < 3.0:
                                         st.warning(f"⚠️ 파일 길이가 **{dur:.1f}초**로 짧습니다. (권장: 3초~10초)")
                                     else:
@@ -1991,44 +1861,22 @@ def main():
                                 except Exception:
                                     pass
 
-                        # 3. 로컬 파일/폴더 경로 직접 입력 (선택사항, 업로드 안 했을 때만 필요한 대안)
-                        with st.expander("📁 (선택사항) PC 로컬 파일 또는 폴더 경로로 직접 지정하기"):
-                            st.caption("💡 위에서 파일을 직접 업로드하셨다면 이 칸은 비워두셔도 됩니다.")
-                            ref_path_input = st.text_input(
-                                "참조 오디오 파일 또는 폴더 경로",
-                                value=effective_ref_audio if not ref_file and not st.session_state.get(saved_ref_key) else "",
-                                placeholder="예: C:/path/to/reference_sample.wav 또는 폴더 경로",
-                                key=f"sovits_manual_path_{spk}",
-                                help="로컬 PC 내 참조 오디오 파일 경로 또는 파일이 들어있는 폴더 경로"
-                            )
-                            if ref_path_input.strip():
-                                manual_target = ref_path_input.strip()
-                                if os.path.exists(manual_target):
-                                    if os.path.isdir(manual_target):
-                                        st.warning("⚠️ 입력하신 경로는 **폴더**입니다. 아래 목록에서 사용할 오디오 파일을 선택해주세요.")
-                                        try:
-                                            audio_files = [
-                                                f for f in os.listdir(manual_target)
-                                                if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a'))
-                                                and os.path.isfile(os.path.join(manual_target, f))
-                                            ]
-                                            if audio_files:
-                                                audio_files.sort(key=lambda x: (not x.lower().endswith('.wav'), x.lower()))
-                                                selected_f = st.selectbox(
-                                                    "📁 폴더 내 오디오 파일 선택",
-                                                    options=audio_files,
-                                                    key=f"sovits_folder_file_{spk}"
-                                                )
-                                                effective_ref_audio = os.path.join(manual_target, selected_f)
-                                                st.session_state[saved_ref_key] = effective_ref_audio
-                                                st.success(f"선택된 파일: `{os.path.basename(effective_ref_audio)}`")
-                                            else:
-                                                st.error("❌ 해당 폴더 안에 지원되는 오디오 파일(.wav, .mp3)이 없습니다.")
-                                        except Exception as dir_err:
-                                            st.error(f"폴더 탐색 오류: {dir_err}")
-                                    else:
-                                        effective_ref_audio = manual_target
-                                        st.session_state[saved_ref_key] = effective_ref_audio
+                        st.caption("참조 음성은 위 업로드 버튼으로 등록해주세요.")
+
+                        # Reset the transcript only when the selected reference changes.
+                        prompt_ref_key = f"sovits_prompt_ref_{spk}"
+                        previous_ref = st.session_state.get(prompt_ref_key, ref_audio_val)
+                        if previous_ref != effective_ref_audio:
+                            prompt_text_val = ""
+                            transcript_path = effective_ref_audio + ".txt" if effective_ref_audio else ""
+                            if transcript_path and os.path.isfile(transcript_path):
+                                try:
+                                    with open(transcript_path, encoding="utf-8") as transcript:
+                                        prompt_text_val = transcript.read().strip()
+                                except OSError:
+                                    pass
+                            set_state_safe(f"sovits_prompt_{spk}", prompt_text_val)
+                        st.session_state[prompt_ref_key] = effective_ref_audio
 
                         # 4. 참조 오디오 실제 대사 추출 및 입력
                         col_lbl, col_wbtn = st.columns([2.6, 1.4])
@@ -2038,7 +1886,7 @@ def main():
                             extract_clicked = st.button(
                                 "✨ 대사 자동 추출",
                                 key=f"whisper_btn_{spk}",
-                                help="등록된 오디오 파일을 AI(Whisper)가 듣고 실제 대사를 자동 입력합니다.",
+                                help="자동 인식 결과에는 오타가 있을 수 있습니다. 직접 듣고 고친 뒤 사용하세요.",
                                 use_container_width=True
                             )
 
@@ -2074,7 +1922,8 @@ def main():
                                     pass
                             if not prompt_text_val and known_real_txt:
                                 prompt_text_val = known_real_txt
-                                set_state_safe(f"sovits_prompt_{spk}", known_real_txt)
+                                if f"sovits_prompt_{spk}" not in st.session_state:
+                                    set_state_safe(f"sovits_prompt_{spk}", known_real_txt)
 
                         prompt_input = st.text_input(
                             "참조 오디오 실제 대사",
@@ -2082,12 +1931,12 @@ def main():
                             placeholder="예: 꿈을 이루고자 하는 용기가 있다면 모든 꿈은 실현 가능하다.",
                             key=f"sovits_prompt_{spk}",
                             label_visibility="collapsed",
-                            help="소설 대사가 아니라, 등록하신 참조 오디오 안에서 실제로 나오는 말을 적어주셔야 합니다. (비워두셔도 생성 시 AI가 자동 인식합니다)"
+                            help="등록한 참조 음성에서 실제로 말한 문장과 일치해야 합니다. 빈 대사로는 생성하지 않습니다."
                         )
                         if known_real_txt:
-                            st.caption(f"🎧 **AI 감지 실제 대사**: `{known_real_txt}` (음색 완벽 동기화 보장)")
+                            st.caption("자동 추출한 대사는 오타가 있을 수 있습니다. 참조 음성을 듣고 위 입력란을 수정하세요. 직접 수정한 내용은 유지됩니다.")
                         else:
-                            st.caption("💡 **필독**: 이 칸에는 소설 대사가 아니라 **'음성 파일 안에서 실제로 말한 문장'**을 적어야 목소리가 똑같이 복제됩니다! (위의 '✨ 대사 자동 추출' 클릭 시 자동 완성)")
+                            st.caption("생성할 대사가 아니라 참조 녹음에서 말한 문장을 입력하세요. 빠진 단어나 추가된 문장이 없는지 확인해주세요.")
 
                         col_s1, col_s2 = st.columns(2)
                         with col_s1:
@@ -2101,14 +1950,22 @@ def main():
                             )
                         with col_s2:
                             temp_slider = st.slider(
-                                "🎯 원음 싱크로율 (Temperature)",
-                                min_value=0.50,
-                                max_value=0.90,
+                                "발음 샘플링 (Temperature)",
+                                min_value=0.10,
+                                max_value=1.00,
                                 value=float(temp_val),
                                 step=0.05,
                                 key=f"sovits_temp_{spk}",
-                                help="낮을수록(0.60~0.70) 원본 목소리 톤과 억양을 최대한 똑같이 재현하고 환각/잡음이 차단됩니다. (기본 권장값: 0.65)"
+                                help="음색 유사도를 보장하는 수치가 아닙니다. 공식 API 기본값 1.0에서 먼저 확인하고 조금씩 조절하세요."
                             )
+
+                        step_options = [8, 16, 32]
+                        step_value = current_cfg.get("sample_steps", 32)
+                        sample_steps = st.selectbox("v4 생성 단계", step_options,
+                                                     index=step_options.index(step_value) if step_value in step_options else 2,
+                                                     key=f"sovits_steps_{spk}",
+                                                     help="32단계는 계산 시간이 더 걸립니다. 실제 음질은 참조 녹음과 대사에도 영향을 받습니다.")
+                        st.caption("처음 비교할 때는 속도 1.0을 사용하세요. 미리듣기와 전체 생성에 같은 설정이 적용됩니다.")
 
                         selected_style = st.selectbox(
                             "🎨 음성 스타일 (참고용)",
@@ -2125,22 +1982,25 @@ def main():
                             "prompt_text": prompt_input,
                             "speed": speed_slider,
                             "temperature": temp_slider,
-                            "top_k": 5,
-                            "top_p": 0.85
+                            "top_k": 15,
+                            "top_p": 1.0,
+                            "sample_steps": sample_steps
                         }
 
                         # 목소리 미리듣기 버튼 (GPT-SoVITS)
                         if st.button(f"🔊 {spk} GPT-SoVITS 미리듣기", key=f"preview_btn_{spk}", use_container_width=True):
-                            sovits_url = st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts")
+                            sovits_url = st.session_state.get("gpt_sovits_url", "")
                             if not effective_ref_audio:
                                 st.error("⚠️ 먼저 위에서 참조 오디오(.wav 또는 .mp3) 파일을 업로드해주세요. (경로 입력은 전혀 필요 없습니다!)")
                             elif not os.path.exists(effective_ref_audio):
                                 st.error(f"⚠️ 참조 오디오 파일을 찾을 수 없습니다: `{effective_ref_audio}`")
                             elif os.path.isdir(effective_ref_audio):
                                 st.error(f"⚠️ `{effective_ref_audio}`는 파일이 아니라 폴더입니다! 폴더 안의 오디오 파일을 선택해주세요.")
+                            elif not prompt_input.strip():
+                                st.error("참조 오디오 실제 대사를 입력해주세요.")
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
-                                preview_file = os.path.join(work_dir, f"preview_sovits_{safe_spk}.mp3")
+                                preview_file = os.path.join(work_dir, f"preview_sovits_{safe_spk}.wav")
                                 sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
 
                                 cfg = VoiceConfig(
@@ -2152,8 +2012,9 @@ def main():
                                     prompt_text=prompt_input,
                                     speed_factor=speed_slider,
                                     temperature=temp_slider,
-                                    top_k=5,
-                                    top_p=0.85
+                                    top_k=15,
+                                    top_p=1.0,
+                                    sample_steps=sample_steps
                                 )
                                 with st.spinner(f"'{spk}' GPT-SoVITS 목소리 복제 생성 중 (서버 처리 중)..."):
                                     try:
@@ -2164,7 +2025,7 @@ def main():
                                         )
                                         if os.path.exists(preview_file):
                                             with open(preview_file, "rb") as af:
-                                                st.audio(af.read(), format="audio/mp3")
+                                                st.audio(af.read(), format="audio/wav")
                                             st.caption(f'💬 샘플: "{sample_text}" [GPT-SoVITS 복제]')
                                     except Exception as e:
                                         st.error(f"음성 생성 실패: {str(e)}")
@@ -2370,15 +2231,18 @@ def main():
                 for s in target_segments
             )
             if has_sovits:
-                sovits_url = st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts")
+                sovits_url = st.session_state.get("gpt_sovits_url", "")
                 ok, test_msg = TTSEngine.test_gpt_sovits_connection(sovits_url)
                 if not ok:
-                    st.error(f"⚠️ GPT-SoVITS API 서버에 연결할 수 없습니다: {test_msg}\n\n로컬 PC에서 GPT-SoVITS 서버(`python api_v2.py -a 127.0.0.1 -p 9880`)를 켜시거나, 좌측 사이드바에서 [Google Colab 무료 GPU] 링크를 눌러 서버를 켜고 주소를 입력해주세요.")
+                    st.error(f"⚠️ GPT-SoVITS API 서버에 연결할 수 없습니다: {test_msg}\n\n좌측 [내 구글 코랩 연결] 안내에 따라 본인 코랩을 실행하고 새 연결 주소를 입력해주세요.")
                     return
                 # GPT-SoVITS 화자들의 참조 오디오 유효성 사전 검사
                 for s in target_segments:
                     spk_data = st.session_state["voice_settings"].get(s.speaker, {})
                     if spk_data.get("engine") == "gpt-sovits":
+                        if not spk_data.get("prompt_text", "").strip():
+                            st.error(f"화자 '{s.speaker}'의 참조 오디오 실제 대사를 입력해주세요.")
+                            return
                         r_path = spk_data.get("ref_audio_path", "")
                         if not r_path or not os.path.exists(r_path):
                             st.error(f"⚠️ 화자 '{s.speaker}'의 GPT-SoVITS 참조 오디오가 설정되지 않았거나 존재하지 않습니다. 화자 카드에서 파일을 등록해주세요!")
@@ -2478,13 +2342,14 @@ def main():
                         engine="gpt-sovits",
                         voice="GPT-SoVITS",
                         style=seg_style,
-                        gpt_sovits_url=st.session_state.get("gpt_sovits_url", "http://127.0.0.1:9880/tts"),
+                        gpt_sovits_url=st.session_state.get("gpt_sovits_url", ""),
                         ref_audio_path=actual_spk_ref,
                         prompt_text=actual_spk_prompt,
-                        speed_factor=float(spk_cfg_data.get("speed", 0.95)),
-                        temperature=float(spk_cfg_data.get("temperature", 0.65)),
-                        top_k=int(spk_cfg_data.get("top_k", 5)),
-                        top_p=float(spk_cfg_data.get("top_p", 0.85))
+                        speed_factor=float(spk_cfg_data.get("speed", 1.0)),
+                        temperature=float(spk_cfg_data.get("temperature", 1.0)),
+                        top_k=int(spk_cfg_data.get("top_k", 15)),
+                        top_p=float(spk_cfg_data.get("top_p", 1.0)),
+                        sample_steps=int(spk_cfg_data.get("sample_steps", 32))
                     )
                     eng_badge = "🎙️ GPT-SoVITS"
                 else:
@@ -2572,19 +2437,6 @@ def main():
                         arcname = os.path.join("segments", os.path.basename(item['file_path']))
                         zipf.write(item['file_path'], arcname=arcname)
 
-                # 5. 초고속 HTTP 직접 다운로드를 위해 static 폴더에 동기화
-                static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-                os.makedirs(static_dir, exist_ok=True)
-                import shutil
-                try:
-                    shutil.copy2(full_audio_path, os.path.join(static_dir, "full_audio.mp3"))
-                    shutil.copy2(srt_path, os.path.join(static_dir, "subtitles.srt"))
-                    shutil.copy2(vtt_path, os.path.join(static_dir, "subtitles.vtt"))
-                    shutil.copy2(main_zip_path, os.path.join(static_dir, "tts_main_bundle.zip"))
-                    shutil.copy2(seg_zip_path, os.path.join(static_dir, "tts_segments_bundle.zip"))
-                except Exception:
-                    pass
-
                 progress_bar.progress(1.0)
                 status_text.text("🎉 모든 음성 생성 및 자막 합성이 완료되었습니다!")
 
@@ -2605,19 +2457,6 @@ def main():
         st.divider()
         st.success("✨ 오디오 생성 및 병합이 완벽하게 완료되었습니다!")
 
-        # 윈도우 로컬 환경일 경우 원클릭 탐색기 열기 (다운로드 없이 0초 즉시 사용)
-        if os.name == 'nt' and os.path.exists(res.get("full_audio", "")):
-            folder_path = os.path.dirname(os.path.abspath(res["full_audio"]))
-            col_loc1, col_loc2 = st.columns([3, 1])
-            with col_loc1:
-                st.info(f"💡 **로컬 즉시 사용**: 파일이 이미 컴퓨터에 100% 저장되어 있습니다: `{folder_path}`")
-            with col_loc2:
-                if st.button("📂 저장 폴더 즉시 열기 (0초)", use_container_width=True, key="btn_open_local_folder"):
-                    subprocess.Popen(["explorer", folder_path])
-                    st.toast("✅ 윈도우 파일 탐색기를 열었습니다!")
-
-        import time
-        ts = int(time.time())
         col_main, col_down = st.columns([3, 2])
         with col_main:
             st.markdown("### 🎧 전체 병합 오디오 재생")
@@ -2627,62 +2466,22 @@ def main():
                 st.audio(audio_bytes, format="audio/mp3")
 
         with col_down:
-            st.markdown("### 📥 결과 파일 초고속 다운로드")
-
-            # 1. 고속 직접 HTTP 스트리밍 링크 (WebSocket 200MB 버퍼링 한도 우회, 초당 40~300MB/s 속도)
-            st.markdown(
-                f"""
-                <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
-                    <a href="app/static/tts_main_bundle.zip?t={ts}" download="tts_main_bundle.zip" 
-                       style="display: block; text-align: center; background: linear-gradient(135deg, #7c3aed, #6366f1); color: white; padding: 12px 16px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 0.95rem; box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);">
-                        ⚡ 완성본 초고속 다운로드 (.ZIP - 전체 오디오+자막)
-                    </a>
-                    <div style="display: flex; gap: 8px;">
-                        <a href="app/static/full_audio.mp3?t={ts}" download="full_audio.mp3" 
-                           style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
-                            🎵 전체 오디오 (MP3)
-                        </a>
-                        <a href="app/static/subtitles.srt?t={ts}" download="subtitles.srt" 
-                           style="flex: 1; text-align: center; background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600;">
-                            📝 자막 파일 (SRT)
-                        </a>
-                    </div>
-                    <a href="app/static/tts_segments_bundle.zip?t={ts}" download="tts_segments_bundle.zip" 
-                       style="display: block; text-align: center; background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 8px 12px; border-radius: 6px; text-decoration: none; font-size: 0.82rem;">
-                        🗄️ 개별 분할 대사 압축팩 (전체 세그먼트 MP3)
-                    </a>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # 2. 보조 표준 다운로드 버튼 (스트림 지연 로딩)
-            with st.expander("🛠️ 대체 다운로드 방식 (표준 버튼)", expanded=False):
-                main_z = res.get("main_zip", res.get("zip"))
-                if main_z and os.path.exists(main_z):
-                    st.download_button(
-                        label="📦 완성본 패키지 (.ZIP)",
-                        data=lambda: open(main_z, "rb").read(),
-                        file_name="tts_main_bundle.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
-                if os.path.exists(res["full_audio"]):
-                    st.download_button(
-                        "🎵 전체 오디오 (MP3)",
-                        data=lambda: open(res["full_audio"], "rb").read(),
-                        file_name="full_audio.mp3",
-                        mime="audio/mp3",
-                        use_container_width=True
-                    )
-                if os.path.exists(res["srt"]):
-                    st.download_button(
-                        "📝 자막 파일 (SRT)",
-                        data=lambda: open(res["srt"], "rb").read(),
-                        file_name="subtitles.srt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
+            st.markdown("### 📥 내 결과 다운로드")
+            downloads = [
+                ("📦 완성본 패키지 (오디오 + 자막)", "main_zip", "tts_main_bundle.zip", "application/zip"),
+                ("🎵 전체 오디오 (MP3)", "full_audio", "full_audio.mp3", "audio/mpeg"),
+                ("📝 자막 파일 (SRT)", "srt", "subtitles.srt", "text/plain"),
+                ("📝 자막 파일 (VTT)", "vtt", "subtitles.vtt", "text/vtt"),
+                ("🗄️ 인물별 대사 압축팩", "seg_zip", "tts_segments_bundle.zip", "application/zip"),
+            ]
+            for label, result_key, filename, mime in downloads:
+                path = res.get(result_key, "")
+                if path and os.path.isfile(path):
+                    with open(path, "rb") as completed_file:
+                        st.download_button(label, completed_file.read(), file_name=filename,
+                                           mime=mime, key="result_download_" + result_key,
+                                           use_container_width=True)
+            st.caption("현재 접속에서 생성한 파일입니다. 창을 닫거나 작업을 지우기 전에 다운로드해주세요.")
 
         # 개별 대사별 타임라인 및 재생 목록
         with st.expander("🔍 세부 대사별 타임라인 및 개별 음성 확인", expanded=False):

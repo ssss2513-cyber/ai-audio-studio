@@ -1,206 +1,407 @@
 # -*- coding: utf-8 -*-
+"""Self-contained CosyVoice 2 / XTTS v2 Colab runner. No edits to upstream model code.
+
+--setup: install an isolated Python 3.10 environment and start the local API.
+--tunnel: optionally expose the ready API to AI Voice Studio.
+--serve: internal worker, launched with the isolated Python interpreter.
 """
-AI Voice Studio - CosyVoice 완전 자동화 설치 + 서버 구동기 v5
-"""
-import os, sys, time, subprocess, re
+import argparse
+import hashlib
+import io
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
 
-def run(cmd, label=""):
-    """명령 실행 + 라벨 출력"""
-    if label:
-        print(f"\n{'='*50}")
-        print(f"⏳ {label}")
-        print(f"{'='*50}")
-        sys.stdout.flush()
-    ret = os.system(cmd)
-    if label:
-        ok = "✅ 완료!" if ret == 0 else "⚠️ 완료 (일부 경고 있을 수 있음)"
-        print(ok)
-        sys.stdout.flush()
-    return ret
+SOURCE_REVISION = '074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc'
+COSY_MODEL_REVISION = 'eec1ae6c79877dbd9379285cf8789c9e0879293d'
+XTTS_MODEL_REVISION = '6c2b0d75eae4b7047358e3b6bd9325f857d43f77'
+XTTS_LICENSE_URL = 'https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt'
 
-print("\n" + "🎙️  AI Voice Studio - CosyVoice 자동 설치 시작".center(55))
-print("⏱️  총 10~15분 소요됩니다. 아래 진행 상황을 지켜봐 주세요.")
-sys.stdout.flush()
 
-# ─── 1. GPU 확인 ─────────────────────────────────────────────
-print("\n⏳ GPU 확인 중...")
-sys.stdout.flush()
-os.system("nvidia-smi | head -12")
-sys.stdout.flush()
+def configure(engine):
+    global ENGINE, LABEL, ROOT, SOURCE, PYTHON, MODEL, STATE, SERVICE, MODEL_REVISION
+    if engine not in ('cosyvoice', 'xtts'):
+        raise ValueError('지원하지 않는 엔진입니다.')
+    ENGINE = engine
+    LABEL = 'CosyVoice 2' if engine == 'cosyvoice' else 'XTTS v2'
+    ROOT = Path('/content/ai_voice_dual_v1') / engine
+    SOURCE = ROOT / 'CosyVoice'
+    PYTHON = ROOT / 'venv/bin/python'
+    MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B' if engine == 'cosyvoice' else ROOT / 'XTTS-v2'
+    STATE = ROOT / 'state.json'
+    SERVICE = 'ai-voice-studio-' + engine
+    MODEL_REVISION = COSY_MODEL_REVISION if engine == 'cosyvoice' else XTTS_MODEL_REVISION
 
-# ─── 2. 시스템 패키지 ─────────────────────────────────────────
-run("apt-get update -q 2>&1 | tail -3",
-    "[1/7] 시스템 업데이트")
 
-run("apt-get install -y -q ffmpeg sox libsox-dev build-essential python3-dev git-lfs curl wget 2>&1 | tail -5",
-    "[2/7] 시스템 패키지 (ffmpeg, sox, build-essential...)")
+configure('cosyvoice')
 
-# ─── 3. Cloudflare 터널 ───────────────────────────────────────
-run("wget -q -nc 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64' -O /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared",
-    "[3/7] Cloudflare 터널")
 
-# ─── 4. 충돌 패키지 제거 ──────────────────────────────────────
-run("pip uninstall -y torchvision 2>/dev/null || true",
-    "[4/7] torchvision 충돌 제거")
+def run(args, label):
+    print('\n▶ ' + label, flush=True)
+    with (ROOT / 'setup.log').open('a', encoding='utf-8') as log:
+        proc = subprocess.Popen([str(a) for a in args], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        try:
+            for line in proc.stdout:
+                print(line, end='', flush=True)
+                log.write(line)
+            code = proc.wait()
+        except BaseException:
+            proc.terminate()
+            raise
+    if code:
+        raise RuntimeError(f'{label} 실패 (종료 코드 {code}). 바로 위 오류를 확인해주세요.')
 
-# ─── 5. Python 패키지 설치 (핵심) ────────────────────────────
-packages = (
-    "'torchaudio<2.9.0' lightning openai-whisper inflect pyworld-prebuilt "
-    "onnxruntime-gpu HyperPyYAML conformer diffusers hydra-core omegaconf "
-    "x-transformers wetext modelscope soundfile gradio librosa "
-    "gdown wget transformers networkx fastapi Cython wheel"
-)
-run(f"pip install {packages} 2>&1 | grep -E '(Successfully|already|ERROR|WARNING)' || true",
-    "[5/7] Python AI 패키지 설치 (5~8분 소요)")
 
-# ─── 6. CosyVoice 소스 + 모델 ────────────────────────────────
-cosy_dir = "/content/CosyVoice"
-model_dir = f"{cosy_dir}/pretrained_models/CosyVoice2-0.5B"
-
-run(f"git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git {cosy_dir} 2>&1 | tail -3"
-    if not os.path.exists(cosy_dir)
-    else f"cd {cosy_dir} && git pull 2>&1 | tail -2",
-    "[6/7] CosyVoice 소스코드 다운로드")
-
-# CosyVoice 의존성 설치 (Matcha-TTS + requirements.txt)
-print("  📦 CosyVoice 의존성 설치 중...")
-sys.stdout.flush()
-run(f"pip install -r {cosy_dir}/requirements.txt 2>&1 | grep -E '(Successfully|already|ERROR)' || true",
-    "CosyVoice requirements.txt 설치")
-run(f"pip install -e {cosy_dir}/third_party/Matcha-TTS 2>&1 | tail -3",
-    "Matcha-TTS 설치")
-run("pip install wget 2>&1 | tail -2", "wget 패키지 확인")
-
-print("\n⏳ [6/7] AI 모델 다운로드 중 (1~2GB, 5~10분)...")
-sys.stdout.flush()
-if not os.path.exists(model_dir) or len(os.listdir(model_dir)) < 3:
+def read_state():
     try:
-        from modelscope import snapshot_download
-        snapshot_download("iic/CosyVoice2-0.5B", local_dir=model_dir)
-        print("✅ 모델 다운로드 완료!")
-    except Exception as e:
-        print(f"⚠️ ModelScope 실패: {e}")
-        print("🔄 HuggingFace로 재시도...")
-        sys.stdout.flush()
-        os.system(f"git lfs install && git clone https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B {model_dir} 2>&1 | tail -5")
-else:
-    print("✅ 모델 이미 존재, 건너뜀")
-sys.stdout.flush()
+        return json.loads(STATE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
 
-# ─── 7. 패치 적용 ────────────────────────────────────────────
-print(f"\n{'='*50}")
-print("⏳ [7/7] 버그 패치 자동 적용 중...")
-print(f"{'='*50}")
-sys.stdout.flush()
 
-# 패치A: config.json bfloat16→float32
-cfg = f"{model_dir}/CosyVoice-BlankEN/config.json"
-if os.path.exists(cfg):
-    t = open(cfg, encoding="utf-8").read()
-    n = t.replace('"torch_dtype": "bfloat16"', '"torch_dtype": "float32"')
-    if n != t:
-        open(cfg, "w", encoding="utf-8").write(n)
-        print("  ✅ [A] config.json float32")
+def health(base):
+    with urllib.request.urlopen(base + '/health', timeout=5) as response:
+        data = json.load(response)
+    return data.get('service') == SERVICE and data.get('ready') is True
 
-# 패치B: llm.py float32
-llm = f"{cosy_dir}/cosyvoice/llm/llm.py"
-if os.path.exists(llm):
-    t = open(llm, encoding="utf-8").read(); c = False
-    old = "self.model = Qwen2ForCausalLM.from_pretrained(pretrain_path)"
-    new = "self.model = Qwen2ForCausalLM.from_pretrained(pretrain_path, torch_dtype=torch.float32).to(torch.float32)"
-    if old in t: t = t.replace(old, new); c = True
-    for p, r in [
-        (r"(def forward\(self, xs: torch\.Tensor, xs_lens: torch\.Tensor\):\n)(\s+)(T = xs\.size\(1\))",
-         r"\1\2xs = xs.to(torch.float32)\n\2\3"),
-        (r"(def forward_one_step\(self, xs, masks, cache=None\):\n)(\s+)(input_masks)",
-         r"\1\2xs = xs.to(torch.float32)\n\2\3"),
-    ]:
-        n2 = re.sub(p, r, t)
-        if n2 != t: t = n2; c = True
-    if c: open(llm, "w", encoding="utf-8").write(t); print("  ✅ [B] llm.py float32")
 
-# 패치C: f0_predictor.py 패딩
-f0 = f"{cosy_dir}/cosyvoice/hifigan/f0_predictor.py"
-if os.path.exists(f0):
-    t = open(f0, encoding="utf-8").read(); c = False
-    PAD = "        if x.shape[-1] < 4:\n            x = torch.nn.functional.pad(x, (0, 4 - x.shape[-1]), mode='replicate')\n"
-    for p, r in [
-        (r"(def forward\(self, x: torch\.Tensor\) -> torch\.Tensor:)\n(        x = self\.condnet\(x\))",
-         r"\1\n" + PAD + r"        x = self.condnet(x)"),
-        (r"(def forward\(self, x: torch\.Tensor, finalize: bool = True\) -> torch\.Tensor:)\n(        if finalize is True:)",
-         r"\1\n" + PAD + r"        if finalize is True:"),
-    ]:
-        n2 = re.sub(p, r, t)
-        if n2 != t: t = n2; c = True
-    if c: open(f0, "w", encoding="utf-8").write(t); print("  ✅ [C] f0_predictor.py 패딩")
+def setup(accept_xtts_license=False):
+    if not Path('/content').is_dir():
+        raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if ENGINE == 'xtts':
+        if not accept_xtts_license:
+            raise RuntimeError('XTTS 이용 조건을 확인하고 코랩의 이용 조건 동의 항목을 체크해주세요. ' + XTTS_LICENSE_URL)
+        (ROOT / 'license_acceptance.json').write_text(json.dumps({
+            'license_url': XTTS_LICENSE_URL, 'model_revision': MODEL_REVISION,
+            'accepted_at': time.time(), 'source': 'explicit_notebook_checkbox',
+        }))
+    state = read_state()
+    try:
+        if state.get('base') and health(state['base']):
+            print(f'✅ {LABEL} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
+            return
+    except Exception:
+        pass
+    if shutil.which('nvidia-smi') is None:
+        raise RuntimeError('GPU가 없습니다. 런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
+    run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
+    run(['apt-get', 'update', '-qq'], '시스템 패키지 목록 갱신')
+    run(['apt-get', 'install', '-y', '-qq', 'ffmpeg', 'sox', 'libsox-dev',
+         'libsndfile1', 'build-essential', 'git'], '오디오 도구 설치')
+    if not PYTHON.is_file():
+        run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', 'uv'], 'Python 환경 도구 설치')
+        run([sys.executable, '-m', 'uv', 'python', 'install', '3.10'], '별도 Python 3.10 설치')
+        run([sys.executable, '-m', 'uv', 'venv', '--python', '3.10', '--seed', ROOT / 'venv'], '독립 실행 환경 생성')
+    if ENGINE == 'cosyvoice':
+        if not (SOURCE / '.git').is_dir():
+            run(['git', 'clone', '--filter=blob:none', 'https://github.com/FunAudioLLM/CosyVoice.git', SOURCE], '공식 CosyVoice 소스 다운로드')
+        run(['git', '-C', SOURCE, 'checkout', '--detach', SOURCE_REVISION], '확인한 소스 버전 선택')
+        run(['git', '-C', SOURCE, 'submodule', 'update', '--init', '--recursive'], 'Matcha-TTS 소스 준비')
+        # Keep upstream versions except the documented inference-only changes below.
+        requirements = []
+        for line in (SOURCE / 'requirements.txt').read_text().splitlines():
+            if line.startswith(('deepspeed', 'tensorrt', 'gradio', 'fastapi-cli')):
+                continue  # optional acceleration/training/UI; this server uses none of these
+            if line.startswith('diffusers=='):
+                line = 'diffusers==0.32.2'  # compatible with modern huggingface_hub (no cached_download import)
+            requirements.append(line)
+        requirements += ['huggingface-hub==0.30.2', 'python-multipart>=0.0.18,<0.1']
+        req_file = ROOT / 'inference-requirements.txt'
+        req_file.write_text('\n'.join(requirements) + '\n')
+        stamp = hashlib.sha256(req_file.read_bytes()).hexdigest()
+        marker = ROOT / 'dependencies.ok'
+        if not marker.exists() or marker.read_text() != stamp:
+            run([PYTHON, '-m', 'pip', 'install', 'pip<26', 'setuptools<81', 'wheel', 'Cython<4'], '설치 도구 준비')
+            # Install the matching CUDA pair first; do not touch Colab's own Torch.
+            run([PYTHON, '-m', 'pip', 'install', 'torch==2.3.1', 'torchaudio==2.3.1',
+                 '--index-url', 'https://download.pytorch.org/whl/cu121'], 'GPU용 Torch 및 오디오 패키지 설치')
+            run([PYTHON, '-m', 'pip', 'install', '-r', req_file], 'CosyVoice 의존성 설치')
+            run([PYTHON, '-m', 'pip', 'check'], '의존성 충돌 확인')
+            marker.write_text(stamp)
+        download = (
+            'from huggingface_hub import snapshot_download; '
+            f'snapshot_download("FunAudioLLM/CosyVoice2-0.5B", revision={MODEL_REVISION!r}, '
+            f'local_dir={str(MODEL)!r}, allow_patterns=["cosyvoice2.yaml", "llm.pt", "flow.pt", '
+            '"hift.pt", "campplus.onnx", "speech_tokenizer_v2.onnx", "CosyVoice-BlankEN/*"])'
+        )
+        run([PYTHON, '-c', download], 'CosyVoice 2 모델 준비 (첫 실행 시 다운로드)')
+        missing = [name for name in ('cosyvoice2.yaml', 'llm.pt', 'flow.pt', 'hift.pt',
+                                    'campplus.onnx', 'speech_tokenizer_v2.onnx') if not (MODEL / name).is_file()]
+        if missing:
+            raise RuntimeError('모델 다운로드가 완전하지 않습니다: ' + ', '.join(missing))
+    else:
+        requirements = [
+            'coqui-tts==0.27.5', 'transformers==4.57.3', 'numpy==1.26.4',
+            'huggingface-hub==0.36.0', 'fastapi==0.115.6', 'uvicorn==0.30.0',
+            'python-multipart>=0.0.18,<0.1', 'torch==2.6.0', 'torchaudio==2.6.0',
+        ]
+        req_file = ROOT / 'xtts-requirements.txt'
+        req_file.write_text('\n'.join(requirements) + '\n')
+        stamp = hashlib.sha256(req_file.read_bytes()).hexdigest()
+        marker = ROOT / 'dependencies.ok'
+        if not marker.exists() or marker.read_text() != stamp:
+            run([PYTHON, '-m', 'pip', 'install', 'pip<26', 'setuptools<81', 'wheel'], 'XTTS 설치 도구 준비')
+            run([PYTHON, '-m', 'pip', 'install', 'torch==2.6.0', 'torchaudio==2.6.0',
+                 '--index-url', 'https://download.pytorch.org/whl/cu124'], 'XTTS GPU 패키지 설치')
+            run([PYTHON, '-m', 'pip', 'install', '-r', req_file], 'XTTS 의존성 설치')
+            run([PYTHON, '-m', 'pip', 'check'], 'XTTS 의존성 충돌 확인')
+            marker.write_text(stamp)
+        files = ['config.json', 'model.pth', 'vocab.json', 'speakers_xtts.pth', 'LICENSE.txt']
+        download = (
+            'from huggingface_hub import snapshot_download; '
+            f'snapshot_download("coqui/XTTS-v2", revision={MODEL_REVISION!r}, '
+            f'local_dir={str(MODEL)!r}, allow_patterns={files!r})'
+        )
+        run([PYTHON, '-c', download], 'XTTS v2 모델 준비 (첫 실행 시 다운로드)')
+        missing = [name for name in files if not (MODEL / name).is_file()]
+        if missing:
+            raise RuntimeError('XTTS 모델 다운로드가 완전하지 않습니다: ' + ', '.join(missing))
+    env = os.environ.copy()
+    env['PYTHONPATH'] = os.pathsep.join([str(SOURCE), str(SOURCE / 'third_party/Matcha-TTS')]) if ENGINE == 'cosyvoice' else ''
+    libs = [str(p) for p in (ROOT / 'venv/lib/python3.10/site-packages/nvidia').glob('*/lib')]
+    env['LD_LIBRARY_PATH'] = os.pathsep.join(libs + [env.get('LD_LIBRARY_PATH', '')])
+    env['TOKENIZERS_PARALLELISM'] = 'false'
+    env['COSY_ACCESS_TOKEN'] = secrets.token_urlsafe(24)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    base = f'http://127.0.0.1:{port}/v1/{env["COSY_ACCESS_TOKEN"]}'
+    log_path = ROOT / 'server.log'
+    with log_path.open('w') as log:
+        worker = subprocess.Popen([str(PYTHON), '-u', str(Path(__file__).resolve()), '--serve', '--engine', ENGINE, '--port', str(port)],
+                                  cwd=SOURCE if ENGINE == 'cosyvoice' else ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+    print('\n▶ 모델을 GPU에 올리는 중입니다. 준비가 끝나면 완료 메시지가 나옵니다.', flush=True)
+    ready = False
+    try:
+        for attempt in range(300):
+            if worker.poll() is not None:
+                raise RuntimeError('모델 시작 실패:\n' + log_path.read_text(errors='replace')[-7000:])
+            try:
+                ready = health(base)
+            except Exception:
+                pass
+            if ready:
+                state = {'base': base, 'pid': worker.pid, 'port': port, 'model': LABEL, 'engine': ENGINE}
+                STATE.write_text(json.dumps(state))
+                STATE.chmod(0o600)
+                print(f'✅ {LABEL} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
+                return
+            if attempt and attempt % 15 == 0:
+                print('  모델 로딩 중… 오류가 있으면 여기 표시됩니다.', flush=True)
+            time.sleep(2)
+        raise RuntimeError('모델 준비 시간 초과:\n' + log_path.read_text(errors='replace')[-7000:])
+    finally:
+        if not ready and worker.poll() is None:
+            worker.terminate()
 
-# 패치D: webui.py
-webui = f"{cosy_dir}/webui.py"
-if os.path.exists(webui):
-    t = open(webui, encoding="utf-8").read(); c = False
-    hdr = "import sys\nsys.modules['torchvision']=None\nsys.modules['torchvision.ops']=None\nimport soundfile as sf\nimport torch\n"
-    if "sys.modules['torchvision']=None" not in t: t = hdr + t; c = True
-    n2 = re.sub(r"torchaudio\.info\(([^)]+)\)\.sample_rate", r"sf.info(\1).samplerate", t)
-    if n2 != t: t = n2; c = True
-    n2 = re.sub(r"demo\.launch\([^)]*\)", "demo.launch(server_name='0.0.0.0',server_port=args.port,share=True,show_error=True)", t)
-    if n2 != t: t = n2; c = True
-    if c: open(webui, "w", encoding="utf-8").write(t); print("  ✅ [D] webui.py 패치")
 
-# 패치E: model.py autocast → 최신 torch.amp.autocast('cuda') API (빈 오디오 방지)
-mp = f"{cosy_dir}/cosyvoice/cli/model.py"
-if os.path.exists(mp):
-    t = open(mp, encoding="utf-8").read()
-    changed = False
-    # 구 API → 신 API (torch.cuda.amp → torch.amp)
-    for old, new in [
-        ("torch.cuda.amp.autocast(self.fp16)", "torch.amp.autocast('cuda', enabled=False)"),
-        ("torch.cuda.amp.autocast(enabled=False)", "torch.amp.autocast('cuda', enabled=False)"),
-        ("torch.cuda.amp.autocast()", "torch.amp.autocast('cuda', enabled=False)"),
-    ]:
-        n2 = t.replace(old, new)
-        if n2 != t:
-            t = n2
-            changed = True
-    if changed:
-        open(mp, "w", encoding="utf-8").write(t)
-        print("  ✅ [E] model.py autocast → torch.amp.autocast('cuda') 최신 API 패치")
+def serve(port):
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+    from fastapi.responses import Response
+    import uvicorn
+    import fcntl
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA GPU를 사용할 수 없습니다. T4 GPU 런타임인지 확인해주세요.')
+    if ENGINE == 'cosyvoice':
+        from cosyvoice.cli.cosyvoice import CosyVoice2
+        model = CosyVoice2(model_dir=str(MODEL), load_jit=False, load_trt=False, fp16=False)
+        sample_rate = model.sample_rate
+    else:
+        if not (ROOT / 'license_acceptance.json').is_file():
+            raise RuntimeError('XTTS 이용 조건 동의 후 설치 셀을 실행해주세요.')
+        from TTS.tts.configs.xtts_config import XttsConfig
+        from TTS.tts.models.xtts import Xtts
+        config = XttsConfig()
+        config.load_json(str(MODEL / 'config.json'))
+        model = Xtts.init_from_config(config)
+        model.load_checkpoint(config, checkpoint_dir=str(MODEL), use_deepspeed=False, eval=True)
+        model.to('cuda').eval()
+        sample_rate = 24000
+    access_token = os.environ['COSY_ACCESS_TOKEN']
+    model_lock = threading.Lock()
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
-# torchaudio.info 패치
-try:
-    import torchaudio as _ta
-    code = open(_ta.__file__, encoding="utf-8").read()
-    if "info = lambda" not in code:
-        with open(_ta.__file__, "a", encoding="utf-8") as f:
-            f.write("\nimport soundfile as _sf\nclass _AudioMetaData:\n    def __init__(self,s): self.sample_rate=s\ninfo=lambda p,**kw:_AudioMetaData(_sf.info(p).samplerate)\n")
-        print("  ✅ [F] torchaudio.info 패치")
-except: pass
+    def authorize(token):
+        if not secrets.compare_digest(token, access_token):
+            raise HTTPException(403, '연결 주소가 올바르지 않습니다. 새 주소 전체를 복사해주세요.')
 
-print("✅ [7/7] 모든 패치 완료!")
-sys.stdout.flush()
+    @app.get('/')
+    def index():
+        return {'service': SERVICE, 'message': LABEL + ' 실행 중. 코랩에 표시된 전체 연결 주소를 사용하세요.'}
 
-# ─── 서버 시작 ────────────────────────────────────────────────
-print(f"\n{'='*55}")
-print("🚀 Cloudflare 터널 + CosyVoice 서버 시작!")
-print(f"{'='*55}\n")
-sys.stdout.flush()
+    @app.get('/v1/{token}')
+    @app.get('/v1/{token}/health')
+    def status(token: str):
+        authorize(token)
+        return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True}
 
-tunnel_log = "/content/cosy_tunnel.log"
-subprocess.Popen(
-    f"cloudflared tunnel --url http://127.0.0.1:50000 --logfile {tunnel_log} >/dev/null 2>&1",
-    shell=True
-)
-time.sleep(8)
+    @app.post('/v1/{token}/synthesize')
+    def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
+                   speed: float = Form(1.0), reference: UploadFile = File(...)):
+        authorize(token)
+        if not text.strip():
+            raise HTTPException(422, '생성할 대사를 입력해주세요.')
+        if ENGINE == 'cosyvoice' and not prompt_text.strip():
+            raise HTTPException(422, 'CosyVoice는 참조 음성의 실제 대사도 입력해야 합니다.')
+        if len(text) > 2000:
+            raise HTTPException(422, '한 번에 2,000자 이하로 나눠 생성해주세요.')
+        if not np.isfinite(speed) or not 0.5 <= speed <= 2:
+            raise HTTPException(422, '속도는 0.5~2.0 사이여야 합니다.')
+        if not model_lock.acquire(blocking=False):
+            raise HTTPException(409, '다른 음성을 생성 중입니다. 완료 후 다시 실행해주세요.')
+        gpu_lock = None
+        try:
+            gpu_lock = (ROOT.parent / 'gpu.lock').open('a+')
+            try:
+                fcntl.flock(gpu_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise HTTPException(409, '다른 엔진이 음성을 생성 중입니다. 완료 후 실행해주세요.')
+            payload = reference.file.read(10 * 1024 * 1024 + 1)
+            if not payload or len(payload) > 10 * 1024 * 1024:
+                raise HTTPException(422, '참조 음성은 10MB 이하 WAV 또는 MP3를 사용해주세요.')
+            with tempfile.TemporaryDirectory(prefix='cosy_ref_') as folder:
+                original = Path(folder) / 'reference.audio'
+                original.write_bytes(payload)
+                prepared = Path(folder) / 'reference.wav'
+                result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
+                                         '-t', '31', '-ac', '1', '-ar', '24000', str(prepared)],
+                                        capture_output=True, text=True, timeout=60)
+                if result.returncode:
+                    raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
+                audio, sr = sf.read(prepared, dtype='float32')
+                duration = len(audio) / sr
+                if not 3 <= duration <= 30:
+                    raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
+                if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
+                    raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
+                pieces = []
+                sentences = re.split(r'(?<=[.!?。！？])\s+|\n+', text.strip())
+                chunks = []
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    while len(sentence) > 180:
+                        cut = sentence.rfind(' ', 60, 180)
+                        cut = cut if cut >= 60 else 180
+                        chunks.append(sentence[:cut])
+                        sentence = sentence[cut:].strip()
+                    if sentence:
+                        chunks.append(sentence)
+                with torch.inference_mode():
+                    if ENGINE == 'cosyvoice':
+                        for chunk in chunks:
+                            for item in model.inference_zero_shot(chunk, prompt_text.strip(), str(prepared),
+                                                                 stream=False, speed=speed, text_frontend=False):
+                                pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                    else:
+                        latent, speaker = model.get_conditioning_latents(audio_path=[str(prepared)])
+                        for chunk in chunks:
+                            result = model.inference(chunk, 'ko', latent, speaker,
+                                                     speed=speed, enable_text_splitting=True)
+                            pieces.append(np.asarray(result['wav'], dtype='float32').reshape(-1))
+                if not pieces or sum(x.size for x in pieces) == 0:
+                    raise RuntimeError('모델이 빈 음성을 반환했습니다. 참조 음성과 실제 대사를 확인해주세요.')
+                speech = np.concatenate(pieces)
+                if not np.all(np.isfinite(speech)) or np.max(np.abs(speech)) < 0.000001:
+                    raise RuntimeError('모델 출력이 무음이거나 손상되었습니다. server.log를 확인해주세요.')
+                output = io.BytesIO()
+                sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
+                return Response(output.getvalue(), media_type='audio/wav')
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.exception('%s synthesis failed', LABEL)
+            raise HTTPException(500, f'{type(exc).__name__}: {str(exc)[:600]}') from exc
+        finally:
+            reference.file.close()
+            if gpu_lock is not None:
+                gpu_lock.close()
+            model_lock.release()
 
-url = None
-if os.path.exists(tunnel_log):
-    for line in open(tunnel_log):
-        m = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
-        if m: url = m.group(0); break
+    uvicorn.run(app, host='127.0.0.1', port=port, access_log=False)
 
-if url:
-    print(f"🌐 Cloudflare: {url}")
-print("💡 아래 gradio.live 링크 → AI Voice Studio 사이드바에 입력!")
-sys.stdout.flush()
 
-os.chdir(cosy_dir)
-os.system("python3 webui.py --port 50000 --model_dir pretrained_models/CosyVoice2-0.5B")
+def tunnel():
+    state = read_state()
+    if not state.get('base') or not health(state['base']):
+        raise RuntimeError('먼저 1번 설치 셀을 실행해주세요.')
+    if state.get('public_base'):
+        try:
+            if health(state['public_base']):
+                print(LABEL + ' 프로그램 연결 주소:\n' + state['public_base'], flush=True)
+                return
+        except Exception:
+            pass
+    executable = ROOT / 'cloudflared'
+    if not executable.is_file():
+        print('연결 도구 다운로드 중…', flush=True)
+        temp = executable.with_suffix('.download')
+        urllib.request.urlretrieve('https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64', temp)
+        temp.chmod(0o755)
+        temp.replace(executable)
+    log_path = ROOT / 'tunnel.log'
+    with log_path.open('w') as log:
+        proc = subprocess.Popen([str(executable), 'tunnel', '--no-autoupdate', '--url',
+                                 f'http://127.0.0.1:{state["port"]}'], stdout=log, stderr=subprocess.STDOUT)
+    success = False
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError('연결 도구가 종료되었습니다:\n' + log_path.read_text(errors='replace')[-2000:])
+            match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', log_path.read_text(errors='replace'))
+            if match:
+                public = match.group(0) + state['base'].split(str(state['port']), 1)[1]
+                try:
+                    if health(public):
+                        state.update(public_base=public, tunnel_pid=proc.pid)
+                        STATE.write_text(json.dumps(state))
+                        print('\n✅ ' + LABEL + ' 프로그램 연결 준비 완료\n프로그램 연결 주소:\n' + public, flush=True)
+                        print(f'위 주소 전체를 AI Voice Studio의 {LABEL} 접속 주소에 붙여 넣으세요.', flush=True)
+                        success = True
+                        return
+                except Exception:
+                    pass
+            time.sleep(2)
+        raise RuntimeError('외부 연결을 열지 못했습니다. 코랩 내부의 2~3번 셀은 계속 사용할 수 있습니다.')
+    finally:
+        if not success and proc.poll() is None:
+            proc.terminate()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--setup', action='store_true')
+    modes.add_argument('--serve', action='store_true')
+    modes.add_argument('--tunnel', action='store_true')
+    parser.add_argument('--port', type=int, default=50000)
+    parser.add_argument('--engine', choices=['cosyvoice', 'xtts'], default='cosyvoice')
+    parser.add_argument('--accept-xtts-license', action='store_true')
+    args = parser.parse_args()
+    configure(args.engine)
+    if args.setup:
+        setup(accept_xtts_license=args.accept_xtts_license)
+    elif args.serve:
+        serve(args.port)
+    else:
+        tunnel()
+
+
+if __name__ == '__main__':
+    main()

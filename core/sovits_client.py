@@ -8,12 +8,15 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 from urllib.parse import urlsplit, urlunsplit
 import wave
 
 import requests
 
 SERVICE = "ai-voice-studio-gpt-sovits"
+REFERENCE_CACHE_CAPABILITY = "reference_cache_v284"
+_REFERENCE_LOCK = threading.Lock()
 
 
 def api_base(url):
@@ -36,7 +39,12 @@ def check_connection(url):
             status = response.json()
             if status.get("service") != SERVICE or status.get("ready") is not True:
                 return False, "GPT-SoVITS 모델이 준비된 주소가 아닙니다."
-            return True, f"GPT-SoVITS {status.get('model_version', '?')} · {status.get('sample_rate', '?')} Hz · 연결 완료"
+            message = f"GPT-SoVITS {status.get('model_version', '?')} · {status.get('sample_rate', '?')} Hz · 연결 완료"
+            if REFERENCE_CACHE_CAPABILITY in status.get("capabilities", []):
+                message += f" · 서버 v{status.get('server_version', '?')} · 참고 음성 재사용 지원"
+            else:
+                message += " · 이전 서버입니다. 반복 처리 개선을 적용하려면 아래 v2.8.4 코랩을 새로 열어주세요."
+            return True, message
         if response.status_code != 404:
             response.raise_for_status()
         # Support the official local api_v2.py, which has no /health endpoint.
@@ -78,6 +86,45 @@ def prepare_reference(source, target, ffmpeg):
     if not len(values) or not np.isfinite(values).all() or np.max(np.abs(values)) < 0.001:
         raise ValueError("참조 음성이 무음이거나 너무 작습니다. 또렷하게 들리는 녹음을 사용해주세요.")
     return Path(target).read_bytes()
+
+
+def cached_reference(source, cache_dir, ffmpeg):
+    """Reuse validated PCM in this output workspace; key by actual input bytes.
+
+    Shared-site workspaces are per visitor and their reset removes this cache.
+    Atomic writes avoid partial WAV files, and the lock protects LRU eviction.
+    """
+    source = Path(source)
+    if not source.is_file():
+        raise FileNotFoundError("참조 오디오 파일을 다시 등록해주세요.")
+    with source.open("rb") as handle:
+        raw = handle.read(10 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 10 * 1024 * 1024:
+        raise ValueError("참조 음성은 3~10초, 10MB 이하로 준비해주세요.")
+    identity = hashlib.sha256(b"sovits-pcm-v1\0" + raw).hexdigest()
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cached = cache_dir / (identity + ".wav")
+    with _REFERENCE_LOCK:
+        if cached.is_file():
+            data = cached.read_bytes()
+            cached.touch()
+            return data
+    # Copy the exact bytes used for the key, so re-uploading the same filename
+    # cannot combine a stale fingerprint with a different reference recording.
+    with tempfile.TemporaryDirectory(prefix="prepare_", dir=cache_dir) as folder:
+        original = Path(folder) / "input.audio"
+        prepared = Path(folder) / "reference.wav"
+        original.write_bytes(raw)
+        data = prepare_reference(original, prepared, ffmpeg)
+        if len(data) > 10 * 1024 * 1024:
+            raise ValueError("변환된 참조 음성이 10MB를 넘습니다. 더 짧은 3~10초 녹음을 사용해주세요.")
+        with _REFERENCE_LOCK:
+            os.replace(prepared, cached)
+            entries = sorted(cache_dir.glob("*.wav"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+            for obsolete in entries[16:]:
+                obsolete.unlink(missing_ok=True)
+    return data
 
 
 def request_payload(text, cfg):
@@ -130,8 +177,10 @@ def synthesize(text, output_file, cfg):
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="sovits_", dir=target.parent) as folder:
         folder = Path(folder)
-        normalized = prepare_reference(getattr(cfg, "ref_audio_path", ""), folder / "reference.wav", ffmpeg)
+        normalized = cached_reference(getattr(cfg, "ref_audio_path", ""),
+                                      target.parent / "sovits_references", ffmpeg)
         if urlsplit(base).hostname in ("127.0.0.1", "localhost", "::1") and "/v1/" not in urlsplit(base).path:
+            (folder / "reference.wav").write_bytes(normalized)
             payload["ref_audio_path"] = str(folder / "reference.wav")
         else:
             payload["ref_audio_path"] = "ref_" + hashlib.sha256(normalized).hexdigest() + ".wav"

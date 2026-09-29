@@ -1,6 +1,7 @@
 """Self-contained GPT-SoVITS v4 Colab runner; upstream model code stays unmodified."""
 import argparse
 import base64
+from collections import OrderedDict
 import hashlib
 import io
 import json
@@ -31,6 +32,8 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'GPT_SoVITS/pretrained_models'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-gpt-sovits'
+SERVER_VERSION = '2.8.4'
+REFERENCE_CACHE_CAPABILITY = 'reference_cache_v284'
 NLTK_DATA_REVISION = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
 # Official nltk_data/index.xml at the revision above supplies sizes and SHA-256.
 NLTK_PACKAGES = (
@@ -136,11 +139,13 @@ def read_state():
         return {}
 
 
-def health(base):
+def health(base, require_current=True):
     with urllib.request.urlopen(base + '/health', timeout=5) as response:
         status = json.load(response)
     return (status.get('service') == SERVICE and status.get('ready') is True
-            and status.get('model_version') == 'v4' and status.get('sample_rate') == 48000)
+            and status.get('model_version') == 'v4' and status.get('sample_rate') == 48000
+            and (not require_current or (status.get('server_version') == SERVER_VERSION
+                 and REFERENCE_CACHE_CAPABILITY in status.get('capabilities', []))))
 
 
 def setup():
@@ -148,12 +153,19 @@ def setup():
         raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
     ROOT.mkdir(parents=True, exist_ok=True)
     state = read_state()
+    existing_ready = False
     try:
-        if state.get('base') and health(state['base']):
-            print('✅ GPT-SoVITS v4 준비 완료 · 48kHz', flush=True)
-            return
+        existing_ready = bool(state.get('base')) and health(state['base'], require_current=False)
     except Exception:
         pass
+    if existing_ready:
+        if health(state['base']):
+            print(f'✅ GPT-SoVITS v4 · 서버 v{SERVER_VERSION} 준비 완료 · 48kHz', flush=True)
+            return
+        # The old wrapper cannot report an active generation safely. Do not
+        # terminate it or load a second copy of the model onto the same GPU.
+        raise RuntimeError('이전 GPT 서버가 실행 중입니다. 생성 중인 음성이 끝난 뒤 런타임을 다시 시작하고 '
+                           '이 v2.8.4 노트북의 1번을 실행해주세요. 기존 Drive 복사본은 자동 갱신되지 않습니다.')
     if not shutil.which('nvidia-smi'):
         raise RuntimeError('런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
     run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
@@ -231,9 +243,10 @@ def setup():
                 ready = False
             if ready:
                 STATE.write_text(json.dumps({'base': base, 'port': port, 'pid': worker.pid,
-                                             'model_version': 'v4', 'sample_rate': 48000}))
+                                             'model_version': 'v4', 'sample_rate': 48000,
+                                             'server_version': SERVER_VERSION}))
                 STATE.chmod(0o600)
-                print('✅ GPT-SoVITS v4 준비 완료 · 48kHz · 한국어 발음 변환 정상', flush=True)
+                print(f'✅ GPT-SoVITS v4 · 서버 v{SERVER_VERSION} 준비 완료 · 48kHz · 한국어 발음 변환 정상', flush=True)
                 return
             time.sleep(2)
         raise RuntimeError('모델 준비 시간이 초과되었습니다. 마지막 로그를 확인해주세요.')
@@ -249,6 +262,16 @@ def create_app(pipeline, access_token):
     from fastapi import Body, FastAPI, HTTPException, Response
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
+    # Keep the pinned upstream's reference cache per voice, including its raw
+    # audio and text features. Never share mutable lists between voice entries.
+    # Eight references bound extra GPU memory and temporary files per server.
+    reference_cache = OrderedDict()
+
+    def copy_prompt_cache(cache):
+        return {key: list(value) if isinstance(value, list) else value
+                for key, value in cache.items()}
+
+    empty_prompt_cache = copy_prompt_cache(pipeline.prompt_cache)
 
     def authorize(token):
         if not secrets.compare_digest(token, access_token):
@@ -258,7 +281,9 @@ def create_app(pipeline, access_token):
     def status(token: str):
         authorize(token)
         return {'service': SERVICE, 'ready': True, 'model_version': pipeline.configs.version,
-                'sample_rate': pipeline.vocoder_configs['sr'], 'korean_g2p': True, 'api_version': 1}
+                'sample_rate': pipeline.vocoder_configs['sr'], 'korean_g2p': True, 'api_version': 1,
+                'server_version': SERVER_VERSION, 'capabilities': [REFERENCE_CACHE_CAPABILITY],
+                'busy': lock.locked()}
 
     @app.post('/v1/{token}/tts')
     def generate(token: str, req: dict = Body(...)):
@@ -297,10 +322,26 @@ def create_app(pipeline, access_token):
             raise HTTPException(422, str(exc)) from exc
         if not lock.acquire(blocking=False):
             raise HTTPException(409, '앞선 음성을 생성 중입니다. 코랩 로그에서 완료 여부를 확인해주세요.')
+        # The transcript AND its language are part of the key. Upstream alone
+        # checks prompt text but not a changed language when reusing its cache.
+        identity = json.dumps([hashlib.sha256(raw).hexdigest(), prompt, params['prompt_lang'],
+                               SERVER_VERSION], ensure_ascii=False)
+        reference_id = hashlib.sha256(identity.encode('utf-8')).hexdigest()
+        pending_folder = None
+        started = time.monotonic()
         try:
-            with tempfile.TemporaryDirectory(prefix='sovits_ref_') as folder:
-                source = Path(folder) / 'input.audio'
-                prepared = Path(folder) / 'reference.wav'
+            cached = reference_cache.get(reference_id)
+            reference_hit = cached is not None
+            print(f'▶ GPT 음성 생성 시작 · {len(text)}자 · {steps}단계', flush=True)
+            if reference_hit:
+                prepared = Path(cached['folder'].name) / 'reference.wav'
+                pipeline.prompt_cache = copy_prompt_cache(cached['prompt_cache'])
+                reference_cache.move_to_end(reference_id)
+                print('✅ 참고 음성과 대사 분석 결과 재사용', flush=True)
+            else:
+                pending_folder = tempfile.TemporaryDirectory(prefix='sovits_ref_')
+                source = Path(pending_folder.name) / 'input.audio'
+                prepared = Path(pending_folder.name) / 'reference.wav'
                 source.write_bytes(raw)
                 result = subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-y', '-i', str(source),
                                          '-t', '10.1', '-vn', '-ac', '1', '-c:a', 'pcm_s16le', str(prepared)],
@@ -313,27 +354,51 @@ def create_app(pipeline, access_token):
                     raise HTTPException(422, '참조 음성은 3~10초여야 합니다. 문장이 끝나는 지점에서 직접 잘라주세요.')
                 if not np.isfinite(audio).all() or np.max(np.abs(audio)) < .001:
                     raise HTTPException(422, '참조 음성이 무음이거나 너무 작습니다.')
-                params.update(text=text, prompt_text=prompt, ref_audio_path=str(prepared),
-                              sample_steps=steps, text_split_method=split, batch_size=1, split_bucket=False,
-                              parallel_infer=False, streaming_mode=False, return_fragment=False,
-                              seed=-1, repetition_penalty=1.35, super_sampling=False)
-                generator = pipeline.run(params)
-                try:
-                    rate, audio = next(generator)
-                finally:
-                    generator.close()
-                audio = np.asarray(audio)
-                if rate != 48000 or not audio.size or not np.isfinite(audio).all() or np.max(np.abs(audio)) < .00001:
-                    raise RuntimeError('v4에서 유효한 48kHz 음성이 생성되지 않았습니다. 코랩 로그를 확인해주세요.')
-                output = io.BytesIO()
-                sf.write(output, audio, rate, format='WAV', subtype='PCM_16')
-                return Response(output.getvalue(), media_type='audio/wav')
+                source.unlink()
+                pipeline.prompt_cache = copy_prompt_cache(empty_prompt_cache)
+                print('✅ 참고 음성 변환·검사 완료 · 첫 분석 후 다음 대사부터 재사용', flush=True)
+            params.update(text=text, prompt_text=prompt, ref_audio_path=str(prepared),
+                          sample_steps=steps, text_split_method=split, batch_size=1, split_bucket=False,
+                          parallel_infer=False, streaming_mode=False, return_fragment=False,
+                          seed=-1, repetition_penalty=1.35, super_sampling=False)
+            generator = pipeline.run(params)
+            try:
+                rate, audio = next(generator)
+            finally:
+                generator.close()
+            audio = np.asarray(audio)
+            if rate != 48000 or not audio.size or not np.isfinite(audio).all() or np.max(np.abs(audio)) < .00001:
+                raise RuntimeError('v4에서 유효한 48kHz 음성이 생성되지 않았습니다. 코랩 로그를 확인해주세요.')
+            output = io.BytesIO()
+            sf.write(output, audio, rate, format='WAV', subtype='PCM_16')
+            if not reference_hit:
+                while len(reference_cache) >= 8:
+                    _, discarded = reference_cache.popitem(last=False)
+                    discarded['folder'].cleanup()
+                    del discarded
+                reference_cache[reference_id] = {
+                    'folder': pending_folder,
+                    'prompt_cache': copy_prompt_cache(pipeline.prompt_cache),
+                }
+                pending_folder = None
+            elapsed = time.monotonic() - started
+            print(f'✅ GPT 생성 완료 · 음성 {len(audio) / rate:.1f}초 · 처리 {elapsed:.1f}초', flush=True)
+            return Response(output.getvalue(), media_type='audio/wav', headers={
+                'X-Server-Version': SERVER_VERSION,
+                'X-Reference-Cache': 'hit' if reference_hit else 'miss',
+            })
         except HTTPException:
             raise
         except Exception as exc:
+            invalid = reference_cache.pop(reference_id, None)
+            if invalid is not None:
+                invalid['folder'].cleanup()
+            pipeline.prompt_cache = copy_prompt_cache(empty_prompt_cache)
             logging.exception('GPT-SoVITS generation failed')
             raise HTTPException(500, str(exc)[:800]) from exc
         finally:
+            if pending_folder is not None:
+                pending_folder.cleanup()
             lock.release()
     return app
 

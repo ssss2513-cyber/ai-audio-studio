@@ -28,7 +28,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.2 · 코랩 연결 셀 수정·화자별 추천"
+APP_VERSION = "v2.9.3 · 공유 코랩 이름·링크 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",

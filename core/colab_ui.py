@@ -10,7 +10,7 @@ from .tts_engine import TTSEngine
 ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
-NOTEBOOK_RELEASE_REVISION = "3a33f207c94b66b0d13ff620d774e597f90ee994"
+NOTEBOOK_RELEASE_REVISION = "fc0a7215efad6e00b76cce55489efec7b9516e91"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
@@ -35,10 +35,17 @@ def render_connections(mode):
         st.caption("설치 중인 코랩 화면을 유지하고, 새 세션을 시작했다면 새 연결 주소를 입력해주세요.")
     notebooks = []
     if "gpt-sovits" in selected:
-        notebooks.append(("GPT-SoVITS 코랩 v2.8.6 받기", "GPT_SoVITS_Colab_API.ipynb", "GPT_SoVITS_Colab_v2.8.6.ipynb"))
+        notebooks.append(("GPT-SoVITS 코랩 v2.8.7 받기", "GPT_SoVITS_Colab_API.ipynb", "GPT_SoVITS_Colab_v2.8.7.ipynb"))
+        st.caption("GPT v2.8.7은 4번 셀 하나로 기존 환경 확인부터 준비·연결까지 진행합니다.")
+        recovery = ROOT / "GPT_Connection_Recovery_v2.8.7.py"
+        if recovery.is_file():
+            with st.expander("GPT 업데이트 후 연결 복구 · 기존 코랩에서 실행"):
+                st.write("이전에 사용하던 코랩의 ＋코드에 아래 코드를 붙여넣고 실행하세요.")
+                st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
+                st.code(recovery.read_text(encoding="utf-8"), language="python")
     if "cosyvoice" in selected:
         notebooks.append(("CosyVoice 코랩 v2.9.4 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.4.ipynb"))
-    st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 아래 버전이 표시된 버튼으로 새로 열어주세요.")
+    st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")
     for label, filename, download_name in notebooks:
         st.link_button(label.replace(" 받기", " 바로 열기 ↗"),
                        "https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/" + NOTEBOOK_RELEASE_REVISION + "/" + filename,

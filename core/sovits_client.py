@@ -43,7 +43,7 @@ def check_connection(url):
             if REFERENCE_CACHE_CAPABILITY in status.get("capabilities", []):
                 message += f" · 서버 v{status.get('server_version', '?')} · 참고 음성 재사용 지원"
             else:
-                message += " · 이전 서버입니다. 반복 처리 개선을 적용하려면 아래 v2.8.4 코랩을 새로 열어주세요."
+                message += " · 이전 서버입니다. 반복 처리 개선을 적용하려면 아래 최신 GPT 코랩을 새로 열어주세요."
             return True, message
         if response.status_code != 404:
             response.raise_for_status()

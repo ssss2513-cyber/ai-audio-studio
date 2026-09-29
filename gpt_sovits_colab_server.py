@@ -22,6 +22,7 @@ import time
 import traceback
 import urllib.request
 import urllib.parse
+import urllib.error
 import zipfile
 
 SOURCE_REVISION = '48b1a0169a28582a8984402f82cf438d3bfa6aca'
@@ -32,7 +33,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'GPT_SoVITS/pretrained_models'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-gpt-sovits'
-SERVER_VERSION = '2.8.4'
+SERVER_VERSION = '2.8.5'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v284'
 NLTK_DATA_REVISION = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
 # Official nltk_data/index.xml at the revision above supplies sizes and SHA-256.
@@ -139,13 +140,63 @@ def read_state():
         return {}
 
 
-def health(base, require_current=True):
+def server_status(base):
     with urllib.request.urlopen(base + '/health', timeout=5) as response:
         status = json.load(response)
+    if not isinstance(status, dict):
+        raise ValueError('음성 서버 상태 응답 형식이 올바르지 않습니다.')
+    return status
+
+
+def compatible_server(status):
     return (status.get('service') == SERVICE and status.get('ready') is True
             and status.get('model_version') == 'v4' and status.get('sample_rate') == 48000
-            and (not require_current or (status.get('server_version') == SERVER_VERSION
-                 and REFERENCE_CACHE_CAPABILITY in status.get('capabilities', []))))
+            and status.get('api_version') == 1)
+
+
+def health(base, require_current=False):
+    # API compatibility determines connectivity. An exact release number must
+    # never make an otherwise usable v4 server appear to have stopped.
+    status = server_status(base)
+    return (compatible_server(status) and (not require_current
+            or REFERENCE_CACHE_CAPABILITY in status.get('capabilities', [])))
+
+
+def connection_status(base):
+    try:
+        status = server_status(base)
+    except urllib.error.HTTPError as exc:
+        return {'ready': False, 'detail': f'서버 상태 확인: HTTP {exc.code}. 저장된 연결 주소의 서버가 준비되지 않았습니다.'}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {'ready': False, 'detail': '서버 상태 요청에 응답이 없습니다. 아래 실행 상태와 마지막 로그를 확인해주세요.'}
+    except ValueError:
+        return {'ready': False, 'detail': '서버가 정상적인 상태 정보를 보내지 않았습니다.'}
+    if not compatible_server(status):
+        return {'ready': False, 'detail': '응답은 있지만 GPT-SoVITS v4 · 48kHz API가 준비된 상태가 아닙니다.'}
+    return {'ready': True, 'server_version': str(status.get('server_version') or '이전 버전'),
+            'reference_cache': REFERENCE_CACHE_CAPABILITY in status.get('capabilities', []),
+            'detail': 'GPT-SoVITS v4 · 48kHz 서버 응답 정상'}
+
+
+def print_connection_diagnostics(state, report):
+    """Show evidence without exposing the private connection token."""
+    print('\n【연결 확인 결과】\n' + report['detail'], flush=True)
+    pid = state.get('pid')
+    if isinstance(pid, int) and pid > 1:
+        try:
+            process_state = (Path('/proc') / str(pid) / 'stat').read_text().split(') ', 1)[1][0]
+            running = process_state not in ('Z', 'X')
+        except (OSError, IndexError):
+            running = False
+        print('기록된 서버 프로세스: ' + ('실행 중이나 준비 응답을 받지 못함' if running else
+              '종료됨 · 1번 완료 뒤 서버가 멈춘 상태'), flush=True)
+    logfile = ROOT / 'server.log'
+    if logfile.is_file():
+        with logfile.open('rb') as handle:
+            handle.seek(max(0, logfile.stat().st_size - 8000))
+            tail = '\n'.join(handle.read().decode('utf-8', errors='replace').splitlines()[-25:])
+        tail = re.sub(r'/v1/[A-Za-z0-9_-]+', '/v1/[연결코드 숨김]', tail)
+        print('\n【음성 서버 마지막 로그】\n' + tail, flush=True)
 
 
 def setup():
@@ -153,19 +204,13 @@ def setup():
         raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
     ROOT.mkdir(parents=True, exist_ok=True)
     state = read_state()
-    existing_ready = False
-    try:
-        existing_ready = bool(state.get('base')) and health(state['base'], require_current=False)
-    except Exception:
-        pass
-    if existing_ready:
-        if health(state['base']):
-            print(f'✅ GPT-SoVITS v4 · 서버 v{SERVER_VERSION} 준비 완료 · 48kHz', flush=True)
-            return
-        # The old wrapper cannot report an active generation safely. Do not
-        # terminate it or load a second copy of the model onto the same GPU.
-        raise RuntimeError('이전 GPT 서버가 실행 중입니다. 생성 중인 음성이 끝난 뒤 런타임을 다시 시작하고 '
-                           '이 v2.8.4 노트북의 1번을 실행해주세요. 기존 Drive 복사본은 자동 갱신되지 않습니다.')
+    existing = connection_status(state['base']) if state.get('base') else {'ready': False}
+    if existing['ready']:
+        print(f'✅ 기존 GPT-SoVITS v4 서버 준비 완료 · {existing["server_version"]} · 48kHz', flush=True)
+        if not existing['reference_cache']:
+            print('기존 서버로 연결할 수 있습니다. 참고 음성 재사용 기능은 아직 적용되지 않은 서버입니다. '
+                  '속도 개선 서버로 전환하려면 생성이 끝난 뒤 런타임을 다시 시작하고 1번을 실행해주세요.', flush=True)
+        return
     if not shutil.which('nvidia-smi'):
         raise RuntimeError('런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
     run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
@@ -231,14 +276,15 @@ def setup():
     logfile = ROOT / 'server.log'
     with logfile.open('w') as log:
         worker = subprocess.Popen([str(PYTHON), '-u', str(Path(__file__).resolve()), '--serve', '--port', str(port)],
-                                  cwd=SOURCE, env=env, stdout=log, stderr=subprocess.STDOUT)
+                                  cwd=SOURCE, env=env, stdin=subprocess.DEVNULL,
+                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     print('\n▶ 한국어 발음 변환과 v4 모델 로딩 확인 중…', flush=True)
     try:
         for _ in range(300):
             if worker.poll() is not None:
                 raise RuntimeError('모델 준비 실패:\n' + logfile.read_text(errors='replace')[-6000:])
             try:
-                ready = health(base)
+                ready = health(base, require_current=True)
             except Exception:
                 ready = False
             if ready:
@@ -422,8 +468,24 @@ def serve(port):
 
 def tunnel():
     state = read_state()
-    if not state.get('base') or not health(state['base']):
-        raise RuntimeError('1번 셀을 실행해 v4 준비 완료를 확인해주세요.')
+    if not state.get('base'):
+        raise RuntimeError('이 런타임에는 1번의 준비 기록이 없습니다. 1번을 완료한 같은 코랩의 같은 런타임에서 '
+                           '4번을 실행해주세요. 이 셀에서는 설치를 시작하지 않습니다.')
+    print('음성 서버의 실제 응답을 확인합니다…', flush=True)
+    for attempt in range(3):
+        report = connection_status(state['base'])
+        if report['ready']:
+            break
+        if attempt < 2:
+            print(f'서버 응답 재확인 {attempt + 1}/2…', flush=True)
+            time.sleep(2)
+    if not report['ready']:
+        print_connection_diagnostics(state, report)
+        raise RuntimeError('음성 서버의 준비 응답을 받지 못했습니다. 위 【연결 확인 결과】와 '
+                           '【음성 서버 마지막 로그】가 실제 확인 결과입니다. 4번은 패키지를 재설치하지 않습니다.')
+    print(f'✅ {report["detail"]} · 서버 {report["server_version"]}', flush=True)
+    if not report['reference_cache']:
+        print('기존 서버 연결을 유지합니다. 이 서버는 참고 음성 재사용 기능이 아직 적용되지 않았습니다.', flush=True)
     if state.get('public_base'):
         try:
             if health(state['public_base']):
@@ -438,7 +500,8 @@ def tunnel():
     logfile = ROOT / 'tunnel.log'
     with logfile.open('w') as log:
         child = subprocess.Popen([str(binary), 'tunnel', '--no-autoupdate', '--url', f'http://127.0.0.1:{state["port"]}'],
-                                 stdout=log, stderr=subprocess.STDOUT)
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
     try:
         for _ in range(60):
             if child.poll() is not None:

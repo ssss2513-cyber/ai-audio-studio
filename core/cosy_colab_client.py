@@ -73,7 +73,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
     if not ok:
         raise RuntimeError(message)
     if style_instruction and "style_instruction" not in (status or {}).get("capabilities", []):
-        raise RuntimeError("이 코랩은 스타일을 지원하지 않는 이전 버전입니다. 사이트의 CosyVoice 코랩 바로 열기로 v2.9.0을 열고, 런타임을 다시 시작한 뒤 1번과 4번을 실행해주세요. 기존 코랩은 '기본' 스타일로 사용할 수 있습니다.")
+        raise RuntimeError("이 코랩은 스타일을 지원하지 않는 이전 버전입니다. 사이트의 CosyVoice 코랩 바로 열기로 최신 코랩을 열고, 런타임을 다시 시작한 뒤 1번과 4번을 실행해주세요. 기존 코랩은 '기본' 스타일로 사용할 수 있습니다.")
     try:
         with reference.open("rb") as audio:
             response = requests.post(

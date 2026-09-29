@@ -36,7 +36,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.0'
+SERVER_VERSION = '2.9.1'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -156,12 +156,26 @@ def setup():
     with log_path.open('w') as log:
         worker = subprocess.Popen([str(PYTHON), '-u', str(Path(__file__).resolve()), '--serve', '--engine', ENGINE, '--port', str(port)],
                                   cwd=SOURCE, env=env, stdout=log, stderr=subprocess.STDOUT)
-    print('\n▶ 모델을 GPU에 올리는 중입니다. 준비가 끝나면 완료 메시지가 나옵니다.', flush=True)
+    print('\n▶ 모델 준비 기록을 아래에 실시간으로 표시합니다. 최대 10분 후에도 준비되지 않으면 중단합니다.', flush=True)
     ready = False
+    started = time.monotonic()
+    next_notice = started + 30
+    token = env['COSY_ACCESS_TOKEN']
+    live_log = log_path.open(encoding='utf-8', errors='replace')
+
+    def show_new_logs():
+        output = live_log.read()
+        if output:
+            print(output.replace(token, '[접속 키 숨김]'), end='' if output.endswith('\n') else '\n', flush=True)
+
+    def error_tail():
+        return log_path.read_text(errors='replace')[-7000:].replace(token, '[접속 키 숨김]')
+
     try:
-        for attempt in range(300):
+        while time.monotonic() - started < 600:
+            show_new_logs()
             if worker.poll() is not None:
-                raise RuntimeError('모델 시작 실패:\n' + log_path.read_text(errors='replace')[-7000:])
+                raise RuntimeError('모델 시작 실패:\n' + error_tail())
             try:
                 ready = health(base)
             except Exception:
@@ -170,18 +184,29 @@ def setup():
                 state = {'base': base, 'pid': worker.pid, 'port': port, 'model': LABEL, 'engine': ENGINE}
                 STATE.write_text(json.dumps(state))
                 STATE.chmod(0o600)
-                print(f'✅ {LABEL} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
+                show_new_logs()
+                print(f'✅ {LABEL} v{SERVER_VERSION} 준비 완료. 사이트 연결은 4번을 실행하세요.', flush=True)
                 return
-            if attempt and attempt % 15 == 0:
-                print('  모델 로딩 중… 오류가 있으면 여기 표시됩니다.', flush=True)
+            now = time.monotonic()
+            if now >= next_notice:
+                elapsed = int(now - started)
+                print(f'  ⏳ 준비 대기 {elapsed // 60}분 {elapsed % 60:02d}초 / 최대 10분 — 아직 준비 완료가 아닙니다. 위 마지막 단계와 기록을 확인해주세요.', flush=True)
+                next_notice = now + 30
             time.sleep(2)
-        raise RuntimeError('모델 준비 시간 초과:\n' + log_path.read_text(errors='replace')[-7000:])
+        show_new_logs()
+        raise RuntimeError('모델 준비가 10분 안에 완료되지 않아 중단했습니다. 아래 실제 기록을 보내주세요:\n' + error_tail())
     finally:
+        live_log.close()
         if not ready and worker.poll() is None:
             worker.terminate()
 
 
 def serve(port):
+    import faulthandler
+    # A live process is not proof of progress. Expose where startup is waiting.
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(120, repeat=True)
+    print('[모델 준비 1/4] 오디오·Torch 실행 환경을 불러옵니다.', flush=True)
     import numpy as np
     import soundfile as sf
     import torch
@@ -191,8 +216,12 @@ def serve(port):
     import fcntl
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA GPU를 사용할 수 없습니다. T4 GPU 런타임인지 확인해주세요.')
+    print('[모델 준비 2/4] GPU 확인 완료. CosyVoice 실행 코드를 불러옵니다.', flush=True)
     from cosyvoice.cli.cosyvoice import CosyVoice2
+    print('[모델 준비 3/4] 음성 모델·토크나이저를 불러옵니다. 세부 기록이 이어집니다.', flush=True)
     model = CosyVoice2(model_dir=str(MODEL), load_jit=False, load_trt=False, fp16=False)
+    faulthandler.cancel_dump_traceback_later()
+    print('[모델 준비 4/4] 모델 로딩 완료. 연결 서버를 시작합니다.', flush=True)
     sample_rate = model.sample_rate
     access_token = os.environ['COSY_ACCESS_TOKEN']
     model_lock = threading.Lock()

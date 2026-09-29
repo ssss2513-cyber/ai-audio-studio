@@ -6,6 +6,7 @@
 --serve: internal worker, launched with the isolated Python interpreter.
 """
 import argparse
+from collections import OrderedDict
 import hashlib
 import io
 import json
@@ -38,8 +39,9 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.3'
+SERVER_VERSION = '2.9.4'
 GENERATION_CAPABILITY = 'validated_generation_v293'
+REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -75,7 +77,8 @@ def health(base, require_current=True):
         data = json.load(response)
     return (data.get('service') == SERVICE and data.get('ready') is True
             and (not require_current or (data.get('server_version') == SERVER_VERSION
-                 and GENERATION_CAPABILITY in data.get('capabilities', []))))
+                 and GENERATION_CAPABILITY in data.get('capabilities', [])
+                 and REFERENCE_CACHE_CAPABILITY in data.get('capabilities', []))))
 
 
 def stop_previous_worker(state):
@@ -339,6 +342,10 @@ def serve(port):
         raise RuntimeError('CosyVoice 2 출력 설정이 올바르지 않습니다. 모델 설정을 다시 확인해주세요.')
     access_token = os.environ['COSY_ACCESS_TOKEN']
     model_lock = threading.Lock()
+    # Cache only this personal server's reference features, under model_lock.
+    # Entries are never saved to disk and are bounded to limit GPU memory use.
+    reference_cache = OrderedDict()
+    reference_cache_limit = 16
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     def authorize(token):
@@ -355,7 +362,7 @@ def serve(port):
         authorize(token)
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate,
-                'capabilities': ['style_instruction', GENERATION_CAPABILITY]}
+                'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
@@ -389,60 +396,84 @@ def serve(port):
             if not payload or len(payload) > 10 * 1024 * 1024:
                 raise HTTPException(422, '참조 음성은 10MB 이하 WAV 또는 MP3를 사용해주세요.')
             with tempfile.TemporaryDirectory(prefix='cosy_ref_') as folder:
-                original = Path(folder) / 'reference.audio'
-                original.write_bytes(payload)
-                prepared = Path(folder) / 'reference.wav'
-                result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
-                                         '-t', '31', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_f32le', str(prepared)],
-                                        capture_output=True, text=True, timeout=60)
-                if result.returncode:
-                    raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
-                audio, sr = sf.read(prepared, dtype='float32')
-                duration = len(audio) / sr
-                if not 3 <= duration <= 30:
-                    raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
-                if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
-                    raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
+                instruction = ('Speak in Korean. ' + style_instruction + '<|endofprompt|>') if style_instruction else ''
+                # Include the conditioning text and mode: instruction-mode voices
+                # must never reuse a basic-mode transcript (upstream issue #1400).
+                identity = json.dumps([hashlib.sha256(payload).hexdigest(), prompt_text,
+                                       instruction, SERVER_VERSION], ensure_ascii=False)
+                reference_id = 'studio_' + hashlib.sha256(identity.encode('utf-8')).hexdigest()
+                cached = reference_cache.get(reference_id)
+                reference_hit = cached is not None and reference_id in model.frontend.spk2info
+                preparation_started = time.monotonic()
+                if reference_hit:
+                    reference_cache.move_to_end(reference_id)
+                    duration = cached['duration']
+                    print('참고 목소리 분석 결과를 재사용합니다.', flush=True)
+                else:
+                    print('참고 목소리를 분석합니다. 같은 음성은 다음 대사부터 재사용합니다.', flush=True)
+                    original = Path(folder) / 'reference.audio'
+                    original.write_bytes(payload)
+                    prepared = Path(folder) / 'reference.wav'
+                    result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
+                                             '-t', '31', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_f32le', str(prepared)],
+                                            capture_output=True, text=True, timeout=60)
+                    if result.returncode:
+                        raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
+                    audio, sr = sf.read(prepared, dtype='float32')
+                    duration = len(audio) / sr
+                    if not 3 <= duration <= 30:
+                        raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
+                    if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
+                        raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
 
-                # Remove only nearly silent outer padding; never cut spoken audio
-                # to a fixed length without also aligning its transcript.
-                frame = int(sr * 0.02)
-                padded = np.pad(audio, (0, (-len(audio)) % frame))
-                levels = np.sqrt(np.mean(padded.reshape(-1, frame) ** 2, axis=1))
-                active = np.flatnonzero(levels > max(0.0001, float(levels.max()) * 0.015))
-                if active.size == 0 or active.size * 0.02 < 0.8:
-                    raise HTTPException(422, '참고 음성의 실제 발화가 너무 짧거나 조용합니다. 배경음 없이 한 사람이 문장을 말하는 녹음을 사용해주세요.')
-                spoken_seconds = active.size * 0.02
-                units = speech_units(prompt_text)
-                if (spoken_seconds > 6 and units / spoken_seconds < 0.75) or units / spoken_seconds > 25:
-                    raise HTTPException(422, f'참고 음성 길이({duration:.1f}초)와 입력한 참고 대사 길이가 크게 다릅니다. 새로 만들 대사가 아니라 녹음 전체의 실제 대사를 입력해주세요.')
-                margin = int(sr * 0.15)
-                start = max(0, int(active[0]) * frame - margin)
-                end = min(len(audio), (int(active[-1]) + 1) * frame + margin)
-                audio = audio[start:end]
-                peak = float(np.max(np.abs(audio)))
-                # Leave ordinary recordings untouched and avoid amplifying noise.
-                if peak > 0.95:
-                    audio = audio * (0.95 / peak)
-                elif peak < 0.1:
-                    audio = audio * min(4.0, 0.1 / peak)
-                sf.write(prepared, audio, sr, subtype='FLOAT')
+                    # Remove only nearly silent outer padding; never cut spoken audio
+                    # to a fixed length without also aligning its transcript.
+                    frame = int(sr * 0.02)
+                    padded = np.pad(audio, (0, (-len(audio)) % frame))
+                    levels = np.sqrt(np.mean(padded.reshape(-1, frame) ** 2, axis=1))
+                    active = np.flatnonzero(levels > max(0.0001, float(levels.max()) * 0.015))
+                    if active.size == 0 or active.size * 0.02 < 0.8:
+                        raise HTTPException(422, '참고 음성의 실제 발화가 너무 짧거나 조용합니다. 배경음 없이 한 사람이 문장을 말하는 녹음을 사용해주세요.')
+                    spoken_seconds = active.size * 0.02
+                    units = speech_units(prompt_text)
+                    if (spoken_seconds > 6 and units / spoken_seconds < 0.75) or units / spoken_seconds > 25:
+                        raise HTTPException(422, f'참고 음성 길이({duration:.1f}초)와 입력한 참고 대사 길이가 크게 다릅니다. 새로 만들 대사가 아니라 녹음 전체의 실제 대사를 입력해주세요.')
+                    margin = int(sr * 0.15)
+                    start = max(0, int(active[0]) * frame - margin)
+                    end = min(len(audio), (int(active[-1]) + 1) * frame + margin)
+                    audio = audio[start:end]
+                    peak = float(np.max(np.abs(audio)))
+                    # Leave ordinary recordings untouched and avoid amplifying noise.
+                    if peak > 0.95:
+                        audio = audio * (0.95 / peak)
+                    elif peak < 0.1:
+                        audio = audio * min(4.0, 0.1 / peak)
+                    sf.write(prepared, audio, sr, subtype='FLOAT')
+                    if len(reference_cache) >= reference_cache_limit:
+                        oldest, _ = reference_cache.popitem(last=False)
+                        model.frontend.spk2info.pop(oldest, None)
+                    with torch.inference_mode():
+                        model.add_zero_shot_spk(instruction or prompt_text, str(prepared), reference_id)
+                    reference_cache[reference_id] = {'duration': duration}
+                preparation_seconds = time.monotonic() - preparation_started
 
                 pieces = []
                 chunks = synthesis_chunks(text, prompt_text, model.frontend.tokenizer)
                 request_id = secrets.token_hex(4)
                 logging.info('request=%s mode=%s ref_seconds=%.2f text_chars=%d chunks=%d',
                              request_id, 'style' if style_instruction else 'zero_shot', duration, len(text), len(chunks))
+                synthesis_started = time.monotonic()
                 with torch.inference_mode():
                     for index, chunk in enumerate(chunks, 1):
+                        chunk_started = time.monotonic()
+                        print(f'음성 생성 {index}/{len(chunks)} 구간 처리 중…', flush=True)
                         if style_instruction:
-                            # The pinned upstream example adds this delimiter at the caller.
-                            # Instruction and reference transcript must never be concatenated.
-                            instruction = 'Speak in Korean. ' + style_instruction + '<|endofprompt|>'
-                            generated = model.inference_instruct2(chunk, instruction, str(prepared),
+                            generated = model.inference_instruct2(chunk, instruction, '',
+                                                                 zero_shot_spk_id=reference_id,
                                                                  stream=False, speed=1.0, text_frontend=False)
                         else:
-                            generated = model.inference_zero_shot(chunk, prompt_text, str(prepared),
+                            generated = model.inference_zero_shot(chunk, prompt_text, '',
+                                                                  zero_shot_spk_id=reference_id,
                                                                   stream=False, speed=1.0, text_frontend=False)
                         chunk_pieces = []
                         for item in generated:
@@ -460,6 +491,7 @@ def serve(port):
                             raise RuntimeError(f'{index}번째 구간의 대사 길이에 비해 생성 음성 길이({seconds:.1f}초)가 비정상적입니다. 참고 음성과 실제 대사를 확인해주세요. 잘못된 결과는 저장하지 않았습니다.')
                         logging.info('request=%s chunk=%d/%d chars=%d seconds=%.2f',
                                      request_id, index, len(chunks), len(chunk), seconds)
+                        print(f'음성 생성 {index}/{len(chunks)} 완료 · 처리 {time.monotonic() - chunk_started:.1f}초 · 음성 {seconds:.1f}초', flush=True)
                         pieces.append(speech)
                         if index < len(chunks):
                             pieces.append(np.zeros(int(sample_rate * 0.12), dtype=np.float32))
@@ -490,10 +522,12 @@ def serve(port):
                         speech = speech * (0.98 / peak)
                 output = io.BytesIO()
                 sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
+                print(f'생성 완료 · 참고 분석 {preparation_seconds:.1f}초 · 음성 처리 {time.monotonic() - synthesis_started:.1f}초', flush=True)
                 return Response(output.getvalue(), media_type='audio/wav', headers={
                     'X-CosyVoice-Version': SERVER_VERSION, 'X-Request-ID': request_id,
                     'X-Audio-Duration': f'{len(speech) / sample_rate:.3f}',
                     'X-Text-Chunks': str(len(chunks)),
+                    'X-Reference-Cache': 'hit' if reference_hit else 'miss',
                 })
         except HTTPException:
             raise

@@ -15,6 +15,7 @@ ENGINES = {
     "cosyvoice": ("ai-voice-studio-cosyvoice", "CosyVoice 2"),
 }
 GENERATION_CAPABILITY = "validated_generation_v293"
+REFERENCE_CACHE_CAPABILITY = "reference_cache_v294"
 
 
 
@@ -38,9 +39,9 @@ def check_connection(url, engine="cosyvoice"):
             return False, f"{label}의 프로그램 연결 주소가 아닙니다. 코랩에 표시된 엔진 이름을 확인해주세요.", None
         if status.get("ready") is not True:
             return False, "코랩에서 모델을 준비 중입니다. '준비 완료'가 나온 뒤 연결해주세요.", None
-        if GENERATION_CAPABILITY not in status.get("capabilities", []):
+        if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY}.issubset(status.get("capabilities", [])):
             return False, (
-                "이전 CosyVoice 생성 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.3 바로 열기'로 "
+                "속도 개선 전의 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.4 바로 열기'로 "
                 "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
             ), status
         return True, f"✅ {label} v{status.get('server_version', '')} 모델 준비 완료 · 프로그램 연결 성공", status

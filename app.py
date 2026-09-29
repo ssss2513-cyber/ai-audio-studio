@@ -28,7 +28,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.5 · CosyVoice 기본 생성 수정"
+APP_VERSION = "v2.9.6 · CosyVoice 반복 처리 속도 개선"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -2064,9 +2064,8 @@ def main():
                     )
                     eng_badge = "🌐 Edge"
 
-                pct = i / target_count
-                status_text.markdown(f"**🎙️ 음성 생성 중: {i}/{target_count}개 ({int(pct*100)}%)** [{eng_badge} | {seg_style}]<br>`[{seg.speaker}] {clean_text_to_speak[:35]}...`", unsafe_allow_html=True)
-                progress_bar.progress(pct)
+                status_text.markdown(f"**🎙️ {i}/{target_count}번째 대사 처리 중 · 완료 {i-1}개** [{eng_badge} | {seg_style}]<br>`[{seg.speaker}] {clean_text_to_speak[:35]}...`", unsafe_allow_html=True)
+                progress_bar.progress(0.9 * (i - 1) / target_count)
 
                 # 파일이 이미 존재하고 덮어쓰기가 아니면 건너뛰기 (비정상 크기의 깨진 파일은 무조건 재생성)
                 is_corrupt = False
@@ -2104,10 +2103,11 @@ def main():
                     'text': clean_text_to_speak,
                     'file_path': seg_file_path
                 })
+                progress_bar.progress(0.9 * i / target_count)
 
             if not error_occurred and audio_info_list:
-                # 2. 오디오 무손실 병합
-                status_text.text("대사 사이 무음을 삽입하여 전체 오디오를 고속 병합하고 있습니다...")
+                # 2. 오디오 병합 (생성이 완료되어도 병합·저장 전에는 100%로 표시하지 않음)
+                status_text.text("음성 생성 완료 · 대사 사이 무음을 넣고 전체 오디오 파일을 합치고 있습니다...")
                 audio_processor = AudioProcessor(pause_ms=pause_ms)
                 full_audio_path = os.path.join(work_dir, "full_audio.mp3")
                 merged_path, timings = audio_processor.merge_segments(
@@ -2117,6 +2117,7 @@ def main():
                 )
 
                 # 3. 자막 생성
+                progress_bar.progress(0.95)
                 status_text.text("정밀 타임스탬프 기반 SRT 및 VTT 자막 파일을 생성하고 있습니다...")
                 srt_path = os.path.join(work_dir, "subtitles.srt")
                 vtt_path = os.path.join(work_dir, "subtitles.vtt")
@@ -2124,14 +2125,17 @@ def main():
                 SubtitleGenerator.generate_vtt(timings, vtt_path, include_speaker=include_spk_in_sub)
 
                 # 4. ZIP 압축 패키징 (Streamlit 200MB 한도 회피 및 초고속 전송을 위해 완성본/세그먼트 스마트 분리)
+                progress_bar.progress(0.97)
+                status_text.text("다운로드 파일을 준비하고 있습니다...")
                 main_zip_path = os.path.join(work_dir, "tts_main_bundle.zip")
                 with zipfile.ZipFile(main_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-                    zipf.write(full_audio_path, arcname="full_audio.mp3")
+                    # MP3 is already compressed; DEFLATE spends CPU for little gain.
+                    zipf.write(full_audio_path, arcname="full_audio.mp3", compress_type=zipfile.ZIP_STORED)
                     zipf.write(srt_path, arcname="subtitles.srt")
                     zipf.write(vtt_path, arcname="subtitles.vtt")
 
                 seg_zip_path = os.path.join(work_dir, "tts_segments_bundle.zip")
-                with zipfile.ZipFile(seg_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                with zipfile.ZipFile(seg_zip_path, "w", zipfile.ZIP_STORED) as zipf:
                     for item in audio_info_list:
                         arcname = os.path.join("segments", os.path.basename(item['file_path']))
                         zipf.write(item['file_path'], arcname=arcname)

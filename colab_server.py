@@ -36,6 +36,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
+SERVER_VERSION = '2.9.0'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -66,10 +67,11 @@ def read_state():
         return {}
 
 
-def health(base):
+def health(base, require_style=True):
     with urllib.request.urlopen(base + '/health', timeout=5) as response:
         data = json.load(response)
-    return data.get('service') == SERVICE and data.get('ready') is True
+    return (data.get('service') == SERVICE and data.get('ready') is True
+            and (not require_style or 'style_instruction' in data.get('capabilities', [])))
 
 
 def setup():
@@ -77,12 +79,16 @@ def setup():
         raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
     ROOT.mkdir(parents=True, exist_ok=True)
     state = read_state()
+    existing_ready = False
     try:
-        if state.get('base') and health(state['base']):
-            print(f'✅ {LABEL} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
-            return
+        existing_ready = bool(state.get('base')) and health(state['base'], require_style=False)
     except Exception:
         pass
+    if existing_ready:
+        if health(state['base']):
+            print(f'✅ {LABEL} v{SERVER_VERSION} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
+            return
+        raise RuntimeError('이전 CosyVoice 서버가 실행 중입니다. 런타임 → 세션 다시 시작 후 이 노트북의 1번을 실행해주세요. 설치한 모델은 같은 런타임에 유지됩니다.')
     if shutil.which('nvidia-smi') is None:
         raise RuntimeError('GPU가 없습니다. 런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
     run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
@@ -204,11 +210,13 @@ def serve(port):
     @app.get('/v1/{token}/health')
     def status(token: str):
         authorize(token)
-        return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True}
+        return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
+                'server_version': SERVER_VERSION, 'capabilities': ['style_instruction']}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
-                   speed: float = Form(1.0), reference: UploadFile = File(...)):
+                   speed: float = Form(1.0), reference: UploadFile = File(...),
+                   style_instruction: str = Form('')):
         authorize(token)
         if not text.strip():
             raise HTTPException(422, '생성할 대사를 입력해주세요.')
@@ -218,6 +226,9 @@ def serve(port):
             raise HTTPException(422, '한 번에 2,000자 이하로 나눠 생성해주세요.')
         if not np.isfinite(speed) or not 0.5 <= speed <= 2:
             raise HTTPException(422, '속도는 0.5~2.0 사이여야 합니다.')
+        style_instruction = style_instruction.strip()
+        if len(style_instruction) > 800 or '<|' in style_instruction or '|>' in style_instruction:
+            raise HTTPException(422, '스타일 지시문 형식이 올바르지 않습니다.')
         if not model_lock.acquire(blocking=False):
             raise HTTPException(409, '다른 음성을 생성 중입니다. 완료 후 다시 실행해주세요.')
         gpu_lock = None
@@ -259,8 +270,16 @@ def serve(port):
                         chunks.append(sentence)
                 with torch.inference_mode():
                     for chunk in chunks:
-                        for item in model.inference_zero_shot(chunk, prompt_text.strip(), str(prepared),
-                                                             stream=False, speed=speed, text_frontend=False):
+                        if style_instruction:
+                            # The pinned upstream example adds this delimiter at the caller.
+                            # Instruction and reference transcript must never be concatenated.
+                            instruction = 'Speak in Korean. ' + style_instruction + '<|endofprompt|>'
+                            generated = model.inference_instruct2(chunk, instruction, str(prepared),
+                                                                 stream=False, speed=speed, text_frontend=False)
+                        else:
+                            generated = model.inference_zero_shot(chunk, prompt_text.strip(), str(prepared),
+                                                                  stream=False, speed=speed, text_frontend=False)
+                        for item in generated:
                             pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
                 if not pieces or sum(x.size for x in pieces) == 0:
                     raise RuntimeError('모델이 빈 음성을 반환했습니다. 참조 음성과 실제 대사를 확인해주세요.')

@@ -21,13 +21,14 @@ from core.tts_engine import (
 )
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
+from core.voice_recommendations import recommend_style, preview_text, style_note
 from core.audio_processor import AudioProcessor
 from core.subtitle import SubtitleGenerator
 from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.8.2 · 코랩 연결 개선"
+APP_VERSION = "v2.9.0 · 스타일 수정·화자별 추천"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -96,8 +97,8 @@ GEMINI_CHARACTER_PRESETS = {
     "봉 행수": {"voice": "Zubenelgenubi", "style": "🏛️ 40대 안정적인", "role_desc": "산전수전 겪은 노련한 행수"},
     "이방 오익환": {"voice": "Sadaltager", "style": "🎩 50대 깊이 있는", "role_desc": "무게감 있고 영악한 관아 이방"},
     "현감": {"voice": "Charon", "style": "😠 분노/격양", "role_desc": "위엄과 권위를 드러내는 고을 수령"},
-    "봉진우": {"voice": "Algieba", "style": "🤵 30대 신뢰감 있는", "role_desc": "세련되고 신중한 양반 인물"},
-    "마을 사람": {"voice": "Achird", "style": "🌾 40대 구수한", "role_desc": "친근하고 서글서글한 동네 주민"},
+    "봉진우": {"voice": "Algieba", "style": "💡 30대 세련된", "role_desc": "세련되고 신중한 양반 인물"},
+    "마을 사람": {"voice": "Achird", "style": "🍷 40대 성숙한", "role_desc": "친근하고 서글서글한 동네 주민"},
     "성복": {"voice": "Fenrir", "style": "🎭 진지하게", "role_desc": "힘 있고 당찬 청년 주인공"},
     "계순": {"voice": "Aoede", "style": "💌 부드럽고 감성적", "role_desc": "맑고 생기있는 아내"},
     "경헌": {"voice": "Charon", "style": "🏛️ 40대 안정적인", "role_desc": "중후하고 깊은 저음 관리"},
@@ -235,6 +236,18 @@ def set_state_safe(key: str, value: Any) -> None:
         st.session_state[key] = value
     except Exception:
         pass
+
+def apply_recommended_styles(speaker=None):
+    speakers = [speaker] if speaker else st.session_state.get("speakers", [])
+    for name in speakers:
+        config = st.session_state.get("voice_settings", {}).get(name)
+        if config is None:
+            continue
+        recommendation = recommend_style(name, st.session_state.get("parsed_segments", []),
+                                         st.session_state.get(f"voice_profile_{name}", ""))
+        config["style"] = recommendation.style
+        st.session_state[f"style_select_{name}"] = recommendation.style
+
 
 def set_speakers_preset(engine_type: str):
     """모든 화자의 엔진, 보이스, 스타일 설정을 일괄 변경하고 Streamlit 위젯 상태까지 강제 동기화"""
@@ -1078,6 +1091,10 @@ def main():
 
         st.caption(f"💡 총 **{len(st.session_state['speakers'])}명**의 화자 카드. 각 카드에서 엔진과 음성 스타일(감정/연령/톤)을 자유롭게 설정할 수 있습니다.")
 
+        st.button("✨ 화자별 추천 스타일 한 번에 적용", on_click=apply_recommended_styles,
+                  help="대본과 입력한 인물 정보를 바탕으로 스타일만 바꿉니다. GPT-SoVITS에는 참조 음성 선택 가이드로 표시됩니다.")
+        st.caption("추천은 화자 이름·인물 정보·해당 화자의 대사를 바탕으로 합니다. 나이나 성격이 불분명하면 인물 정보를 직접 적어주세요.")
+
         # 34종 음성 스타일 프리셋 갤러리 (접이식 안내)
         with st.expander("🎨 34종 음성 스타일(감정/연령/톤) 전체 목록 보기", expanded=False):
             st.markdown("##### 🎭 감정 및 어조 스타일 (23종)")
@@ -1098,7 +1115,8 @@ def main():
                 "📰 시니어 안정적인 (65세)", "🎭 시니어 감성적인 (70대 이상)"
             ]
             st.write(" · ".join([f"`{s}`" for s in age_styles]))
-            st.caption("💡 각 화자별 카드에서 원하는 스타일을 선택하면, 제미나이(Gemini)는 감정 연기 지시문이 적용되고, Supertonic 및 Edge-TTS는 속도/피치/음량이 자동 튜닝됩니다.")
+            st.caption("Gemini: 연령·감정·말투 지시 / CosyVoice v2.9.0: 연기 지시+참조 목소리 / Supertonic: 속도·음량 보정 / GPT-SoVITS: 참조 목소리 기준")
+            st.caption("시니어 스타일은 노년 캐릭터의 연기 설정입니다. 시니어 청취자용 해설에는 '차분하고 따뜻하게'도 추천합니다.")
 
         # 각 화자별 설정 카드 (3열 반응형 레이아웃)
         cols = st.columns(3)
@@ -1214,6 +1232,17 @@ def main():
                         spk_engine = chosen_engine
                         st.rerun()
 
+                    with st.expander("👤 인물 정보 · 추천 조정", expanded=False):
+                        st.text_input("나이·역할·성격", key=f"voice_profile_{spk}", max_chars=200,
+                                      placeholder="예: 70대 할머니, 다정하고 차분함")
+                    recommendation = recommend_style(spk, st.session_state["parsed_segments"],
+                                                     st.session_state.get(f"voice_profile_{spk}", ""))
+                    st.markdown(f"**💡 추천: {recommendation.style}**")
+                    st.caption(recommendation.reason)
+                    st.button("추천 참조 스타일 선택" if spk_engine == "gpt-sovits" else "추천 스타일 적용",
+                              key=f"recommend_style_{spk}", on_click=apply_recommended_styles,
+                              args=(spk,), use_container_width=True)
+
                     # 1. Supertonic 3 설정 폼 (로컬 무료)
                     if spk_engine == "supertonic":
                         default_v = current_cfg.get("voice", "F1")
@@ -1231,12 +1260,13 @@ def main():
                         )
 
                         selected_style = st.selectbox(
-                            "🎨 음성 스타일 (감정/연령/톤)",
+                            "🎨 스타일 (속도·음량 보정)",
                             options=VOICE_STYLE_KEYS,
                             index=style_idx,
                             key=f"style_select_{spk}"
                         )
                         st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
                             "engine": "supertonic",
@@ -1249,7 +1279,7 @@ def main():
                         if st.button(f"🔊 {spk} Supertonic 미리듣기 (무료)", key=f"preview_btn_{spk}", use_container_width=True):
                             safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                             preview_file = os.path.join(work_dir, f"preview_super_{safe_spk}.mp3")
-                            sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                            sample_text = preview_text(spk, st.session_state["parsed_segments"])
                             
                             cfg = VoiceConfig(
                                 engine="supertonic",
@@ -1292,6 +1322,7 @@ def main():
                             key=f"style_select_{spk}"
                         )
                         st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
                             "engine": "gemini",
@@ -1307,7 +1338,7 @@ def main():
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                                 preview_file = os.path.join(work_dir, f"preview_gemini_{safe_spk}.mp3")
-                                sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                                sample_text = preview_text(spk, st.session_state["parsed_segments"])
                                 
                                 safe_gemini_model = gemini_model if gemini_model in gemini_model_options else "gemini-3.1-flash-tts-preview"
                                 cfg = VoiceConfig(
@@ -1428,6 +1459,7 @@ def main():
 
                         speed_cosy = st.slider("말하기 속도", 0.5, 2.0, float(speed_val), 0.05, key=f"cosy_speed_{spk}")
                         selected_style = st.selectbox("🎨 스타일", options=VOICE_STYLE_KEYS, index=style_idx, key=f"style_select_{spk}")
+                        st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
                             "engine": "cosyvoice",
@@ -1448,9 +1480,10 @@ def main():
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                                 preview_file = os.path.join(work_dir, f"preview_cosy_{safe_spk}.mp3")
-                                sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                                sample_text = preview_text(spk, st.session_state["parsed_segments"])
                                 cfg = VoiceConfig(
                                     engine="cosyvoice",
+                                    style=selected_style,
                                     cosyvoice_url=cosy_url,
                                     ref_audio_path=effective_ref_audio,
                                     prompt_text=prompt_input,
@@ -1679,11 +1712,12 @@ def main():
                         st.caption("처음 비교할 때는 속도 1.0을 사용하세요. 미리듣기와 전체 생성에 같은 설정이 적용됩니다.")
 
                         selected_style = st.selectbox(
-                            "🎨 음성 스타일 (참고용)",
+                            "🎨 참조 음성 스타일 가이드",
                             options=VOICE_STYLE_KEYS,
                             index=style_idx,
                             key=f"style_select_{spk}"
                         )
+                        st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
                             "engine": "gpt-sovits",
@@ -1712,7 +1746,7 @@ def main():
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                                 preview_file = os.path.join(work_dir, f"preview_sovits_{safe_spk}.wav")
-                                sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                                sample_text = preview_text(spk, st.session_state["parsed_segments"])
 
                                 cfg = VoiceConfig(
                                     engine="gpt-sovits",
@@ -1764,6 +1798,7 @@ def main():
                             key=f"style_select_{spk}"
                         )
                         st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         rate_val = st.slider(
                             "말하기 속도 미세조절 (%)",
@@ -1797,7 +1832,7 @@ def main():
                             pitch_str = f"{pitch_val:+d}Hz"
                             safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                             preview_file = os.path.join(work_dir, f"preview_edge_{safe_spk}.mp3")
-                            sample_text = CHARACTER_SAMPLE_LINES.get(spk, f"안녕하십니까. 저는 {spk} 역할을 맡은 목소리입니다.")
+                            sample_text = preview_text(spk, st.session_state["parsed_segments"])
                             
                             cfg = VoiceConfig(
                                 engine="edge-tts",
@@ -1943,7 +1978,7 @@ def main():
                 # 화자 설정(엔진, 보이스, 스타일, 참조 오디오, 배속, 텍스트)의 고유 해시 생성
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
-                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v5_clean_ko"
+                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v6_style_directions"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
                 seg_file_path = os.path.join(segments_dir, filename)

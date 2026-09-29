@@ -220,27 +220,27 @@ VOICE_STYLES = {
         "desc": "세상을 관조하는 여유와 편안함"
     },
     "👴 시니어 중후한 (60대)": {
-        "gemini_prompt": "Speak as a venerable gentleman in his 60s: deep mature voice, deliberate, experienced, and dignified.",
+        "gemini_prompt": "Perform a dignified character in their 60s: mature resonance, subtle vocal texture, measured phrasing, and clear confident diction.",
         "rate": -10, "pitch": -12, "volume": 0,
         "desc": "연륜과 위엄을 간직한 60대 어르신"
     },
     "👵 시니어 따뜻한 (70대)": {
-        "gemini_prompt": "Speak as an affectionate, loving grandmother in her 70s: gentle, slightly raspy, endearing, and deeply caring.",
+        "gemini_prompt": "Perform a warm grandmother in her 70s: naturally aged, softly textured voice, affectionate warmth, steady breath, and clear gentle diction.",
         "rate": -15, "pitch": -5, "volume": -5,
         "desc": "손주를 보듬듯 다정하고 포근한 70대 할머니"
     },
     "🧙 시니어 지혜로운 (70~80대)": {
-        "gemini_prompt": "Speak as an ancient, wise elder in their 70s-80s: slow, weathered, cracked grandfatherly tone, full of folktale wisdom.",
+        "gemini_prompt": "Perform a wise elder in their 70s or 80s: a naturally seasoned voice, calm unhurried phrasing, grounded resonance, and precise Korean articulation without exaggerated shaking.",
         "rate": -18, "pitch": -15, "volume": 0,
         "desc": "오랜 세월의 구수한 지혜와 연륜이 묻어나는 이야기 노인"
     },
     "📰 시니어 안정적인 (65세)": {
-        "gemini_prompt": "Speak as a seasoned senior in their mid-60s: stable, clear, thoughtful, and composed.",
+        "gemini_prompt": "Perform a composed speaker around 65: mature vocal texture, stable breath, even pacing, crisp consonants, and reassuring thoughtful delivery.",
         "rate": -8, "pitch": -8, "volume": 0,
         "desc": "흐트러짐 없이 또렷하고 안정적인 60대 중반"
     },
     "🎭 시니어 감성적인 (70대 이상)": {
-        "gemini_prompt": "Speak as an emotional, reflective elder in their 70s+: nostalgic, wistful, tender, and touching.",
+        "gemini_prompt": "Perform a reflective elder in their 70s: subtly aged vocal texture, tender nostalgia, gentle emotional pauses, and intelligible steady speech without sobbing or slurring.",
         "rate": -15, "pitch": -8, "volume": -5,
         "desc": "지나온 세월을 회상하듯 아련하고 감동적인 시니어"
     }
@@ -553,6 +553,19 @@ def get_supertonic_engine():
         _supertonic_instance = supertonic.TTS(auto_download=False)
     return _supertonic_instance
 
+def build_gemini_tts_prompt(text: str, style: str = "🎤 기본") -> str:
+    """Gemini 2.5/3.1 TTS reads performance direction from the content prompt."""
+    direction = VOICE_STYLES.get(style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+    return (
+        "# AUDIO PROFILE\nA single native Korean voice actor. " + direction + "\n"
+        "# DIRECTOR'S NOTES\nRead only the TRANSCRIPT below, verbatim, in Korean. "
+        "Keep consonants clear, vowels natural, and pauses comfortable. "
+        "Do not slur, exaggerate vocal aging, add words, or read these headings and instructions aloud. "
+        "Do not add a greeting or closing line.\n"
+        "# TRANSCRIPT\n" + text
+    )
+
+
 class TTSEngine:
     _gemini_key_counter: int = 0
 
@@ -667,25 +680,7 @@ class TTSEngine:
 
         v_name = voice_config.voice if voice_config.voice in GEMINI_VOICES else "Kore"
 
-        style_key = getattr(voice_config, "style", "🎤 기본")
-        style_info = VOICE_STYLES.get(style_key, {})
-        style_prompt = style_info.get("gemini_prompt", "Read clearly, naturally, and expressively.")
-
-        # CRITICAL: contents에는 오직 낭독해야 할 한국어 대본 텍스트만 전달!
-        if style_key == "🎤 기본":
-            sys_instruct = (
-                "You are an expert Korean voice actor. "
-                "Read the Korean script verbatim with clear, natural pronunciation. "
-                "Do NOT speak any introductory phrases, English words, instructions, or meta-commentary aloud."
-            )
-        else:
-            sys_instruct = (
-                "You are an expert Korean voice actor performing a script for an audiobook or video. "
-                f"Emotion and performance style: {style_prompt}. "
-                "CRITICAL INSTRUCTION: Speak ONLY the exact Korean text given in the input. "
-                "Do NOT speak instructions, notes, or English words aloud under any circumstances. "
-                "Output purely the voiced Korean narration or dialogue."
-            )
+        request_prompt = build_gemini_tts_prompt(text, voice_config.style)
 
         # 사용 가능한 공식 Google Gemini TTS 모델 목록 (무료/유료 공용 Flash 모델 우선)
         VALID_GEMINI_TTS_MODELS = [
@@ -713,7 +708,7 @@ class TTSEngine:
                         def _call_gemini(m=current_model, c=client):
                             return c.models.generate_content(
                                 model=m,
-                                contents=text,
+                                contents=request_prompt,
                                 config=types.GenerateContentConfig(
                                     response_modalities=["AUDIO"],
                                     speech_config=types.SpeechConfig(
@@ -813,7 +808,7 @@ class TTSEngine:
                                 def _call_fb(m=fallback_model, c=fb_client):
                                     return c.models.generate_content(
                                         model=m,
-                                        contents=text,
+                                        contents=request_prompt,
                                         config=types.GenerateContentConfig(
                                             response_modalities=["AUDIO"],
                                             speech_config=types.SpeechConfig(
@@ -1065,6 +1060,8 @@ class TTSEngine:
         return synthesize(
             getattr(voice_config, "cosyvoice_url", ""), text, ref_path, prompt,
             float(getattr(voice_config, "speed_factor", 1.0)), output_file,
+            style_instruction=(VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+                               if voice_config.style != "🎤 기본" else ""),
         )
 
 

@@ -49,7 +49,7 @@ def check_connection(url, engine="cosyvoice"):
         ), None
 
 
-def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cosyvoice"):
+def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cosyvoice", *, style_instruction=""):
     _, label = ENGINES[engine]
     base = normalize_url(url)
     if not text.strip():
@@ -69,14 +69,16 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
     ffmpeg = shutil.which("ffmpeg")
     if target.suffix.lower() == ".mp3" and not ffmpeg:
         raise RuntimeError("MP3 저장에 필요한 FFmpeg가 없습니다. FFmpeg 설치 후 프로그램을 다시 열어주세요.")
-    ok, message, _ = check_connection(base, engine=engine)
+    ok, message, status = check_connection(base, engine=engine)
     if not ok:
         raise RuntimeError(message)
+    if style_instruction and "style_instruction" not in (status or {}).get("capabilities", []):
+        raise RuntimeError("이 코랩은 스타일을 지원하지 않는 이전 버전입니다. 사이트의 CosyVoice 코랩 바로 열기로 v2.9.0을 열고, 런타임을 다시 시작한 뒤 1번과 4번을 실행해주세요. 기존 코랩은 '기본' 스타일로 사용할 수 있습니다.")
     try:
         with reference.open("rb") as audio:
             response = requests.post(
                 base + "/synthesize",
-                data={"text": text, "prompt_text": prompt_text, "speed": speed},
+                data={"text": text, "prompt_text": prompt_text, "speed": speed, "style_instruction": style_instruction},
                 files={"reference": (reference.name, audio, "application/octet-stream")},
                 timeout=(15, 600), allow_redirects=False,
             )

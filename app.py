@@ -28,7 +28,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.1 · 코랩 준비 상태 표시·화자별 추천"
+APP_VERSION = "v2.9.2 · 코랩 연결 셀 수정·화자별 추천"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1115,7 +1115,7 @@ def main():
                 "📰 시니어 안정적인 (65세)", "🎭 시니어 감성적인 (70대 이상)"
             ]
             st.write(" · ".join([f"`{s}`" for s in age_styles]))
-            st.caption("Gemini: 연령·감정·말투 지시 / CosyVoice v2.9.1: 연기 지시+참조 목소리 / Supertonic: 속도·음량 보정 / GPT-SoVITS: 참조 목소리 기준")
+            st.caption("Gemini: 연령·감정·말투 지시 / CosyVoice v2.9.2: 연기 지시+참조 목소리 / Supertonic: 속도·음량 보정 / GPT-SoVITS: 참조 목소리 기준")
             st.caption("시니어 스타일은 노년 캐릭터의 연기 설정입니다. 시니어 청취자용 해설에는 '차분하고 따뜻하게'도 추천합니다.")
 
         # 각 화자별 설정 카드 (3열 반응형 레이아웃)

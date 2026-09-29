@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -22,6 +23,7 @@ import tempfile
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.request
 
 SOURCE_REVISION = '074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc'
@@ -36,7 +38,8 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.2'
+SERVER_VERSION = '2.9.3'
+GENERATION_CAPABILITY = 'validated_generation_v293'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -67,11 +70,118 @@ def read_state():
         return {}
 
 
-def health(base, require_style=True):
+def health(base, require_current=True):
     with urllib.request.urlopen(base + '/health', timeout=5) as response:
         data = json.load(response)
     return (data.get('service') == SERVICE and data.get('ready') is True
-            and (not require_style or 'style_instruction' in data.get('capabilities', [])))
+            and (not require_current or (data.get('server_version') == SERVER_VERSION
+                 and GENERATION_CAPABILITY in data.get('capabilities', []))))
+
+
+def stop_previous_worker(state):
+    """Replace only this runner's recorded, idle worker; retain model downloads."""
+    import fcntl
+    pid = state.get('pid')
+    if not isinstance(pid, int) or pid <= 1:
+        raise RuntimeError('기존 서버의 실행 정보를 확인할 수 없습니다. 런타임을 다시 시작한 뒤 1번을 실행해주세요.')
+    proc_dir = Path('/proc') / str(pid)
+    try:
+        already_exited = (proc_dir / 'stat').read_text().split(') ', 1)[1].startswith('Z')
+    except (OSError, IndexError):
+        already_exited = not proc_dir.exists()
+    if already_exited:
+        STATE.unlink(missing_ok=True)
+        return
+    try:
+        args = (proc_dir / 'cmdline').read_bytes().split(b'\0')
+        args = [arg.decode(errors='replace') for arg in args if arg]
+        owned = (len(args) > 2 and Path(args[0]).absolute() == PYTHON.absolute()
+                 and Path(args[1]).absolute() == Path(__file__).absolute()
+                 and '--serve' in args and '--port' in args
+                 and args[args.index('--port') + 1] == str(state.get('port')))
+    except (OSError, IndexError):
+        owned = False
+    if not owned:
+        raise RuntimeError('기존 서버를 안전하게 교체할 수 없습니다. 런타임을 다시 시작한 뒤 1번을 실행해주세요.')
+    with (ROOT.parent / 'gpu.lock').open('a+') as gpu_lock:
+        try:
+            fcntl.flock(gpu_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('음성을 생성 중입니다. 완료된 뒤 1번을 실행하면 새 서버로 바뀝니다.') from None
+        print('이전 CosyVoice 서버를 수정 버전으로 교체합니다. 설치와 모델 파일은 유지합니다.', flush=True)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            STATE.unlink(missing_ok=True)
+            return
+        for _ in range(50):
+            try:
+                # An exited child can remain as a zombie until its notebook reaps it.
+                exited = (proc_dir / 'stat').read_text().split(') ', 1)[1].startswith('Z')
+            except (OSError, IndexError):
+                exited = True
+            if exited:
+                STATE.unlink(missing_ok=True)
+                return
+            time.sleep(0.2)
+    raise RuntimeError('이전 서버가 아직 종료 중입니다. 잠시 뒤 1번을 다시 실행해주세요.')
+
+
+def normalize_speech_text(value, label):
+    value = unicodedata.normalize('NFC', value)
+    value = re.sub('[\u200b\u200c\u200d\ufeff]', '', value)
+    value = re.sub(r'\s+', ' ', value).strip()
+    if not any(char.isalnum() for char in value):
+        raise ValueError(label + '에 실제로 읽을 문장을 입력해주세요.')
+    if '<|' in value or '|>' in value:
+        raise ValueError(label + '에는 모델 제어 기호 없이 실제 대사만 입력해주세요.')
+    return value
+
+
+def speech_units(text):
+    """A deliberately loose duration estimate, not speech recognition."""
+    return sum(1 for char in text if char.isalnum() and not char.isascii()) + sum(
+        max(1, len(word) / 3) for word in re.findall(r'[A-Za-z0-9]+', text))
+
+
+def synthesis_chunks(text, prompt_text, tokenizer):
+    """Pack short sentences together, with a token budget for Korean inputs."""
+    def tokens(value):
+        return len(tokenizer.encode(value, allowed_special='all'))
+
+    # The upstream frontend uses 60-80 tokens. Keep Korean out of its English
+    # normalizer, but use a comparable token budget instead of 180 characters.
+    chunks, current = [], ''
+    for word in text.split():
+        candidate = (current + ' ' + word).strip()
+        if current and tokens(candidate) > 80:
+            chunks.append(current)
+            current = ''
+        # A script without spaces must also respect the token budget.
+        while tokens(word) > 80:
+            low, high = 1, len(word)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if tokens(word[:middle]) <= 80:
+                    low = middle
+                else:
+                    high = middle - 1
+            chunks.append(word[:low])
+            word = word[low:]
+        current = (current + ' ' + word).strip()
+        if (re.search(r'[.!?。！？]["”\']?$', current) and tokens(current) >= 60
+                and len(current) >= len(prompt_text) / 2):
+            chunks.append(current)
+            current = ''
+    if current:
+        chunks.append(current)
+    # Do not synthesize a tiny final fragment on its own if it fits the previous
+    # chunk with a small, bounded extension to the normal budget.
+    if len(chunks) > 1 and (tokens(chunks[-1]) < 25 or len(chunks[-1]) < len(prompt_text) / 2):
+        joined = chunks[-2] + ' ' + chunks[-1]
+        if tokens(joined) <= 100:
+            chunks[-2:] = [joined]
+    return chunks
 
 
 def setup():
@@ -81,14 +191,16 @@ def setup():
     state = read_state()
     existing_ready = False
     try:
-        existing_ready = bool(state.get('base')) and health(state['base'], require_style=False)
+        existing_ready = bool(state.get('base')) and health(state['base'], require_current=False)
     except Exception:
         pass
     if existing_ready:
         if health(state['base']):
-            print(f'✅ {LABEL} v{SERVER_VERSION} 준비 완료. 아래 음성 생성 셀을 실행하세요.', flush=True)
+            print(f'✅ {LABEL} v{SERVER_VERSION} 준비 완료. 사이트 연결은 4번을 실행하세요.', flush=True)
             return
-        raise RuntimeError('이전 CosyVoice 서버가 실행 중입니다. 런타임 → 세션 다시 시작 후 이 노트북의 1번을 실행해주세요. 설치한 모델은 같은 런타임에 유지됩니다.')
+        stop_previous_worker(state)
+    elif isinstance(state.get('pid'), int) and (Path('/proc') / str(state['pid'])).exists():
+        stop_previous_worker(state)
     if shutil.which('nvidia-smi') is None:
         raise RuntimeError('GPU가 없습니다. 런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
     run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
@@ -223,6 +335,8 @@ def serve(port):
     faulthandler.cancel_dump_traceback_later()
     print('[모델 준비 4/4] 모델 로딩 완료. 연결 서버를 시작합니다.', flush=True)
     sample_rate = model.sample_rate
+    if sample_rate != 24000:
+        raise RuntimeError('CosyVoice 2 출력 설정이 올바르지 않습니다. 모델 설정을 다시 확인해주세요.')
     access_token = os.environ['COSY_ACCESS_TOKEN']
     model_lock = threading.Lock()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -240,19 +354,23 @@ def serve(port):
     def status(token: str):
         authorize(token)
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
-                'server_version': SERVER_VERSION, 'capabilities': ['style_instruction']}
+                'server_version': SERVER_VERSION, 'sample_rate': sample_rate,
+                'capabilities': ['style_instruction', GENERATION_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile = File(...),
                    style_instruction: str = Form('')):
         authorize(token)
-        if not text.strip():
-            raise HTTPException(422, '생성할 대사를 입력해주세요.')
-        if not prompt_text.strip():
-            raise HTTPException(422, 'CosyVoice는 참조 음성의 실제 대사도 입력해야 합니다.')
+        try:
+            text = normalize_speech_text(text, '생성할 대사')
+            prompt_text = normalize_speech_text(prompt_text, '참조 오디오 실제 대사')
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if len(text) > 2000:
             raise HTTPException(422, '한 번에 2,000자 이하로 나눠 생성해주세요.')
+        if len(prompt_text) > 1000:
+            raise HTTPException(422, '참조 대사에는 3~30초 참고 음성에서 말한 내용만 입력해주세요.')
         if not np.isfinite(speed) or not 0.5 <= speed <= 2:
             raise HTTPException(422, '속도는 0.5~2.0 사이여야 합니다.')
         style_instruction = style_instruction.strip()
@@ -275,7 +393,7 @@ def serve(port):
                 original.write_bytes(payload)
                 prepared = Path(folder) / 'reference.wav'
                 result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
-                                         '-t', '31', '-ac', '1', '-ar', '24000', str(prepared)],
+                                         '-t', '31', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_f32le', str(prepared)],
                                         capture_output=True, text=True, timeout=60)
                 if result.returncode:
                     raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
@@ -285,39 +403,98 @@ def serve(port):
                     raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
                 if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
                     raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
+
+                # Remove only nearly silent outer padding; never cut spoken audio
+                # to a fixed length without also aligning its transcript.
+                frame = int(sr * 0.02)
+                padded = np.pad(audio, (0, (-len(audio)) % frame))
+                levels = np.sqrt(np.mean(padded.reshape(-1, frame) ** 2, axis=1))
+                active = np.flatnonzero(levels > max(0.0001, float(levels.max()) * 0.015))
+                if active.size == 0 or active.size * 0.02 < 0.8:
+                    raise HTTPException(422, '참고 음성의 실제 발화가 너무 짧거나 조용합니다. 배경음 없이 한 사람이 문장을 말하는 녹음을 사용해주세요.')
+                spoken_seconds = active.size * 0.02
+                units = speech_units(prompt_text)
+                if (spoken_seconds > 6 and units / spoken_seconds < 0.75) or units / spoken_seconds > 25:
+                    raise HTTPException(422, f'참고 음성 길이({duration:.1f}초)와 입력한 참고 대사 길이가 크게 다릅니다. 새로 만들 대사가 아니라 녹음 전체의 실제 대사를 입력해주세요.')
+                margin = int(sr * 0.15)
+                start = max(0, int(active[0]) * frame - margin)
+                end = min(len(audio), (int(active[-1]) + 1) * frame + margin)
+                audio = audio[start:end]
+                peak = float(np.max(np.abs(audio)))
+                # Leave ordinary recordings untouched and avoid amplifying noise.
+                if peak > 0.95:
+                    audio = audio * (0.95 / peak)
+                elif peak < 0.1:
+                    audio = audio * min(4.0, 0.1 / peak)
+                sf.write(prepared, audio, sr, subtype='FLOAT')
+
                 pieces = []
-                sentences = re.split(r'(?<=[.!?。！？])\s+|\n+', text.strip())
-                chunks = []
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    while len(sentence) > 180:
-                        cut = sentence.rfind(' ', 60, 180)
-                        cut = cut if cut >= 60 else 180
-                        chunks.append(sentence[:cut])
-                        sentence = sentence[cut:].strip()
-                    if sentence:
-                        chunks.append(sentence)
+                chunks = synthesis_chunks(text, prompt_text, model.frontend.tokenizer)
+                request_id = secrets.token_hex(4)
+                logging.info('request=%s mode=%s ref_seconds=%.2f text_chars=%d chunks=%d',
+                             request_id, 'style' if style_instruction else 'zero_shot', duration, len(text), len(chunks))
                 with torch.inference_mode():
-                    for chunk in chunks:
+                    for index, chunk in enumerate(chunks, 1):
                         if style_instruction:
                             # The pinned upstream example adds this delimiter at the caller.
                             # Instruction and reference transcript must never be concatenated.
                             instruction = 'Speak in Korean. ' + style_instruction + '<|endofprompt|>'
                             generated = model.inference_instruct2(chunk, instruction, str(prepared),
-                                                                 stream=False, speed=speed, text_frontend=False)
+                                                                 stream=False, speed=1.0, text_frontend=False)
                         else:
-                            generated = model.inference_zero_shot(chunk, prompt_text.strip(), str(prepared),
-                                                                  stream=False, speed=speed, text_frontend=False)
+                            generated = model.inference_zero_shot(chunk, prompt_text, str(prepared),
+                                                                  stream=False, speed=1.0, text_frontend=False)
+                        chunk_pieces = []
                         for item in generated:
-                            pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                            chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                        if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
+                            raise RuntimeError(f'{index}번째 구간에서 빈 음성이 반환되었습니다. 파일을 저장하지 않았습니다.')
+                        speech = np.concatenate(chunk_pieces)
+                        seconds = speech.size / sample_rate
+                        if not np.all(np.isfinite(speech)) or float(np.sqrt(np.mean(speech ** 2))) < 0.0001:
+                            raise RuntimeError(f'{index}번째 구간의 음성이 무음이거나 손상되었습니다. 파일을 저장하지 않았습니다.')
+                        # Only reject gross duration failures. This is not a claim
+                        # that the generated words match the script (no ASR here).
+                        units = speech_units(chunk)
+                        if seconds > max(10.0, units * 0.8 + 4.0) or seconds < max(0.15, units / 30.0):
+                            raise RuntimeError(f'{index}번째 구간의 대사 길이에 비해 생성 음성 길이({seconds:.1f}초)가 비정상적입니다. 참고 음성과 실제 대사를 확인해주세요. 잘못된 결과는 저장하지 않았습니다.')
+                        logging.info('request=%s chunk=%d/%d chars=%d seconds=%.2f',
+                                     request_id, index, len(chunks), len(chunk), seconds)
+                        pieces.append(speech)
+                        if index < len(chunks):
+                            pieces.append(np.zeros(int(sample_rate * 0.12), dtype=np.float32))
                 if not pieces or sum(x.size for x in pieces) == 0:
                     raise RuntimeError('모델이 빈 음성을 반환했습니다. 참조 음성과 실제 대사를 확인해주세요.')
                 speech = np.concatenate(pieces)
                 if not np.all(np.isfinite(speech)) or np.max(np.abs(speech)) < 0.000001:
                     raise RuntimeError('모델 출력이 무음이거나 손상되었습니다. server.log를 확인해주세요.')
+                peak = float(np.max(np.abs(speech)))
+                if peak > 0.98:
+                    speech = speech * (0.98 / peak)
+                if speed != 1.0:
+                    # Keep acoustic generation at its native rate. FFmpeg changes
+                    # tempo afterwards instead of interpolating the model's mel.
+                    native = Path(folder) / 'generated.wav'
+                    adjusted = Path(folder) / 'tempo.wav'
+                    sf.write(native, speech, sample_rate, subtype='FLOAT')
+                    result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(native),
+                                             '-af', f'atempo={speed}', '-c:a', 'pcm_f32le', str(adjusted)],
+                                            capture_output=True, text=True, timeout=60)
+                    if result.returncode:
+                        raise RuntimeError('말하기 속도 조절에 실패했습니다. 파일을 저장하지 않았습니다.')
+                    speech, _ = sf.read(adjusted, dtype='float32')
+                    if not speech.size or not np.all(np.isfinite(speech)):
+                        raise RuntimeError('속도 조절 결과가 비어 있거나 손상되었습니다.')
+                    peak = float(np.max(np.abs(speech)))
+                    if peak > 0.98:
+                        speech = speech * (0.98 / peak)
                 output = io.BytesIO()
                 sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
-                return Response(output.getvalue(), media_type='audio/wav')
+                return Response(output.getvalue(), media_type='audio/wav', headers={
+                    'X-CosyVoice-Version': SERVER_VERSION, 'X-Request-ID': request_id,
+                    'X-Audio-Duration': f'{len(speech) / sample_rate:.3f}',
+                    'X-Text-Chunks': str(len(chunks)),
+                })
         except HTTPException:
             raise
         except Exception as exc:

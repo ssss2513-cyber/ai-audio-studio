@@ -28,7 +28,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.4 · GPT 코랩 재설치 반복 수정"
+APP_VERSION = "v2.9.5 · CosyVoice 기본 생성 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1394,7 +1394,7 @@ def main():
                             "🎙️ 참조 오디오 파일 (.wav, .mp3) 업로드",
                             type=["wav", "mp3"],
                             key=f"cosy_upload_{spk}",
-                            help="복제할 인물의 3~10초 길이 목소리 음원 파일"
+                            help="배경음 없이 한 사람이 문장을 말하는 3~30초 음성입니다. 5~10초 분량을 권장합니다."
                         )
                         
                         effective_ref_audio = ""
@@ -1451,10 +1451,10 @@ def main():
 
                         saved_prompt = st.session_state.get(f"cosy_prompt_{spk}", prompt_text_val)
                         prompt_input = st.text_input(
-                            "참조 오디오 실제 대사 (프롬프트)",
+                            "참조 오디오 실제 대사",
                             value=saved_prompt,
                             key=f"cosy_prompt_{spk}",
-                            help="참조 음성에서 실제로 말한 대사입니다."
+                            help="위 참고 음성 전체에서 실제로 말한 내용을 그대로 적으세요. 새로 읽힐 대사는 아래 미리듣기 대사에 적습니다."
                         )
 
                         speed_cosy = st.slider("말하기 속도", 0.5, 2.0, float(speed_val), 0.05, key=f"cosy_speed_{spk}")
@@ -1470,6 +1470,17 @@ def main():
                             "speed": speed_cosy
                         }
 
+                        import hashlib
+                        default_sample = preview_text(spk, st.session_state["parsed_segments"])
+                        sample_key = hashlib.sha256(default_sample.encode("utf-8")).hexdigest()[:10]
+                        sample_text = st.text_area(
+                            "미리듣기에서 읽힐 대사", value=default_sample, max_chars=300,
+                            key=f"cosy_sample_{spk}_{sample_key}",
+                            help="이 칸의 문장을 읽습니다. 위 참고 음성의 실제 대사와는 별개입니다."
+                        )
+                        if selected_style == "🎤 기본" and len(sample_text.strip()) < len(prompt_input.strip()) / 2:
+                            st.caption("참고 대사에 비해 미리듣기 문장이 짧습니다. 가능하면 문장 1~2개로 들어보세요.")
+
                         # CosyVoice 미리듣기 버튼
                         if st.button(f"🔊 {spk} CosyVoice 미리듣기", key=f"cosy_preview_btn_{spk}", use_container_width=True):
                             cosy_url = st.session_state.get("cosyvoice_url", "")
@@ -1477,10 +1488,16 @@ def main():
                                 st.error("⚠️ 먼저 좌측 사이드바에 CosyVoice 코랩 주소를 입력해주세요!")
                             elif not effective_ref_audio:
                                 st.error("참조 오디오 파일을 먼저 업로드해주세요!")
+                            elif not prompt_input.strip():
+                                st.error("참조 오디오 실제 대사를 입력해주세요.")
+                            elif not sample_text.strip():
+                                st.error("미리듣기에서 읽힐 대사를 입력해주세요.")
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
-                                preview_file = os.path.join(work_dir, f"preview_cosy_{safe_spk}.mp3")
-                                sample_text = preview_text(spk, st.session_state["parsed_segments"])
+                                preview_id = hashlib.sha256(
+                                    f"{sample_text}|{selected_style}|{effective_ref_audio}|{prompt_input}|{speed_cosy}|v293".encode("utf-8")
+                                ).hexdigest()[:12]
+                                preview_file = os.path.join(work_dir, f"preview_cosy_{safe_spk}_{preview_id}.wav")
                                 cfg = VoiceConfig(
                                     engine="cosyvoice",
                                     style=selected_style,
@@ -1497,8 +1514,12 @@ def main():
                                             sample_text=sample_text
                                         )
                                         if os.path.exists(preview_file) and os.path.getsize(preview_file) > 0:
-                                            st.audio(preview_file, format="audio/mp3")
+                                            st.audio(preview_file, format="audio/wav")
                                             st.caption(f'💬 샘플: "{sample_text}"')
+                                            with open(preview_file, "rb") as af:
+                                                st.download_button("⬇️ CosyVoice 미리듣기 WAV 받기", af.read(),
+                                                                   file_name=f"{safe_spk}_미리듣기.wav", mime="audio/wav",
+                                                                   key=f"cosy_download_{spk}_{preview_id}")
                                         else:
                                             st.error("❌ 오디오 파일이 생성되지 않았습니다.\n\n"
                                                      "**확인 사항:**\n"
@@ -1506,10 +1527,7 @@ def main():
                                                      "2. 사이드바 URL이 최신 trycloudflare 주소인지 확인\n"
                                                      "3. 참조 오디오가 3초 이상인지 확인")
                                     except Exception as e:
-                                        err_msg = str(e)
-                                        st.error(f"❌ 음성 생성 실패:\n\n`{err_msg}`\n\n"
-                                                 f"**원인 추정:**\n"
-                                                 f"{'코랩 서버 꺼짐 또는 URL 만료' if 'connect' in err_msg.lower() or 'connection' in err_msg.lower() else '코랩 API 오류 - 코랩 로그 확인 필요'}")
+                                        st.error(f"❌ CosyVoice 음성 생성 실패: {e}")
 
                     # 3. GPT-SoVITS 설정 폼 (목소리 복제)
                     elif spk_engine == "gpt-sovits":
@@ -1978,7 +1996,8 @@ def main():
                 # 화자 설정(엔진, 보이스, 스타일, 참조 오디오, 배속, 텍스트)의 고유 해시 생성
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
-                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_v6_style_directions"
+                generation_revision = "v7_cosy_generation" if seg_engine == "cosyvoice" else "v6_style_directions"
+                cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_{generation_revision}"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
                 seg_file_path = os.path.join(segments_dir, filename)

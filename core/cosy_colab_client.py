@@ -14,6 +14,7 @@ import requests
 ENGINES = {
     "cosyvoice": ("ai-voice-studio-cosyvoice", "CosyVoice 2"),
 }
+GENERATION_CAPABILITY = "validated_generation_v293"
 
 
 
@@ -37,7 +38,12 @@ def check_connection(url, engine="cosyvoice"):
             return False, f"{label}의 프로그램 연결 주소가 아닙니다. 코랩에 표시된 엔진 이름을 확인해주세요.", None
         if status.get("ready") is not True:
             return False, "코랩에서 모델을 준비 중입니다. '준비 완료'가 나온 뒤 연결해주세요.", None
-        return True, f"✅ {label} 모델 준비 완료 · 프로그램 연결 성공", status
+        if GENERATION_CAPABILITY not in status.get("capabilities", []):
+            return False, (
+                "이전 CosyVoice 생성 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.3 바로 열기'로 "
+                "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
+            ), status
+        return True, f"✅ {label} v{status.get('server_version', '')} 모델 준비 완료 · 프로그램 연결 성공", status
     except (requests.RequestException, ValueError, AttributeError) as exc:
         if isinstance(exc, requests.HTTPError):
             detail = f"HTTP {exc.response.status_code}"
@@ -96,6 +102,11 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         with wave.open(io.BytesIO(response.content), "rb") as wav:
             if wav.getnframes() <= 0 or wav.getframerate() <= 0:
                 raise ValueError("empty WAV")
+            if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 24000:
+                raise ValueError("unexpected CosyVoice 2 audio format")
+            expected_bytes = wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
+            if len(wav.readframes(wav.getnframes())) != expected_bytes:
+                raise ValueError("truncated WAV")
     except (wave.Error, EOFError, ValueError) as exc:
         raise RuntimeError("서버가 유효한 WAV 음성을 보내지 않았습니다. 코랩 오류를 확인해주세요.") from exc
     target.parent.mkdir(parents=True, exist_ok=True)

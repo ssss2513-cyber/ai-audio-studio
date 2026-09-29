@@ -10,7 +10,7 @@ from .tts_engine import TTSEngine
 ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
-NOTEBOOK_RELEASE_REVISION = "b8da31efc9269e4af93276fe5be082d6b005faf0"
+NOTEBOOK_RELEASE_REVISION = "3fe4acd8bb4561e126b3021ee43a419bf1f21971"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
@@ -37,7 +37,7 @@ def render_connections(mode):
     if "gpt-sovits" in selected:
         notebooks.append(("GPT-SoVITS 코랩 v2.8.3 받기", "GPT_SoVITS_Colab_API.ipynb", "GPT_SoVITS_Colab_v2.8.3.ipynb"))
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.2 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.2.ipynb"))
+        notebooks.append(("CosyVoice 코랩 v2.9.3 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.3.ipynb"))
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 아래 버전이 표시된 버튼으로 새로 열어주세요.")
     for label, filename, download_name in notebooks:
         st.link_button(label.replace(" 받기", " 바로 열기 ↗"),

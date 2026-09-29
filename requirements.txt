@@ -1,4 +1,4 @@
-# Keep the currently deployed Streamlit version when rebuilding this release.
+# Shared-site release v2.9.8: rebuild to refresh imported connection helpers.
 streamlit==1.64.0
 google-genai>=1.0.0
 edge-tts>=6.1.10

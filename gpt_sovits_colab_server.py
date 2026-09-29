@@ -33,7 +33,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'GPT_SoVITS/pretrained_models'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-gpt-sovits'
-SERVER_VERSION = '2.8.6'
+SERVER_VERSION = '2.8.7'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v284'
 NLTK_DATA_REVISION = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
 # Official nltk_data/index.xml at the revision above supplies sizes and SHA-256.
@@ -135,9 +135,75 @@ def run(args, label):
 
 def read_state():
     try:
-        return json.loads(STATE.read_text())
+        state = json.loads(STATE.read_text())
+        return state if isinstance(state, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def installation_files():
+    return [PYTHON, ROOT / 'tts-v4.json', MODEL / 's1v3.ckpt',
+            MODEL / 'gsv-v4-pretrained/s2Gv4.pth', MODEL / 'gsv-v4-pretrained/vocoder.pth']
+
+
+def require_gpu():
+    """Check the connected runtime, without equating a missing CLI with no GPU."""
+    print('▶ 현재 실행 환경의 GPU 인식 확인 중…', flush=True)
+    details = []
+    candidates = [shutil.which('nvidia-smi'), '/usr/bin/nvidia-smi',
+                  '/usr/local/nvidia/bin/nvidia-smi', '/usr/lib/nvidia/bin/nvidia-smi']
+    seen = set()
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        resolved = str(Path(candidate).resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            result = subprocess.run(
+                [candidate, '--query-gpu=name,memory.total', '--format=csv,noheader'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                print('✅ 실제 GPU: ' + result.stdout.strip(), flush=True)
+                return
+            details.append('NVIDIA 확인: ' + (result.stderr or result.stdout).strip()[-300:])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            details.append('NVIDIA 확인: ' + type(exc).__name__)
+    if not seen:
+        details.append('NVIDIA 확인 명령: 기본 경로와 실행 경로에서 찾지 못함')
+    # Colab's Python can still see CUDA when nvidia-smi is not on PATH.
+    # These short-lived subprocesses load no speech models or voice samples.
+    probe = ("import json, torch; ok = bool(torch.cuda.is_available()); "
+             "print('GPU_STATUS=' + json.dumps({'available': ok, "
+             "'name': torch.cuda.get_device_name(0) if ok else ''}))")
+    interpreters = list(dict.fromkeys([str(PYTHON), sys.executable]))
+    for interpreter in interpreters:
+        if not Path(interpreter).is_file():
+            continue
+        label = 'GPT 환경' if interpreter == str(PYTHON) else '코랩 환경'
+        print(f'▶ {label}에서 CUDA 인식을 확인합니다…', flush=True)
+        try:
+            result = subprocess.run([interpreter, '-c', probe], capture_output=True,
+                                    text=True, timeout=30)
+            lines = [line for line in result.stdout.splitlines() if line.startswith('GPU_STATUS=')]
+            status = json.loads(lines[-1].split('=', 1)[1]) if lines else {}
+            if result.returncode == 0 and status.get('available') is True:
+                print('✅ 실제 GPU: ' + status['name'] + ' · CUDA 확인', flush=True)
+                return
+            details.append(label + ': ' + ('CUDA GPU를 인식하지 못함' if lines else
+                           (result.stderr.strip().splitlines() or ['확인 응답 없음'])[-1][-200:]))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            details.append(label + ': ' + type(exc).__name__)
+    print('\n【현재 실행 환경 확인 결과】\n' + '\n'.join(details), flush=True)
+    if ROOT.is_dir():
+        with (ROOT / 'setup.log').open('a', encoding='utf-8') as log:
+            log.write('\n【현재 실행 환경 확인 결과】\n' + '\n'.join(details) + '\n')
+    raise RuntimeError('현재 연결된 실행 환경에서 CUDA GPU를 확인하지 못했습니다. '
+                       'T4 선택 여부를 이 코드가 확인한 것은 아닙니다. '
+                       '코랩 연결 상태와 GPU 할당 안내를 확인해야 하며, 이 코드로 GPU를 할당할 수는 없습니다. '
+                       '기존 설치 파일과 실행 중인 서버는 삭제하지 않았습니다.')
 
 
 def server_status(base):
@@ -228,6 +294,49 @@ def worker_state(state):
         return 'stopped' if not proc.exists() else 'unknown'
 
 
+def recover_worker_state(state):
+    """Recover this app's own worker after state loss; never start a duplicate."""
+    matches = []
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            args = [part.decode(errors='replace') for part in (proc / 'cmdline').read_bytes().split(b'\0') if part]
+            if not args or '--port' not in args:
+                continue
+            port = int(args[args.index('--port') + 1])
+            candidate = {'pid': int(proc.name), 'port': port}
+            if not 1 <= port <= 65535 or worker_state(candidate) != 'running':
+                continue
+            matches.append((proc, candidate))
+        except (OSError, ValueError, IndexError):
+            continue
+    if len(matches) > 1:
+        raise RuntimeError('이 코랩에서 GPT 서버가 여러 개 실행 중입니다. 중복 모델을 추가로 시작하지 않았습니다.')
+    if not matches:
+        return state
+    proc, candidate = matches[0]
+    if state.get('pid') == candidate['pid'] and state.get('port') == candidate['port'] and state.get('base'):
+        return state
+    # Read only the matching app worker's token, keep it local, and do not log it.
+    try:
+        fields = (proc / 'environ').read_bytes().split(b'\0')
+        token = next(part.split(b'=', 1)[1].decode('ascii') for part in fields
+                     if part.startswith(b'SOVITS_ACCESS_TOKEN='))
+    except (OSError, StopIteration, UnicodeError):
+        raise RuntimeError('기존 GPT 서버가 실행 중이나 연결 기록을 복구하지 못했습니다. '
+                           '서버를 종료하거나 중복 실행하지 않았습니다.') from None
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', token):
+        raise RuntimeError('기존 GPT 서버의 연결 코드 형식을 확인하지 못했습니다. 중복 실행하지 않았습니다.')
+    candidate.update(base=f'http://127.0.0.1:{candidate["port"]}/v1/{token}',
+                     status='starting', model_version='v4', sample_rate=48000)
+    if worker_state(candidate) != 'running':
+        raise RuntimeError('연결 기록 복구 중 기존 서버가 종료됐습니다. 복구 셀을 다시 실행해주세요.')
+    write_state(candidate)
+    print('✅ 실행 중인 기존 GPT 서버의 연결 기록을 복구했습니다.', flush=True)
+    return candidate
+
+
 def wait_for_server(state, timeout=600):
     started = time.monotonic()
     next_notice = 0
@@ -269,7 +378,7 @@ def start_server():
             fcntl.flock(startup_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('다른 셀에서 서버를 시작하고 있습니다. 해당 셀의 준비 완료를 기다려주세요.') from None
-        state = read_state()
+        state = recover_worker_state(read_state())
         if state.get('base') and connection_status(state['base'])['ready']:
             return state
         process = worker_state(state)
@@ -278,11 +387,10 @@ def start_server():
             return wait_for_server(state)
         if process == 'unknown':
             raise RuntimeError('기록된 실행 정보를 확인할 수 없어 중복 실행을 막았습니다. 런타임 상태를 확인해주세요.')
-        required = [PYTHON, ROOT / 'tts-v4.json', MODEL / 's1v3.ckpt',
-                    MODEL / 'gsv-v4-pretrained/s2Gv4.pth', MODEL / 'gsv-v4-pretrained/vocoder.pth']
-        if any(not path.is_file() for path in required):
+        if any(not path.is_file() for path in installation_files()):
             raise RuntimeError('이 런타임에는 설치 파일이나 모델이 빠져 있습니다. '
                                '1번을 완료한 같은 런타임인지 확인해주세요. 자동 재설치하지 않았습니다.')
+        require_gpu()
         env = os.environ.copy()
         env['MPLBACKEND'] = 'Agg'
         # Cell 4 does not call prepare_nltk_data(), so restore its data path.
@@ -313,25 +421,50 @@ def start_server():
 
 
 def setup():
+    """Resume setup in the same runtime; preserve the previous attempt's log."""
+    import fcntl
     if not Path('/content').is_dir():
         raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
     ROOT.mkdir(parents=True, exist_ok=True)
+    with (ROOT / 'setup.lock').open('a+') as setup_lock:
+        try:
+            fcntl.flock(setup_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('다른 셀에서 GPT 준비가 진행 중입니다. 그 셀의 완료를 기다려주세요.') from None
+        logfile = ROOT / 'setup.log'
+        if logfile.is_file():
+            logfile.replace(ROOT / 'setup.previous.log')
+        logfile.write_text(f'GPT v{SERVER_VERSION} · 이번 준비 실행 · '
+                           + time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()) + '\n', encoding='utf-8')
+        try:
+            return prepare_environment()
+        except Exception:
+            with logfile.open('a', encoding='utf-8') as log:
+                log.write('\n' + traceback.format_exc())
+            raise
+
+
+def prepare_environment():
     state = read_state()
     existing = connection_status(state['base']) if state.get('base') else {'ready': False}
     if existing['ready']:
         print(f'✅ 기존 GPT-SoVITS v4 서버 준비 완료 · {existing["server_version"]} · 48kHz', flush=True)
         if not existing['reference_cache']:
-            print('기존 서버로 연결할 수 있습니다. 참고 음성 재사용 기능은 아직 적용되지 않은 서버입니다. '
-                  '속도 개선 서버로 전환하려면 생성이 끝난 뒤 런타임을 다시 시작하고 1번을 실행해주세요.', flush=True)
-        return
+            print('기존 서버를 그대로 사용합니다. 참고 음성 재사용 기능은 다음 새 서버부터 적용됩니다.', flush=True)
+        return state
     if worker_state(state) == 'running':
-        wait_for_server(state)
-        return
+        return wait_for_server(state)
     if worker_state(state) == 'unknown':
         raise RuntimeError('기록된 서버의 실행 정보를 확인할 수 없습니다. 다른 서버와 중복 실행하지 않도록 중단했습니다.')
-    if not shutil.which('nvidia-smi'):
-        raise RuntimeError('런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
-    run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
+    if all(path.is_file() for path in installation_files()):
+        print('✅ 기존 설치 파일을 찾았습니다. 패키지 설치를 건너뛰고 서버를 이어 실행합니다.', flush=True)
+        return start_server()
+    # An interrupted write can lose the record while the old worker is healthy.
+    # Recover it before changing dependencies or downloading another model.
+    state = recover_worker_state(state)
+    if state.get('base') and worker_state(state) == 'running':
+        return wait_for_server(state)
+    require_gpu()
     run(['apt-get', 'update', '-qq'], '패키지 목록 갱신')
     run(['apt-get', 'install', '-y', '-qq', 'ffmpeg', 'git', 'build-essential',
          'cmake', 'libopencc-dev', 'libsndfile1'], '오디오 도구 설치')
@@ -379,7 +512,7 @@ def setup():
         'cnhuhbert_base_path': str(MODEL / 'chinese-hubert-base'),
     }}
     (ROOT / 'tts-v4.json').write_text(json.dumps(config))
-    start_server()
+    return start_server()
 
 
 def create_app(pipeline, access_token):
@@ -547,11 +680,12 @@ def serve(port):
     uvicorn.run(app, host='127.0.0.1', port=port, access_log=False)
 
 
-def tunnel():
-    state = read_state()
+def tunnel(prepare=False):
+    # The new recovery cell opts in to preparation explicitly. Existing callers
+    # of tunnel() still reuse installed files only, without hidden downloads.
+    state = setup() if prepare else read_state()
     if not state.get('base'):
-        raise RuntimeError('이 런타임에는 1번의 준비 기록이 없습니다. 1번을 완료한 같은 코랩의 같은 런타임에서 '
-                           '4번을 실행해주세요. 이 셀에서는 설치를 시작하지 않습니다.')
+        state = start_server()
     print('음성 서버의 실제 응답을 확인합니다…', flush=True)
     for attempt in range(3):
         report = connection_status(state['base'])
@@ -562,7 +696,7 @@ def tunnel():
             time.sleep(2)
     if not report['ready']:
         process = worker_state(state)
-        if process == 'stopped':
+        if process in ('stopped', 'missing'):
             print('종료된 음성 서버를 다시 시작합니다. 기존 설치와 모델 파일을 그대로 사용합니다.', flush=True)
             state = start_server()
         elif process == 'running':
@@ -624,17 +758,14 @@ if __name__ == '__main__':
     mode.add_argument('--setup', action='store_true')
     mode.add_argument('--serve', action='store_true')
     mode.add_argument('--tunnel', action='store_true')
+    mode.add_argument('--connect', action='store_true')
     parser.add_argument('--port', type=int, default=9880)
     args = parser.parse_args()
     if args.setup:
-        try:
-            setup()
-        except Exception:
-            ROOT.mkdir(parents=True, exist_ok=True)
-            with (ROOT / 'setup.log').open('a', encoding='utf-8') as log:
-                log.write('\n' + traceback.format_exc())
-            raise
+        setup()
     elif args.serve:
         serve(args.port)
+    elif args.connect:
+        tunnel(prepare=True)
     else:
         tunnel()

@@ -36,7 +36,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.1'
+SERVER_VERSION = '2.9.2'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -334,8 +334,13 @@ def serve(port):
 
 def tunnel():
     state = read_state()
-    if not state.get('base') or not health(state['base']):
-        raise RuntimeError('먼저 1번 설치 셀을 실행해주세요.')
+    print('음성 서버 준비 상태를 확인합니다…', flush=True)
+    try:
+        ready = bool(state.get('base')) and health(state['base'])
+    except Exception:
+        ready = False
+    if not ready:
+        raise RuntimeError('음성 서버가 아직 준비되지 않았거나 중지됐습니다. 1번 셀에서 준비 완료 메시지가 나온 뒤 4번을 실행해주세요.')
     if state.get('public_base'):
         try:
             if health(state['public_base']):
@@ -351,12 +356,14 @@ def tunnel():
         temp.chmod(0o755)
         temp.replace(executable)
     log_path = ROOT / 'tunnel.log'
+    print('외부 연결을 여는 중입니다. 연결 주소가 확인될 때까지 기다려주세요 (최대 약 2분).', flush=True)
     with log_path.open('w') as log:
         proc = subprocess.Popen([str(executable), 'tunnel', '--no-autoupdate', '--url',
                                  f'http://127.0.0.1:{state["port"]}'], stdout=log, stderr=subprocess.STDOUT)
     success = False
     try:
         deadline = time.monotonic() + 120
+        next_notice = time.monotonic() + 15
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError('연결 도구가 종료되었습니다:\n' + log_path.read_text(errors='replace')[-2000:])
@@ -373,6 +380,9 @@ def tunnel():
                         return
                 except Exception:
                     pass
+            if time.monotonic() >= next_notice:
+                print('연결 주소를 확인하는 중… 아직 연결 완료가 아닙니다.', flush=True)
+                next_notice = time.monotonic() + 15
             time.sleep(2)
         raise RuntimeError('외부 연결을 열지 못했습니다. 코랩 내부의 2~3번 셀은 계속 사용할 수 있습니다.')
     finally:

@@ -85,7 +85,7 @@ def style_note(engine, style, styles):
     if engine == 'cosyvoice':
         if style == '🎤 기본':
             return '참조 음성과 실제 대사로 목소리를 복제합니다.'
-        return ('CosyVoice 코랩 v2.9.4에서 연기 지시를 전달합니다. 나이·음색은 참조 목소리의 영향을 받으므로 '
+        return ('CosyVoice 코랩에 연기 지시를 전달합니다. 나이·음색은 참조 목소리의 영향을 받으므로 '
                 '시니어 역할에는 시니어 참조 음성을 권장합니다.')
     if engine == 'gemini':
         return '선택한 연령·감정·말투를 생성 지시문에 반영합니다. 표현 정도는 선택한 보이스에 따라 달라집니다.'

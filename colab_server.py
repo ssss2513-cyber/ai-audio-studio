@@ -39,11 +39,12 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.6'
+SERVER_VERSION = '2.9.7'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
 DURATION_GUARD_CAPABILITY = 'reference_duration_guard_v296'
+PERFORMANCE_CAPABILITY = 'fp32_performance_v297'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -80,7 +81,10 @@ def health(base, require_current=False):
     return (data.get('service') == SERVICE and data.get('ready') is True
             and (not require_current or (data.get('server_version') == SERVER_VERSION
                  and GENERATION_CAPABILITY in data.get('capabilities', [])
-                 and REFERENCE_CACHE_CAPABILITY in data.get('capabilities', []))))
+                 and REFERENCE_CACHE_CAPABILITY in data.get('capabilities', [])
+                 and PERFORMANCE_CAPABILITY in data.get('capabilities', [])
+                 and data.get('acceleration', {}).get('requested') ==
+                 ('off' if os.environ.get('COSY_ACCELERATION', 'fp32').lower() == 'off' else 'fp32'))))
 
 
 def stop_previous_worker(state):
@@ -210,6 +214,98 @@ def synthesis_chunks(text, prompt_text, tokenizer):
     return chunks
 
 
+def configure_fp32_acceleration(model):
+    """Inference-only adapters; retain upstream files, weights and sampling.
+
+    Qwen2Encoder.forward_one_step uses only the decoder's hidden state and KV
+    cache. Transformers 4.51.3 also calculates full text-vocabulary logits in
+    Qwen2ForCausalLM.forward; CosyVoice discards those and uses llm_decoder for
+    speech tokens. Call the very same decoder with the same inputs directly.
+    The optional flow JIT uses the official export_jit.py FP32 compilation path.
+    No vLLM export (which casts to bfloat16), reduced precision or TensorRT
+    dependency replacement is performed by an existing-installation upgrade.
+    """
+    import torch
+    import transformers
+    from types import MethodType
+    result = {'precision': 'fp32', 'llm': 'standard', 'flow': 'pytorch', 'notes': [], 'requested': 'fp32'}
+    if os.environ.get('COSY_ACCELERATION', 'fp32').lower() == 'off':
+        result['requested'] = 'off'
+        result['label'] = 'FP32 기본 계산'
+        return result
+    try:
+        source_revision = subprocess.check_output(
+            ['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True, timeout=5,
+            stderr=subprocess.DEVNULL).strip()
+        encoder = model.model.llm.llm
+        supported = (source_revision == SOURCE_REVISION
+                     and transformers.__version__ == '4.51.3'
+                     and type(encoder).__name__ == 'Qwen2Encoder'
+                     and type(encoder).__module__ == 'cosyvoice.llm.llm'
+                     and type(encoder.model).__name__ == 'Qwen2ForCausalLM'
+                     and type(encoder.model.model).__name__ == 'Qwen2Model'
+                     and not hasattr(model.model.llm, 'vllm'))
+        if supported:
+            def decoder_step(self, xs, masks, cache=None):
+                outputs = self.model.model(
+                    inputs_embeds=xs, attention_mask=masks[:, -1, :],
+                    output_hidden_states=True, return_dict=True,
+                    use_cache=True, past_key_values=cache,
+                )
+                return outputs.last_hidden_state, outputs.past_key_values
+
+            encoder.forward_one_step = MethodType(decoder_step, encoder)
+            result['llm'] = 'decoder_only'
+            print('FP32 속도 개선: 사용하지 않는 문자 예측 계산을 생략합니다. 음성 토큰 계산·가중치·샘플링은 유지합니다.', flush=True)
+        else:
+            result['notes'].append('지원 모델·라이브러리 조합이 아니어서 기본 발음 계산을 사용합니다.')
+    except Exception as exc:
+        result['notes'].append('발음 계산 최적화 준비 실패: ' + type(exc).__name__)
+
+    original_encoder = model.model.flow.encoder
+    try:
+        print('FP32 음향 인코더 가속 준비 중… 첫 준비에 시간이 조금 더 걸릴 수 있습니다.', flush=True)
+        scripted = torch.jit.script(original_encoder)
+        scripted = torch.jit.freeze(scripted)
+        scripted = torch.jit.optimize_for_inference(scripted)
+        model.model.flow.encoder = scripted
+        result['flow'] = 'jit_fp32'
+        print('FP32 음향 인코더 가속 준비 완료.', flush=True)
+    except Exception as exc:
+        model.model.flow.encoder = original_encoder
+        result['notes'].append('음향 인코더 가속 준비 실패: ' + type(exc).__name__)
+        print('음향 가속을 준비할 수 없어 기존 FP32 방식으로 계속합니다. ' + type(exc).__name__, flush=True)
+    labels = ['FP32']
+    if result['llm'] == 'decoder_only':
+        labels.append('불필요 계산 생략')
+    if result['flow'] == 'jit_fp32':
+        labels.append('음향 인코더 가속')
+    result['label'] = ' · '.join(labels)
+    for note in result['notes']:
+        logging.warning(note)
+    return result
+
+
+def install_generation_timer(model):
+    """Time the upstream LLM thread once per chunk, not every GPU kernel.
+
+    The request lock serializes synthesis and upstream joins this thread before
+    returning speech. Reading this timer after inference is therefore safe.
+    """
+    totals = {'llm_seconds': 0.0}
+    original_job = model.model.llm_job
+
+    def timed_job(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return original_job(*args, **kwargs)
+        finally:
+            totals['llm_seconds'] += time.monotonic() - started
+
+    model.model.llm_job = timed_job
+    return totals
+
+
 def setup():
     if not Path('/content').is_dir():
         raise RuntimeError('이 파일은 Google Colab에서 실행해주세요.')
@@ -252,7 +348,7 @@ def setup():
     requirements = []
     for line in (SOURCE / 'requirements.txt').read_text().splitlines():
         if line.startswith(('deepspeed', 'tensorrt', 'gradio', 'fastapi-cli')):
-            continue  # optional acceleration/training/UI; this server uses none of these
+            continue  # JIT uses existing Torch; no additional accelerator install.
         if line.startswith('diffusers=='):
             line = 'diffusers==0.32.2'  # compatible with modern huggingface_hub (no cached_download import)
         requirements.append(line)
@@ -289,7 +385,7 @@ def setup():
 
 
 def start_server():
-    """Start the unchanged FP32 model from an existing installation."""
+    """Start the FP32 model with inference adapters from an existing installation."""
     env = os.environ.copy()
     # The isolated worker renders no notebook plots and may not have matplotlib_inline installed.
     env['MPLBACKEND'] = 'Agg'
@@ -371,6 +467,10 @@ def serve(port):
     from cosyvoice.cli.cosyvoice import CosyVoice2
     print('[모델 준비 3/4] 음성 모델·토크나이저를 불러옵니다. 세부 기록이 이어집니다.', flush=True)
     model = CosyVoice2(model_dir=str(MODEL), load_jit=False, load_trt=False, fp16=False)
+    acceleration = configure_fp32_acceleration(model)
+    generation_timer = install_generation_timer(model)
+    gpu_name = torch.cuda.get_device_name(0)
+    print(f'실행 환경: {gpu_name} · {acceleration["label"]}', flush=True)
     faulthandler.cancel_dump_traceback_later()
     print('[모델 준비 4/4] 모델 로딩 완료. 연결 서버를 시작합니다.', flush=True)
     sample_rate = model.sample_rate
@@ -399,8 +499,9 @@ def serve(port):
         authorize(token)
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
+                'gpu_name': gpu_name, 'acceleration': acceleration,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
-                                 REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY]}
+                                 REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
@@ -518,6 +619,8 @@ def serve(port):
                 logging.info('request=%s mode=%s ref_seconds=%.2f text_chars=%d chunks=%d',
                              request_id, 'style' if style_instruction else 'zero_shot', duration, len(text), len(chunks))
                 synthesis_started = time.monotonic()
+                generation_timer['llm_seconds'] = 0.0
+                recovery_count, recovery_seconds = 0, 0.0
                 # One recovery attempt per entire request, not an unbounded
                 # per-chunk loop. No model/precision/voice/speed change on retry.
                 recovery_remaining = 1
@@ -526,18 +629,24 @@ def serve(port):
                         chunk_started = time.monotonic()
                         print(f'음성 생성 {index}/{len(chunks)} 구간 처리 중…', flush=True)
                         lower, upper = duration_limits(chunk, reference_units, reference_spoken_seconds)
+                        is_recovery = False
                         while True:
-                            if style_instruction:
-                                generated = model.inference_instruct2(chunk, instruction, '',
-                                                                     zero_shot_spk_id=reference_id,
-                                                                     stream=False, speed=1.0, text_frontend=False)
-                            else:
-                                generated = model.inference_zero_shot(chunk, prompt_text, '',
-                                                                      zero_shot_spk_id=reference_id,
-                                                                      stream=False, speed=1.0, text_frontend=False)
-                            chunk_pieces = []
-                            for item in generated:
-                                chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                            attempt_started = time.monotonic()
+                            try:
+                                if style_instruction:
+                                    generated = model.inference_instruct2(chunk, instruction, '',
+                                                                         zero_shot_spk_id=reference_id,
+                                                                         stream=False, speed=1.0, text_frontend=False)
+                                else:
+                                    generated = model.inference_zero_shot(chunk, prompt_text, '',
+                                                                          zero_shot_spk_id=reference_id,
+                                                                          stream=False, speed=1.0, text_frontend=False)
+                                chunk_pieces = []
+                                for item in generated:
+                                    chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                            finally:
+                                if is_recovery:
+                                    recovery_seconds += time.monotonic() - attempt_started
                             if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
                                 raise GeneratedAudioValidationError(f'{index}번째 구간에서 빈 음성이 반환되어 저장하지 않았습니다.')
                             speech = np.concatenate(chunk_pieces)
@@ -551,6 +660,8 @@ def serve(port):
                                             reference_units, reference_spoken_seconds)
                             if recovery_remaining:
                                 recovery_remaining -= 1
+                                recovery_count += 1
+                                is_recovery = True
                                 print(f'{index}번째 구간 결과 길이({seconds:.1f}초)가 검사 범위를 벗어나 해당 구간만 한 번 다시 생성합니다. 음질 설정은 유지합니다.', flush=True)
                                 del speech, chunk_pieces
                                 continue
@@ -565,6 +676,8 @@ def serve(port):
                         pieces.append(speech)
                         if index < len(chunks):
                             pieces.append(np.zeros(int(sample_rate * 0.12), dtype=np.float32))
+                synthesis_seconds = time.monotonic() - synthesis_started
+                postprocess_started = time.monotonic()
                 if not pieces or sum(x.size for x in pieces) == 0:
                     raise RuntimeError('모델이 빈 음성을 반환했습니다. 참조 음성과 실제 대사를 확인해주세요.')
                 speech = np.concatenate(pieces)
@@ -592,7 +705,10 @@ def serve(port):
                         speech = speech * (0.98 / peak)
                 output = io.BytesIO()
                 sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
-                print(f'생성 완료 · 참고 분석 {preparation_seconds:.1f}초 · 음성 처리 {time.monotonic() - synthesis_started:.1f}초', flush=True)
+                postprocess_seconds = time.monotonic() - postprocess_started
+                print(f'생성 완료 · 참고 분석 {preparation_seconds:.1f}초 · 음성 계산 {synthesis_seconds:.1f}초 '
+                      f'(발음 순서 계산 {generation_timer["llm_seconds"]:.1f}초) · 후처리 {postprocess_seconds:.1f}초 '
+                      f'· 재시도 {recovery_count}회 / 추가 {recovery_seconds:.1f}초', flush=True)
                 return Response(output.getvalue(), media_type='audio/wav', headers={
                     'X-CosyVoice-Version': SERVER_VERSION, 'X-Request-ID': request_id,
                     'X-Audio-Duration': f'{len(speech) / sample_rate:.3f}',
@@ -601,11 +717,16 @@ def serve(port):
                     'X-Reference-ID': reference_id,
                     'X-Reference-Upload': 'sent' if payload is not None else 'skipped',
                     'X-Reference-Seconds': f'{preparation_seconds:.3f}',
-                    'X-Synthesis-Seconds': f'{time.monotonic() - synthesis_started:.3f}',
+                    'X-Synthesis-Seconds': f'{synthesis_seconds:.3f}',
+                    'X-Postprocess-Seconds': f'{postprocess_seconds:.3f}',
+                    'X-LLM-Seconds': f'{generation_timer["llm_seconds"]:.3f}',
+                    'X-Generation-Retries': str(recovery_count),
+                    'X-Retry-Seconds': f'{recovery_seconds:.3f}',
                 })
         except GeneratedAudioValidationError as exc:
             logging.warning('%s output validation failed: %s', LABEL, exc)
-            raise HTTPException(502, {'code': 'audio_validation_failed', 'message': str(exc),
+            detail = str(exc) + f' (추가 생성 {recovery_count}회, 추가 처리 {recovery_seconds:.1f}초)'
+            raise HTTPException(502, {'code': 'audio_validation_failed', 'message': detail,
                                      'synthesis_started': True, 'automatic_retry': False}) from exc
         except HTTPException:
             raise

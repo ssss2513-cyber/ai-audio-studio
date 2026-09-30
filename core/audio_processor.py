@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import wave
 from dataclasses import dataclass
 from typing import List, Tuple
 try:
@@ -30,6 +31,12 @@ class AudioProcessor:
 
     @staticmethod
     def get_audio_duration_ms(file_path: str) -> int:
+        if str(file_path).lower().endswith(".wav"):
+            try:
+                with wave.open(str(file_path), "rb") as audio:
+                    return round(audio.getnframes() * 1000 / audio.getframerate())
+            except (OSError, ValueError, wave.Error, EOFError, ZeroDivisionError):
+                return 0
         try:
             audio = mutagen.mp3.MP3(file_path)
             return int(audio.info.length * 1000)
@@ -96,10 +103,14 @@ class AudioProcessor:
         # Normalize mixed-engine clips to lossless PCM on disk, never in RAM.
         profiles = []
         for seg in valid_segments:
-            info = mutagen.mp3.MP3(seg["file_path"]).info
-            profiles.append((info.sample_rate, info.channels))
-        sample_rate = max(profile[0] for profile in profiles)
-        channels = max(profile[1] for profile in profiles)
+            if str(seg["file_path"]).lower().endswith(".wav"):
+                with wave.open(str(seg["file_path"]), "rb") as audio:
+                    profiles.append(("wav", audio.getframerate(), audio.getnchannels(), audio.getsampwidth()))
+            else:
+                info = mutagen.mp3.MP3(seg["file_path"]).info
+                profiles.append(("mp3", info.sample_rate, info.channels, 0))
+        sample_rate = max(profile[1] for profile in profiles)
+        channels = max(profile[2] for profile in profiles)
 
         def ffmpeg(arguments, timeout):
             result = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y"] + arguments,
@@ -111,10 +122,14 @@ class AudioProcessor:
         try:
             with tempfile.TemporaryDirectory(prefix=".audio_merge_", dir=out_dir) as temporary:
                 paths = [seg["file_path"] for seg in valid_segments]
-                mixed_profiles = len(set(profiles)) > 1
+                mixed_profiles = len(set(profiles)) > 1 or (profiles[0][0] == "wav" and profiles[0][3] != 2)
+                use_pcm = mixed_profiles or profiles[0][0] == "wav"
                 if mixed_profiles:
                     normalized = []
                     for index, source in enumerate(paths):
+                        if profiles[index] == ("wav", sample_rate, channels, 2):
+                            normalized.append(source)
+                            continue
                         target = os.path.join(temporary, f"{index:06d}.wav")
                         ffmpeg(["-i", source, "-map", "0:a:0", "-vn", "-ar", str(sample_rate),
                                 "-ac", str(channels), "-c:a", "pcm_s16le", "-threads", "2", target], 120)
@@ -123,8 +138,8 @@ class AudioProcessor:
 
                 silence_file = None
                 if pause_ms > 0 and len(paths) > 1:
-                    silence_file = os.path.join(temporary, "silence.wav" if mixed_profiles else "silence.mp3")
-                    codec_args = ["-c:a", "pcm_s16le"] if mixed_profiles else ["-c:a", "libmp3lame", "-b:a", "192k"]
+                    silence_file = os.path.join(temporary, "silence.wav" if use_pcm else "silence.mp3")
+                    codec_args = ["-c:a", "pcm_s16le"] if use_pcm else ["-c:a", "libmp3lame", "-b:a", "192k"]
                     ffmpeg(["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl={'mono' if channels == 1 else 'stereo'}",
                             "-t", str(pause_ms / 1000.0), "-ar", str(sample_rate), "-ac", str(channels)]
                            + codec_args + [silence_file], 30)

@@ -85,7 +85,7 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY}.issubset(status.get("capabilities", [])):
             transport.invalidate()
             return False, (
-                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.5 바로 열기'로 "
+                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.7 바로 열기'로 "
                 "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
             ), status
         if transport.status is not status:
@@ -94,6 +94,11 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         message = f"✅ {label} v{status.get('server_version', '')} 모델 준비 완료 · 프로그램 연결 성공"
         if REFERENCE_TRANSPORT_CAPABILITY in status.get("capabilities", []):
             message += " · 참고 음성 반복 전송 생략"
+        if status.get("gpu_name"):
+            message += " · " + str(status["gpu_name"])[:80]
+        acceleration = status.get("acceleration", {})
+        if isinstance(acceleration, dict) and acceleration.get("label"):
+            message += " · " + str(acceleration["label"])[:120]
         return True, message, status
     except (requests.RequestException, ValueError, AttributeError) as exc:
         if "transport" in locals():
@@ -108,7 +113,8 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         ), None
 
 
-def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cosyvoice", *, style_instruction=""):
+def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cosyvoice", *, style_instruction="", metrics=None):
+    started = time.monotonic()
     _, label = ENGINES[engine]
     base = normalize_url(url)
     if not text.strip():
@@ -157,6 +163,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         return transport.session.post(base + "/synthesize", data=fields, files=files,
                                       timeout=(15, 600), allow_redirects=False)
 
+    request_started = time.monotonic()
     try:
         response = post(with_reference=not bool(reference_id))
         # A 428 is issued only BEFORE inference, when an LRU reference was
@@ -181,7 +188,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                 detail = detail.get("message", "음성 결과 검사를 통과하지 못했습니다. 코랩의 마지막 기록을 확인해주세요.")
             elif "대사 길이에 비해 생성 음성 길이" in str(detail):
                 detail = ("이전 코랩의 고정 길이 검사에서 생성 결과가 차단됐습니다. "
-                          "사이트 왼쪽의 CosyVoice v2.9.6 길이 오류 수정 코드를 실행한 뒤 새 주소로 연결해주세요. "
+                          "사이트 왼쪽의 CosyVoice v2.9.7 속도 개선 코드를 실행한 뒤 새 주소로 연결해주세요. "
                           + str(detail))
             raise RuntimeError(f"{label} 생성 실패 (HTTP {response.status_code}): {str(detail)[:800]}")
     except requests.Timeout as exc:
@@ -190,6 +197,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
     except requests.RequestException as exc:
         transport.invalidate()
         raise RuntimeError("코랩 연결이 끊겼습니다. 코랩 실행 상태와 연결 주소를 확인해주세요.") from exc
+    request_seconds = time.monotonic() - request_started
     try:
         with wave.open(io.BytesIO(response.content), "rb") as wav:
             if wav.getnframes() <= 0 or wav.getframerate() <= 0:
@@ -197,6 +205,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 24000:
                 raise ValueError("unexpected CosyVoice 2 audio format")
             expected_bytes = wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
+            audio_seconds = wav.getnframes() / wav.getframerate()
             if len(wav.readframes(wav.getnframes())) != expected_bytes:
                 raise ValueError("truncated WAV")
     except (wave.Error, EOFError, ValueError) as exc:
@@ -209,6 +218,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         while len(transport.reference_ids) > 16:
             transport.reference_ids.popitem(last=False)
     target.parent.mkdir(parents=True, exist_ok=True)
+    save_started = time.monotonic()
     # A failed conversion must not replace a previous successful output.
     with tempfile.TemporaryDirectory(prefix="cosy_", dir=target.parent) as folder:
         wav_path = Path(folder) / "speech.wav"
@@ -224,4 +234,35 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         else:
             completed = wav_path
         os.replace(completed, target)
+    if metrics is not None:
+        metrics.update(engine="cosyvoice", request_seconds=request_seconds,
+                       total_seconds=time.monotonic() - started,
+                       save_seconds=time.monotonic() - save_started,
+                       audio_seconds=audio_seconds,
+                       server_version=response.headers.get("X-CosyVoice-Version", "")[:24],
+                       gpu_name=str((status or {}).get("gpu_name", ""))[:80],
+                       reference_cached=response.headers.get("X-Reference-Cache") == "hit")
+        for key, header in {
+            "reference_seconds": "X-Reference-Seconds",
+            "synthesis_seconds": "X-Synthesis-Seconds",
+            "postprocess_seconds": "X-Postprocess-Seconds",
+            "llm_seconds": "X-LLM-Seconds",
+            "retry_seconds": "X-Retry-Seconds",
+            "retries": "X-Generation-Retries",
+            "chunks": "X-Text-Chunks",
+        }.items():
+            try:
+                value = float(response.headers[header])
+                if math.isfinite(value) and value >= 0:
+                    metrics[key] = int(value) if key in ("retries", "chunks") else value
+            except (KeyError, TypeError, ValueError):
+                pass  # Older servers remain compatible and omit unknown timings.
+        if "reference_seconds" in metrics and "synthesis_seconds" in metrics:
+            metrics["transport_seconds"] = max(0.0, request_seconds - metrics["reference_seconds"]
+                                                - metrics["synthesis_seconds"]
+                                                - metrics.get("postprocess_seconds", 0.0))
+        acceleration = (status or {}).get("acceleration", {})
+        if isinstance(acceleration, dict):
+            metrics["acceleration"] = str(acceleration.get("label", ""))[:120]
+    response.close()
     return str(output_file)

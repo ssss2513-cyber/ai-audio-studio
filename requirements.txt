@@ -1,4 +1,4 @@
-# Shared-site release v2.9.10: rebuild to refresh imported connection helpers.
+# Shared-site release v2.9.14: refresh WAV checkpoints and CosyVoice performance helpers.
 streamlit==1.64.0
 google-genai>=1.0.0
 edge-tts>=6.1.10

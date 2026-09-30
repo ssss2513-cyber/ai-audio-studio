@@ -24,13 +24,13 @@ from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
 from core.voice_recommendations import recommend_style, preview_text, style_note, speaker_gender
 from core.generation_jobs import (
-    GenerationItem, start_job, get_job, is_running, request_pause, clear_job, start_partial_merge, valid_audio,
+    GenerationItem, start_job, get_job, is_running, request_pause, clear_job, start_partial_merge, valid_audio, cached_audio_path,
 )
 from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.13 · MP3 한 파일 다운로드 · Gemini 성우 성별 수정"
+APP_VERSION = "v2.9.14 · CosyVoice 속도 개선 · 원음 저장 · 생성 시간 표시"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -348,6 +348,39 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.progress(float(job.get("progress", 0)))
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
+        if job.get("generated", 0):
+            estimate = f"최근 새 대사 평균 {job.get('average_seconds', 0):.1f}초"
+            if active and job.get("stage") == "voice" and job["generated"] >= 3:
+                remaining = max(0, round(job.get("remaining_estimate_seconds", 0)))
+                estimate += f" · 남은 생성 약 {remaining // 60}분 {remaining % 60}초"
+            st.caption(estimate + " · 대사 길이에 따라 달라지며 최종 합치기 시간은 별도입니다.")
+        latest = job.get("latest_metrics") or {}
+        if latest.get("engine") == "cosyvoice":
+            st.caption(f"최근 {latest['index']}번: 처리 {latest.get('total_seconds', 0):.1f}초"
+                       f" · 만들어진 음성 길이 {latest.get('audio_seconds', 0):.1f}초")
+            with st.expander("CosyVoice 처리 시간 자세히"):
+                parts = []
+                for field, label in (("reference_seconds", "참고 분석"), ("synthesis_seconds", "음성 계산"),
+                                     ("postprocess_seconds", "코랩 후처리"), ("transport_seconds", "전송 등"),
+                                     ("save_seconds", "원음 저장")):
+                    if field in latest:
+                        parts.append(f"{label} {latest[field]:.1f}초")
+                st.write(" · ".join(parts) or "이전 코랩은 세부 시간을 보내지 않습니다.")
+                if "llm_seconds" in latest:
+                    st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
+                               f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
+                if "retries" in latest:
+                    totals = job.get("performance", {})
+                    st.caption(f"최근 대사 재시도 {latest['retries']}회 · 추가 처리 {latest.get('retry_seconds', 0):.1f}초"
+                               f" · 저장 완료 대사 누적 재시도 {int(totals.get('retries', 0))}회")
+                else:
+                    st.caption("재시도 상세 표시는 코랩 v2.9.7부터 지원됩니다.")
+                runtime = [latest.get("gpu_name"), latest.get("acceleration")]
+                st.caption(f"코랩 v{latest.get('server_version') or '확인 필요'} · "
+                           + " · ".join(value for value in runtime if value))
+                st.caption("개별 대사는 WAV 원음으로 저장하고, 마지막에 MP3 한 파일로 변환합니다.")
+        if job.get("merge_seconds") is not None:
+            st.caption(f"전체 MP3 합치기: {job['merge_seconds']:.1f}초")
         if active:
             st.info(job.get("message", "음성을 생성하고 있습니다."))
             if job.get("stage_started"):
@@ -2140,7 +2173,7 @@ def main():
                     )
 
                 items.append(GenerationItem(seg.index, seg.speaker, clean_text_to_speak, seg_file_path, cfg))
-            pending_items = items if force_overwrite else [item for item in items if not valid_audio(item.file_path)]
+            pending_items = items if force_overwrite else [item for item in items if not cached_audio_path(item)]
             checked_engines = set()
             for item in pending_items:
                 cfg = item.config
@@ -2225,7 +2258,7 @@ def main():
                 st.caption(f"{t.start_ms / 1000.0:.2f}초 ~ {t.end_ms / 1000.0:.2f}초")
                 st.write(t.text)
                 if os.path.isfile(t.file_path):
-                    st.audio(t.file_path, format="audio/mp3")
+                    st.audio(t.file_path, format="audio/wav" if t.file_path.lower().endswith(".wav") else "audio/mp3")
 
 if __name__ == "__main__":
     main()

@@ -1054,7 +1054,7 @@ class TTSEngine:
 
     @classmethod
     def generate_cosyvoice_speech(
-        cls, text: str, output_file: str, voice_config: VoiceConfig, retries: int = 2
+        cls, text: str, output_file: str, voice_config: VoiceConfig, retries: int = 2, *, metrics=None
     ) -> str:
         """CosyVoice 2 standalone Colab API; errors do not trigger duplicate GPU jobs."""
         from .cosy_colab_client import synthesize
@@ -1069,6 +1069,7 @@ class TTSEngine:
             float(getattr(voice_config, "speed_factor", 1.0)), output_file,
             style_instruction=(VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
                                if voice_config.style != "🎤 기본" else ""),
+            metrics=metrics,
         )
 
 

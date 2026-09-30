@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import uuid
+import wave
 import zipfile
 
 try:
@@ -107,9 +108,18 @@ def request_pause(work_dir):
 
 
 def valid_audio(path):
-    """Read MP3 metadata only; short, valid speech must not be regenerated."""
+    """Read saved WAV/MP3 metadata without decoding a story into memory."""
     try:
         path = Path(path)
+        if path.suffix.lower() == ".wav":
+            if not path.is_file():
+                return False
+            with wave.open(str(path), "rb") as audio:
+                frames = audio.getnframes()
+                if frames <= 0 or audio.getframerate() <= 0:
+                    return False
+                audio.setpos(frames - 1)
+                return len(audio.readframes(1)) == audio.getnchannels() * audio.getsampwidth()
         return (path.is_file() and path.stat().st_size >= 100
                 and math.isfinite(length := MP3(path).info.length) and length > 0)
     except Exception:
@@ -117,11 +127,18 @@ def valid_audio(path):
         return False
 
 
+def cached_audio_path(item):
+    """Prefer a completed lossless CosyVoice clip; accept previous MP3 caches."""
+    target = Path(item.file_path)
+    candidates = [target.with_suffix(".wav"), target] if item.config.engine == "cosyvoice" else [target]
+    return next((str(path) for path in candidates if valid_audio(path)), None)
+
+
 def _freeze_references(work_dir, items, force_overwrite):
     """Keep an upload/change in the UI from changing an in-flight job's voice."""
     copies = {}
     for item in items:
-        if not force_overwrite and valid_audio(item.file_path):
+        if not force_overwrite and cached_audio_path(item):
             continue
         if item.config.engine not in ("gpt-sovits", "cosyvoice"):
             continue
@@ -168,6 +185,8 @@ def start_job(work_dir, items, *, force_overwrite=False, pause_ms=500, include_s
             "progress": 0.0, "message": "음성 생성을 준비하고 있습니다.",
             "started": time.time(), "error": "", "result": None,
             "pause_ms": pause_ms,
+            "pending_total": sum(1 for item in items if force_overwrite or not cached_audio_path(item)),
+            "generated": 0, "recent_seconds": [], "performance": {},
         }
         pause = threading.Event()
         thread = threading.Thread(
@@ -199,6 +218,23 @@ def _error_message(exc, items):
     return re.sub(r"/v1/[A-Za-z0-9_-]{16,128}", "/v1/[연결 토큰]", message)[:1600]
 
 
+def _record_performance(state, item, metrics):
+    state["generated"] += 1
+    state["recent_seconds"] = (state["recent_seconds"] + [metrics["total_seconds"]])[-10:]
+    average = sum(state["recent_seconds"]) / len(state["recent_seconds"])
+    state["average_seconds"] = average
+    state["remaining_estimate_seconds"] = average * max(0, state["pending_total"] - state["generated"])
+    state["latest_metrics"] = dict(metrics, index=item.index, speaker=item.speaker)
+    if item.config.engine == "cosyvoice":
+        totals = state["performance"]
+        totals["cosy_lines"] = totals.get("cosy_lines", 0) + 1
+        for name in ("total_seconds", "audio_seconds", "reference_seconds", "synthesis_seconds",
+                     "transport_seconds", "save_seconds", "postprocess_seconds", "llm_seconds",
+                     "retries", "retry_seconds"):
+            if name in metrics:
+                totals[name] = totals.get(name, 0) + metrics[name]
+
+
 def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_speaker, ownership):
     generated_gemini = False
     pause_path = Path(work_dir) / ".generation.pause"
@@ -211,9 +247,16 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
                          message=f"{item.index}번 대사 생성 중 · {item.speaker}",
                          stage_started=time.time())
             _save(work_dir, state)
+            # Keep CosyVoice's native PCM through generation and merge. Only the
+            # final download is MP3: no per-line encode or repeated lossy encode.
             target = Path(item.file_path)
+            if item.config.engine == "cosyvoice":
+                target = target.with_suffix(".wav")
             target.parent.mkdir(parents=True, exist_ok=True)
-            if not force_overwrite and valid_audio(target):
+            cached = cached_audio_path(item) if not force_overwrite else None
+            metrics = None
+            if cached:
+                target = Path(cached)
                 state["reused"] += 1
             else:
                 if item.config.engine == "gemini" and generated_gemini:
@@ -221,20 +264,28 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
                     if pause.wait(max(1.0, 4.2 / max(1, len(keys)))) or pause_path.exists():
                         state.update(status="paused", message="요청에 따라 생성을 멈췄습니다.")
                         return
-                # Every engine writes to a temporary MP3. A failure cannot
+                # Every engine writes to a temporary audio file. A failure cannot
                 # destroy a previously completed output, even in overwrite mode.
-                temporary = target.with_name("." + target.stem + "." + state["id"] + ".part.mp3")
+                temporary = target.with_name("." + target.stem + "." + state["id"] + ".part" + target.suffix)
+                generation_started = time.monotonic()
+                metrics = {"engine": item.config.engine}
                 try:
-                    TTSEngine.generate_speech(item.text, str(temporary), item.config)
+                    if item.config.engine == "cosyvoice":
+                        TTSEngine.generate_cosyvoice_speech(item.text, str(temporary), item.config, metrics=metrics)
+                    else:
+                        TTSEngine.generate_speech(item.text, str(temporary), item.config)
                     if not valid_audio(temporary):
                         raise RuntimeError("저장된 음성 파일을 읽을 수 없습니다. 해당 대사에서 멈췄습니다.")
                     os.replace(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
+                metrics["total_seconds"] = time.monotonic() - generation_started
+                _record_performance(state, item, metrics)
                 generated_gemini = generated_gemini or item.config.engine == "gemini"
             state["completed"].append({
                 "index": item.index, "speaker": item.speaker,
                 "text": item.text, "file_path": str(target),
+                "metrics": metrics,
             })
             state["done"] = len(state["completed"])
             state["progress"] = 0.9 * state["done"] / state["total"]
@@ -250,10 +301,12 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         state.update(stage="merge", message="음성 생성 완료 · 전체 오디오를 합치고 있습니다.",
                      stage_started=time.time())
+        merge_started = time.monotonic()
         _save(work_dir, state)
         full_audio = str(folder / "full_audio.mp3")
         _, timings = AudioProcessor(pause_ms=pause_ms).merge_segments(
             state["completed"], full_audio, pause_ms=pause_ms)
+        state["merge_seconds"] = time.monotonic() - merge_started
         state.update(stage="subtitles", progress=0.95, message="자막을 만들고 있습니다.")
         _save(work_dir, state)
         srt, vtt = str(folder / "subtitles.srt"), str(folder / "subtitles.vtt")

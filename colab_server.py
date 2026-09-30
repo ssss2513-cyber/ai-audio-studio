@@ -39,9 +39,10 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.4'
+SERVER_VERSION = '2.9.5'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
+REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -72,7 +73,7 @@ def read_state():
         return {}
 
 
-def health(base, require_current=True):
+def health(base, require_current=False):
     with urllib.request.urlopen(base + '/health', timeout=5) as response:
         data = json.load(response)
     return (data.get('service') == SERVICE and data.get('ready') is True
@@ -98,8 +99,9 @@ def stop_previous_worker(state):
     try:
         args = (proc_dir / 'cmdline').read_bytes().split(b'\0')
         args = [arg.decode(errors='replace') for arg in args if arg]
-        owned = (len(args) > 2 and Path(args[0]).absolute() == PYTHON.absolute()
-                 and Path(args[1]).absolute() == Path(__file__).absolute()
+        script_index = 2 if len(args) > 1 and args[1] == '-u' else 1
+        owned = (len(args) > script_index and Path(args[0]).absolute() == PYTHON.absolute()
+                 and Path(args[script_index]).absolute() == Path(__file__).absolute()
                  and '--serve' in args and '--port' in args
                  and args[args.index('--port') + 1] == str(state.get('port')))
     except (OSError, IndexError):
@@ -198,12 +200,19 @@ def setup():
     except Exception:
         pass
     if existing_ready:
-        if health(state['base']):
+        if health(state['base'], require_current=True):
             print(f'✅ {LABEL} v{SERVER_VERSION} 준비 완료. 사이트 연결은 4번을 실행하세요.', flush=True)
             return
         stop_previous_worker(state)
     elif isinstance(state.get('pid'), int) and (Path('/proc') / str(state['pid'])).exists():
         stop_previous_worker(state)
+    # A healthy earlier worker proves this installation already loaded. A
+    # transport-only upgrade can reuse it without reinstalling packages/models.
+    if existing_ready and PYTHON.is_file() and all((MODEL / name).is_file() for name in
+            ('cosyvoice2.yaml', 'llm.pt', 'flow.pt', 'hift.pt', 'campplus.onnx', 'speech_tokenizer_v2.onnx')):
+        print('기존 설치와 모델을 그대로 사용해 CosyVoice 속도 개선 서버를 시작합니다.', flush=True)
+        start_server()
+        return
     if shutil.which('nvidia-smi') is None:
         raise RuntimeError('GPU가 없습니다. 런타임 → 런타임 유형 변경 → T4 GPU를 선택해주세요.')
     run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 'GPU 확인')
@@ -255,6 +264,11 @@ def setup():
                                 'campplus.onnx', 'speech_tokenizer_v2.onnx') if not (MODEL / name).is_file()]
     if missing:
         raise RuntimeError('모델 다운로드가 완전하지 않습니다: ' + ', '.join(missing))
+    start_server()
+
+
+def start_server():
+    """Start the unchanged FP32 model from an existing installation."""
     env = os.environ.copy()
     # The isolated worker renders no notebook plots and may not have matplotlib_inline installed.
     env['MPLBACKEND'] = 'Agg'
@@ -270,7 +284,8 @@ def setup():
     log_path = ROOT / 'server.log'
     with log_path.open('w') as log:
         worker = subprocess.Popen([str(PYTHON), '-u', str(Path(__file__).resolve()), '--serve', '--engine', ENGINE, '--port', str(port)],
-                                  cwd=SOURCE, env=env, stdout=log, stderr=subprocess.STDOUT)
+                                  cwd=SOURCE, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                  stdin=subprocess.DEVNULL, start_new_session=True)
     print('\n▶ 모델 준비 기록을 아래에 실시간으로 표시합니다. 최대 10분 후에도 준비되지 않으면 중단합니다.', flush=True)
     ready = False
     started = time.monotonic()
@@ -346,6 +361,7 @@ def serve(port):
     # Entries are never saved to disk and are bounded to limit GPU memory use.
     reference_cache = OrderedDict()
     reference_cache_limit = 16
+    instance_id = secrets.token_hex(12)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     def authorize(token):
@@ -361,13 +377,14 @@ def serve(port):
     def status(token: str):
         authorize(token)
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
-                'server_version': SERVER_VERSION, 'sample_rate': sample_rate,
-                'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY]}
+                'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
+                'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
+                                 REFERENCE_TRANSPORT_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
-                   speed: float = Form(1.0), reference: UploadFile = File(...),
-                   style_instruction: str = Form('')):
+                   speed: float = Form(1.0), reference: UploadFile | None = File(None),
+                   style_instruction: str = Form(''), reference_id: str = Form('')):
         authorize(token)
         try:
             text = normalize_speech_text(text, '생성할 대사')
@@ -392,18 +409,29 @@ def serve(port):
                 fcntl.flock(gpu_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise HTTPException(409, '다른 엔진이 음성을 생성 중입니다. 완료 후 실행해주세요.')
-            payload = reference.file.read(10 * 1024 * 1024 + 1)
-            if not payload or len(payload) > 10 * 1024 * 1024:
-                raise HTTPException(422, '참조 음성은 10MB 이하 WAV 또는 MP3를 사용해주세요.')
-            with tempfile.TemporaryDirectory(prefix='cosy_ref_') as folder:
-                instruction = ('Speak in Korean. ' + style_instruction + '<|endofprompt|>') if style_instruction else ''
-                # Include the conditioning text and mode: instruction-mode voices
-                # must never reuse a basic-mode transcript (upstream issue #1400).
+            instruction = ('Speak in Korean. ' + style_instruction + '<|endofprompt|>') if style_instruction else ''
+            payload = None
+            if reference is not None:
+                payload = reference.file.read(10 * 1024 * 1024 + 1)
+                if not payload or len(payload) > 10 * 1024 * 1024:
+                    raise HTTPException(422, '참조 음성은 10MB 이하 WAV 또는 MP3를 사용해주세요.')
                 identity = json.dumps([hashlib.sha256(payload).hexdigest(), prompt_text,
                                        instruction, SERVER_VERSION], ensure_ascii=False)
                 reference_id = 'studio_' + hashlib.sha256(identity.encode('utf-8')).hexdigest()
-                cached = reference_cache.get(reference_id)
-                reference_hit = cached is not None and reference_id in model.frontend.spk2info
+            elif not re.fullmatch(r'studio_[a-f0-9]{64}', reference_id):
+                raise HTTPException(422, '참고 음성을 등록해주세요.')
+            cached = reference_cache.get(reference_id)
+            reference_hit = (cached is not None and reference_id in model.frontend.spk2info
+                             and cached.get('prompt_text') == prompt_text
+                             and cached.get('instruction') == instruction)
+            if payload is None and not reference_hit:
+                # This response is strictly before ANY model call. The client
+                # may restore the reference bytes without duplicating speech.
+                raise HTTPException(428, {'code': 'reference_required', 'synthesis_started': False,
+                                          'message': '참고 음성 정보를 다시 전송해주세요.'})
+            with tempfile.TemporaryDirectory(prefix='cosy_ref_') as folder:
+                # Include the conditioning text and mode: instruction-mode voices
+                # must never reuse a basic-mode transcript (upstream issue #1400).
                 preparation_started = time.monotonic()
                 if reference_hit:
                     reference_cache.move_to_end(reference_id)
@@ -454,7 +482,8 @@ def serve(port):
                         model.frontend.spk2info.pop(oldest, None)
                     with torch.inference_mode():
                         model.add_zero_shot_spk(instruction or prompt_text, str(prepared), reference_id)
-                    reference_cache[reference_id] = {'duration': duration}
+                    reference_cache[reference_id] = {'duration': duration, 'prompt_text': prompt_text,
+                                                     'instruction': instruction}
                 preparation_seconds = time.monotonic() - preparation_started
 
                 pieces = []
@@ -528,6 +557,10 @@ def serve(port):
                     'X-Audio-Duration': f'{len(speech) / sample_rate:.3f}',
                     'X-Text-Chunks': str(len(chunks)),
                     'X-Reference-Cache': 'hit' if reference_hit else 'miss',
+                    'X-Reference-ID': reference_id,
+                    'X-Reference-Upload': 'sent' if payload is not None else 'skipped',
+                    'X-Reference-Seconds': f'{preparation_seconds:.3f}',
+                    'X-Synthesis-Seconds': f'{time.monotonic() - synthesis_started:.3f}',
                 })
         except HTTPException:
             raise
@@ -535,7 +568,8 @@ def serve(port):
             logging.exception('%s synthesis failed', LABEL)
             raise HTTPException(500, f'{type(exc).__name__}: {str(exc)[:600]}') from exc
         finally:
-            reference.file.close()
+            if reference is not None:
+                reference.file.close()
             if gpu_lock is not None:
                 gpu_lock.close()
             model_lock.release()

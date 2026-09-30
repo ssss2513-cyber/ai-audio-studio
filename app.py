@@ -5,7 +5,8 @@ import re
 import time
 import shutil
 import subprocess
-import zipfile
+from types import SimpleNamespace
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Set
 import streamlit as st
 import streamlit.components.v1 as components
@@ -22,13 +23,14 @@ from core.tts_engine import (
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
 from core.voice_recommendations import recommend_style, preview_text, style_note
-from core.audio_processor import AudioProcessor
-from core.subtitle import SubtitleGenerator
+from core.generation_jobs import (
+    GenerationItem, start_job, get_job, is_running, request_pause, clear_job, partial_bundle, valid_audio,
+)
 from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.10 · GPT 기존 환경 이어쓰기"
+APP_VERSION = "v2.9.11 · 중단 복구·이어서 생성"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -284,6 +286,57 @@ def set_speakers_preset(engine_type: str):
             if sdata.get("ref_audio_path"):
                 set_state_safe(f"sovits_saved_path_{spk}", sdata.get("ref_audio_path"))
         set_state_safe(f"style_select_{spk}", style)
+
+def render_generation_status(work_dir, active_at_render):
+    # Only the small status panel polls. The worker never touches Streamlit state.
+    @st.fragment(run_every=2 if active_at_render else None)
+    def panel():
+        job = get_job(work_dir)
+        if not job:
+            return
+        active = is_running(work_dir)
+        if active_at_render and not active:
+            # Re-enable controls and display terminal results once, then stop polling.
+            st.rerun()
+        st.progress(float(job.get("progress", 0)))
+        st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
+        st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
+        if active:
+            st.info(job.get("message", "음성을 생성하고 있습니다."))
+            if job.get("stage_started"):
+                elapsed = max(0, int(time.time() - job["stage_started"]))
+                st.caption(f"현재 단계 경과: {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다.")
+            if st.button("현재 대사 저장 후 멈추기", key="pause_generation_job"):
+                request_pause(work_dir)
+                st.session_state["_pause_requested_job"] = job["id"]
+            if st.session_state.get("_pause_requested_job") == job["id"]:
+                st.warning("정지 요청을 받았습니다. 이미 요청한 음성은 응답을 받아 저장한 뒤 멈춥니다.")
+        elif job.get("status") == "complete":
+            if st.session_state.get("_generation_result_job") != job["id"]:
+                result = job["result"]
+                result["timings"] = [SimpleNamespace(**timing) for timing in result["timings"]]
+                st.session_state["generation_result"] = result
+                st.session_state["_generation_result_job"] = job["id"]
+        else:
+            if job.get("error"):
+                st.error(job["error"])
+            else:
+                st.warning(job.get("message", "작업이 중단되었습니다."))
+            st.caption("위의 '완료 파일도 새로 만들기'를 끄고 생성 버튼을 누르면, 같은 대사·설정의 완료 파일을 재사용합니다.")
+            if job.get("done", 0):
+                if st.button("완료된 대사 다운로드 준비", key="prepare_partial_download"):
+                    try:
+                        path = partial_bundle(work_dir)
+                        st.session_state["_partial_download"] = (job["id"], path)
+                    except Exception as exc:
+                        st.error(str(exc))
+                prepared = st.session_state.get("_partial_download")
+                if prepared and prepared[0] == job["id"] and os.path.isfile(prepared[1]):
+                    st.download_button("완료된 대사 ZIP 받기", Path(prepared[1]).read_bytes,
+                                       file_name="tts_partial_segments.zip", mime="application/zip",
+                                       key="download_partial_audio", on_click="ignore")
+    panel()
+
 
 def main():
     # 크롬 브라우저 자동 번역으로 인한 React removeChild 크래시 원천 차단
@@ -642,6 +695,7 @@ def main():
 
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)
+    generation_active = is_running(work_dir)
 
     # 지연된 대본 텍스트가 있다면 위젯 생성 전에 안전하게 적용
     if "pending_script_text" in st.session_state:
@@ -881,7 +935,10 @@ def main():
         # Visitors connect their own GPU runtime; URLs stay in session state.
         if st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
             render_connections(st.session_state["active_engine_mode"])
-        render_reset()
+        if generation_active:
+            st.caption("음성 생성 중입니다. 작업을 지우려면 먼저 생성을 멈춰주세요.")
+        else:
+            render_reset()
 
         st.divider()
         st.markdown("#### 🎚️ 재생 및 자막 설정")
@@ -1276,7 +1333,7 @@ def main():
                         }
 
                         # 목소리 미리듣기 버튼 (Supertonic)
-                        if st.button(f"🔊 {spk} Supertonic 미리듣기 (무료)", key=f"preview_btn_{spk}", use_container_width=True):
+                        if st.button(f"🔊 {spk} Supertonic 미리듣기 (무료)", key=f"preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                             preview_file = os.path.join(work_dir, f"preview_super_{safe_spk}.mp3")
                             sample_text = preview_text(spk, st.session_state["parsed_segments"])
@@ -1332,7 +1389,7 @@ def main():
                         }
 
                         # 목소리 미리듣기 버튼 (Gemini)
-                        if st.button(f"🔊 {spk} Gemini Flash 미리듣기", key=f"preview_btn_{spk}", use_container_width=True):
+                        if st.button(f"🔊 {spk} Gemini Flash 미리듣기", key=f"preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             if not gemini_api_key:
                                 st.error("⚠️ 사이드바에 Gemini API Key를 먼저 입력해주세요! (무료로 쓰시려면 상단 'Supertonic'을 누르세요)")
                             else:
@@ -1482,7 +1539,7 @@ def main():
                             st.caption("참고 대사에 비해 미리듣기 문장이 짧습니다. 가능하면 문장 1~2개로 들어보세요.")
 
                         # CosyVoice 미리듣기 버튼
-                        if st.button(f"🔊 {spk} CosyVoice 미리듣기", key=f"cosy_preview_btn_{spk}", use_container_width=True):
+                        if st.button(f"🔊 {spk} CosyVoice 미리듣기", key=f"cosy_preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             cosy_url = st.session_state.get("cosyvoice_url", "")
                             if not cosy_url:
                                 st.error("⚠️ 먼저 좌측 사이드바에 CosyVoice 코랩 주소를 입력해주세요!")
@@ -1751,7 +1808,7 @@ def main():
                         }
 
                         # 목소리 미리듣기 버튼 (GPT-SoVITS)
-                        if st.button(f"🔊 {spk} GPT-SoVITS 미리듣기", key=f"preview_btn_{spk}", use_container_width=True):
+                        if st.button(f"🔊 {spk} GPT-SoVITS 미리듣기", key=f"preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             sovits_url = st.session_state.get("gpt_sovits_url", "")
                             if not effective_ref_audio:
                                 st.error("⚠️ 먼저 위에서 참조 오디오(.wav 또는 .mp3) 파일을 업로드해주세요. (경로 입력은 전혀 필요 없습니다!)")
@@ -1845,7 +1902,7 @@ def main():
                         }
 
                         # 목소리 미리듣기 버튼 (Edge-TTS)
-                        if st.button(f"🔊 {spk} 미리듣기 (무료)", key=f"preview_btn_{spk}", use_container_width=True):
+                        if st.button(f"🔊 {spk} 미리듣기 (무료)", key=f"preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             rate_str = f"{rate_val:+d}%"
                             pitch_str = f"{pitch_val:+d}Hz"
                             safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
@@ -1881,8 +1938,16 @@ def main():
         col_opt1, col_opt2 = st.columns([1.5, 3])
         with col_opt1:
             gen_mode = st.radio("생성 범위 선택", ["전체 대사 생성", "구간 테스트 생성 (일부만)"], horizontal=True)
-            force_overwrite = st.checkbox("이전 생성 파일 무시하고 새로 덮어쓰기 (설정 변경 시 권장)", value=True)
-            if st.button("🧹 이전 음성 캐시 완전히 비우기", help="이전에 생성된 오디오 파일을 모두 삭제하여 100% 새 설정으로 깨끗하게 다시 생성합니다."):
+            if st.session_state.pop("_reset_bulk_overwrite", False):
+                st.session_state["bulk_force_overwrite"] = False
+            force_overwrite = st.checkbox("완료 파일도 새로 만들기", value=False,
+                                          key="bulk_force_overwrite", disabled=generation_active,
+                                          help="끄면 동일한 대사와 음성 설정으로 완료된 파일을 재사용합니다. 설정을 바꾼 대사는 자동으로 새로 생성됩니다.")
+            if st.button("🧹 이전 음성 캐시 완전히 비우기", disabled=generation_active, help="이전에 생성된 오디오 파일을 모두 삭제하여 100% 새 설정으로 깨끗하게 다시 생성합니다."):
+                clear_job(work_dir)
+                shutil.rmtree(os.path.join(work_dir, "results"), ignore_errors=True)
+                for result_key in ("_partial_download", "_generation_result_job"):
+                    st.session_state.pop(result_key, None)
                 seg_d = os.path.join(work_dir, "segments_all")
                 ref_c = os.path.join(work_dir, "ref_cache")
                 ref_c2 = os.path.join(seg_d, "ref_cache")
@@ -1904,87 +1969,29 @@ def main():
         
         with col_opt2:
             if gen_mode == "구간 테스트 생성 (일부만)":
-                seg_range = st.slider("생성할 대사 구간 (시작 ~ 끝 번호)", min_value=1, max_value=total_segs, value=(1, min(10, total_segs)))
-                st.caption(f"💡 선택한 {seg_range[0]}번부터 {seg_range[1]}번까지 총 {seg_range[1] - seg_range[0] + 1}개 대사만 빠르게 테스트 생성합니다. (약 5~15초 소요)")
+                seg_range = ((1, 1) if total_segs == 1 else st.slider(
+                    "생성할 대사 구간 (시작 ~ 끝 번호)", min_value=1, max_value=total_segs,
+                    value=(1, min(10, total_segs)), disabled=generation_active))
+                st.caption(f"💡 선택한 {seg_range[0]}번부터 {seg_range[1]}번까지 총 {seg_range[1] - seg_range[0] + 1}개 대사를 생성합니다. 시간은 대사 길이와 엔진에 따라 달라집니다.")
             else:
                 seg_range = (1, total_segs)
-                st.info(f"💡 총 **{total_segs}개**의 대사를 생성합니다.\n(전체 약 35~40분 분량 오디오, 이미 생성된 파일은 자동 건너뛰어 초고속으로 완료됩니다)")
+                st.info(f"총 **{total_segs}개** 대사 · 완료된 파일은 재사용하고 남은 대사를 생성합니다."
+                        if not force_overwrite else f"총 **{total_segs}개** 대사를 모두 새로 만듭니다.")
 
         btn_label = f"🚀 TTS 및 자막 생성 시작 ({seg_range[0]}번 ~ {seg_range[1]}번, 총 {seg_range[1] - seg_range[0] + 1}개)"
-        if st.button(btn_label, type="primary", use_container_width=True):
+        previous_job = get_job(work_dir)
+        if previous_job and previous_job.get("status") in ("failed", "paused", "interrupted") and not force_overwrite:
+            btn_label = f"▶ 남은 대사 이어서 생성 ({seg_range[0]}번 ~ {seg_range[1]}번)"
+        if generation_active:
+            st.caption("생성 중인 작업은 시작할 때의 대본과 음성 설정을 사용합니다. 진행 상황은 아래에서 확인하세요.")
+        if st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
+                     disabled=generation_active):
             all_segments = st.session_state["parsed_segments"]
             target_segments = all_segments[seg_range[0] - 1 : seg_range[1]]
-            target_count = len(target_segments)
-
-            # Gemini 사용 여부 체크
-            has_gemini = any(
-                st.session_state["voice_settings"].get(s.speaker, {}).get("engine") == "gemini"
-                for s in target_segments
-            )
-
-            if has_gemini and not gemini_api_key:
-                st.error("⚠️ Gemini 성우가 지정된 인물이 포함되어 있습니다. 사이드바에 Gemini API Key를 입력하시거나, [👑 전체 Supertonic 3(무료)] 일괄 변경 버튼을 눌러주세요!")
-                return
-
-            # CosyVoice 사용 여부 체크
-            has_cosy = any(
-                st.session_state["voice_settings"].get(s.speaker, {}).get("engine") == "cosyvoice"
-                for s in target_segments
-            )
-            if has_cosy:
-                cosy_url = st.session_state.get("cosyvoice_url", "")
-                if not cosy_url:
-                    st.error("⚠️ CosyVoice가 지정된 화자가 있습니다. 좌측 사이드바에 '🔥 CosyVoice 코랩 접속 주소'를 먼저 입력해주세요!")
-                    return
-                ok, test_msg = TTSEngine.test_cosyvoice_connection(cosy_url)
-                if not ok:
-                    st.error(f"⚠️ CosyVoice API 서버에 연결할 수 없습니다: {test_msg}\n\n코랩에서 CosyVoice가 정상 실행 중인지 확인해주세요.")
-                    return
-                for s in target_segments:
-                    spk_data = st.session_state["voice_settings"].get(s.speaker, {})
-                    if spk_data.get("engine") == "cosyvoice":
-                        r_path = spk_data.get("ref_audio_path", "") or st.session_state.get(f"cosy_saved_path_{s.speaker}", "")
-                        if not r_path or not os.path.exists(r_path):
-                            st.error(f"⚠️ 화자 '{s.speaker}'의 CosyVoice 참조 오디오가 설정되지 않았거나 존재하지 않습니다. 화자 카드에서 참조 음성 파일을 등록해주세요!")
-                            return
-
-            # GPT-SoVITS 사용 여부 체크
-            has_sovits = any(
-                st.session_state["voice_settings"].get(s.speaker, {}).get("engine") == "gpt-sovits"
-                for s in target_segments
-            )
-            if has_sovits:
-                sovits_url = st.session_state.get("gpt_sovits_url", "")
-                ok, test_msg = TTSEngine.test_gpt_sovits_connection(sovits_url)
-                if not ok:
-                    st.error(f"⚠️ GPT-SoVITS API 서버에 연결할 수 없습니다: {test_msg}\n\n좌측 [내 구글 코랩 연결] 안내에 따라 본인 코랩을 실행하고 새 연결 주소를 입력해주세요.")
-                    return
-                # GPT-SoVITS 화자들의 참조 오디오 유효성 사전 검사
-                for s in target_segments:
-                    spk_data = st.session_state["voice_settings"].get(s.speaker, {})
-                    if spk_data.get("engine") == "gpt-sovits":
-                        if not spk_data.get("prompt_text", "").strip():
-                            st.error(f"화자 '{s.speaker}'의 참조 오디오 실제 대사를 입력해주세요.")
-                            return
-                        r_path = spk_data.get("ref_audio_path", "")
-                        if not r_path or not os.path.exists(r_path):
-                            st.error(f"⚠️ 화자 '{s.speaker}'의 GPT-SoVITS 참조 오디오가 설정되지 않았거나 존재하지 않습니다. 화자 카드에서 파일을 등록해주세요!")
-                            return
-                        if os.path.isdir(r_path):
-                            st.error(f"⚠️ 화자 '{s.speaker}'의 경로(`{r_path}`)는 파일이 아니라 폴더입니다! 폴더 안의 실제 오디오 파일(.wav, .mp3)을 선택해주세요.")
-                            return
-
-            progress_bar = st.progress(0.0)
-            status_text = st.empty()
 
             segments_dir = os.path.join(work_dir, "segments_all")
-            os.makedirs(segments_dir, exist_ok=True)
-
-            audio_info_list = []
-            
-            # 1. 개별 세그먼트 생성
-            error_occurred = False
-            for i, seg in enumerate(target_segments, 1):
+            items = []
+            for seg in target_segments:
                 safe_spk = "".join(c for c in seg.speaker if c.isalnum() or c in (' ', '_', '-')).strip()
                 spk_cfg_data = st.session_state["voice_settings"].get(seg.speaker, {})
                 seg_engine = spk_cfg_data.get("engine", "supertonic")
@@ -2009,7 +2016,6 @@ def main():
                         voice=v_name,
                         style=seg_style
                     )
-                    eng_badge = "👑 Supertonic"
                 elif seg_engine == "cosyvoice":
                     actual_spk_ref = spk_cfg_data.get("ref_audio_path") or st.session_state.get(f"cosy_saved_path_{seg.speaker}", "")
                     actual_spk_prompt = spk_cfg_data.get("prompt_text") or st.session_state.get(f"cosy_prompt_{seg.speaker}", "")
@@ -2022,7 +2028,6 @@ def main():
                         prompt_text=actual_spk_prompt,
                         speed_factor=float(spk_cfg_data.get("speed", 1.0))
                     )
-                    eng_badge = "🔥 CosyVoice"
                 elif seg_engine == "gemini":
                     v_name = spk_cfg_data.get("voice", "Kore")
                     safe_gemini_model = gemini_model if gemini_model in gemini_model_options else "gemini-3.1-flash-tts-preview"
@@ -2033,7 +2038,6 @@ def main():
                         model=safe_gemini_model,
                         api_key=gemini_api_key
                     )
-                    eng_badge = "⚡ Gemini"
                 elif seg_engine == "gpt-sovits":
                     actual_spk_ref = spk_cfg_data.get("ref_audio_path") or st.session_state.get(f"sovits_saved_path_{seg.speaker}", "")
                     actual_spk_prompt = spk_cfg_data.get("prompt_text") or st.session_state.get(f"sovits_prompt_{seg.speaker}", "")
@@ -2050,7 +2054,6 @@ def main():
                         top_p=float(spk_cfg_data.get("top_p", 1.0)),
                         sample_steps=int(spk_cfg_data.get("sample_steps", 32))
                     )
-                    eng_badge = "🎙️ GPT-SoVITS"
                 else:
                     v_name = spk_cfg_data.get("voice", "ko-KR-SunHiNeural")
                     r_val = spk_cfg_data.get("rate", 0)
@@ -2062,97 +2065,46 @@ def main():
                         rate=f"{r_val:+d}%",
                         pitch=f"{p_val:+d}Hz"
                     )
-                    eng_badge = "🌐 Edge"
 
-                status_text.markdown(f"**🎙️ {i}/{target_count}번째 대사 처리 중 · 완료 {i-1}개** [{eng_badge} | {seg_style}]<br>`[{seg.speaker}] {clean_text_to_speak[:35]}...`", unsafe_allow_html=True)
-                progress_bar.progress(0.9 * (i - 1) / target_count)
+                items.append(GenerationItem(seg.index, seg.speaker, clean_text_to_speak, seg_file_path, cfg))
+            pending_items = items if force_overwrite else [item for item in items if not valid_audio(item.file_path)]
+            checked_engines = set()
+            for item in pending_items:
+                cfg = item.config
+                if cfg.engine == "gemini" and not gemini_api_key:
+                    st.error("Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
+                    return
+                if cfg.engine in ("cosyvoice", "gpt-sovits"):
+                    if not cfg.prompt_text.strip():
+                        st.error(f"화자 '{item.speaker}'의 참조 음성에서 실제로 말한 대사를 입력해주세요.")
+                        return
+                    if not os.path.isfile(cfg.ref_audio_path):
+                        st.error(f"화자 '{item.speaker}'의 참조 음성 파일을 등록해주세요.")
+                        return
+                    if cfg.engine not in checked_engines:
+                        if cfg.engine == "cosyvoice":
+                            ok, message = TTSEngine.test_cosyvoice_connection(cfg.cosyvoice_url)
+                        else:
+                            ok, message = TTSEngine.test_gpt_sovits_connection(cfg.gpt_sovits_url)
+                        if not ok:
+                            st.error(f"코랩 연결을 확인해주세요: {message}")
+                            return
+                        checked_engines.add(cfg.engine)
 
-                # 파일이 이미 존재하고 덮어쓰기가 아니면 건너뛰기 (비정상 크기의 깨진 파일은 무조건 재생성)
-                is_corrupt = False
-                if os.path.exists(seg_file_path):
-                    f_size = os.path.getsize(seg_file_path)
-                    if f_size < 100 or (f_size <= 25000 and len(clean_text_to_speak) > 20):
-                        is_corrupt = True
-
-                need_generate = force_overwrite or (not os.path.exists(seg_file_path)) or is_corrupt
-                if need_generate:
-                    if force_overwrite:
-                        for old_f in os.listdir(segments_dir):
-                            if old_f.startswith(f"{seg.index:04d}_") and old_f != filename:
-                                try: os.remove(os.path.join(segments_dir, old_f))
-                                except Exception: pass
-                    if seg_engine == "gemini" and i > 1:
-                        # Gemini 무료 API 키 분당 15회(15 RPM) 한도 초과 방지 스마트 페이싱
-                        # 1개 키: 최소 4.2초 대기로 15 RPM 초과를 사전에 100% 차단
-                        # 다중 키 등록 시: 키 개수만큼 나누어 초고속 병합 대기
-                        import time
-                        parsed_g_keys = [k for k in re.split(r'[,;\s\n]+', gemini_api_key) if k.strip()]
-                        g_keys_count = len(parsed_g_keys) if parsed_g_keys else 1
-                        pace_delay = max(1.0, 4.2 / g_keys_count)
-                        time.sleep(pace_delay)
-                    try:
-                        TTSEngine.generate_speech(clean_text_to_speak, seg_file_path, cfg)
-                    except Exception as e:
-                        st.error(f"대사 {seg.index}번 생성 실패 ({seg.speaker} - {eng_badge}): {str(e)}")
-                        error_occurred = True
-                        break
-
-                audio_info_list.append({
-                    'index': seg.index,
-                    'speaker': seg.speaker,
-                    'text': clean_text_to_speak,
-                    'file_path': seg_file_path
-                })
-                progress_bar.progress(0.9 * i / target_count)
-
-            if not error_occurred and audio_info_list:
-                # 2. 오디오 병합 (생성이 완료되어도 병합·저장 전에는 100%로 표시하지 않음)
-                status_text.text("음성 생성 완료 · 대사 사이 무음을 넣고 전체 오디오 파일을 합치고 있습니다...")
-                audio_processor = AudioProcessor(pause_ms=pause_ms)
-                full_audio_path = os.path.join(work_dir, "full_audio.mp3")
-                merged_path, timings = audio_processor.merge_segments(
-                    audio_info_list,
-                    full_audio_path,
-                    pause_ms=pause_ms
-                )
-
-                # 3. 자막 생성
-                progress_bar.progress(0.95)
-                status_text.text("정밀 타임스탬프 기반 SRT 및 VTT 자막 파일을 생성하고 있습니다...")
-                srt_path = os.path.join(work_dir, "subtitles.srt")
-                vtt_path = os.path.join(work_dir, "subtitles.vtt")
-                SubtitleGenerator.generate_srt(timings, srt_path, include_speaker=include_spk_in_sub)
-                SubtitleGenerator.generate_vtt(timings, vtt_path, include_speaker=include_spk_in_sub)
-
-                # 4. ZIP 압축 패키징 (Streamlit 200MB 한도 회피 및 초고속 전송을 위해 완성본/세그먼트 스마트 분리)
-                progress_bar.progress(0.97)
-                status_text.text("다운로드 파일을 준비하고 있습니다...")
-                main_zip_path = os.path.join(work_dir, "tts_main_bundle.zip")
-                with zipfile.ZipFile(main_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-                    # MP3 is already compressed; DEFLATE spends CPU for little gain.
-                    zipf.write(full_audio_path, arcname="full_audio.mp3", compress_type=zipfile.ZIP_STORED)
-                    zipf.write(srt_path, arcname="subtitles.srt")
-                    zipf.write(vtt_path, arcname="subtitles.vtt")
-
-                seg_zip_path = os.path.join(work_dir, "tts_segments_bundle.zip")
-                with zipfile.ZipFile(seg_zip_path, "w", zipfile.ZIP_STORED) as zipf:
-                    for item in audio_info_list:
-                        arcname = os.path.join("segments", os.path.basename(item['file_path']))
-                        zipf.write(item['file_path'], arcname=arcname)
-
-                progress_bar.progress(1.0)
-                status_text.text("🎉 모든 음성 생성 및 자막 합성이 완료되었습니다!")
-
-                st.session_state["generation_result"] = {
-                    "full_audio": full_audio_path,
-                    "srt": srt_path,
-                    "vtt": vtt_path,
-                    "main_zip": main_zip_path,
-                    "seg_zip": seg_zip_path,
-                    "timings": timings,
-                    "audio_info_list": audio_info_list
-                }
+            try:
+                start_job(work_dir, items, force_overwrite=force_overwrite,
+                          pause_ms=pause_ms, include_speaker=include_spk_in_sub)
+            except Exception as exc:
+                st.error(f"작업을 시작하지 못했습니다: {exc}")
+            else:
+                st.session_state["generation_result"] = None
+                st.session_state["_reset_bulk_overwrite"] = True
+                st.session_state.pop("_partial_download", None)
+                st.session_state.pop("result_clip_index", None)
+                st.session_state.pop("play_full_result", None)
                 st.rerun()
+
+        render_generation_status(work_dir, generation_active)
 
     # Step 4: 결과 화면 및 다운로드
     if st.session_state.get("generation_result"):
@@ -2163,10 +2115,8 @@ def main():
         col_main, col_down = st.columns([3, 2])
         with col_main:
             st.markdown("### 🎧 전체 병합 오디오 재생")
-            if os.path.exists(res["full_audio"]):
-                with open(res["full_audio"], "rb") as f:
-                    audio_bytes = f.read()
-                st.audio(audio_bytes, format="audio/mp3")
+            if os.path.exists(res["full_audio"]) and st.checkbox("전체 오디오 들어보기", key="play_full_result"):
+                st.audio(res["full_audio"], format="audio/mp3")
 
         with col_down:
             st.markdown("### 📥 내 결과 다운로드")
@@ -2180,26 +2130,24 @@ def main():
             for label, result_key, filename, mime in downloads:
                 path = res.get(result_key, "")
                 if path and os.path.isfile(path):
-                    with open(path, "rb") as completed_file:
-                        st.download_button(label, completed_file.read(), file_name=filename,
-                                           mime=mime, key="result_download_" + result_key,
-                                           use_container_width=True)
+                    st.download_button(label, Path(path).read_bytes, file_name=filename,
+                                       mime=mime, key="result_download_" + result_key,
+                                       use_container_width=True, on_click="ignore")
             st.caption("현재 접속에서 생성한 파일입니다. 창을 닫거나 작업을 지우기 전에 다운로드해주세요.")
 
         # 개별 대사별 타임라인 및 재생 목록
         with st.expander("🔍 세부 대사별 타임라인 및 개별 음성 확인", expanded=False):
-            for t in res["timings"]:
-                tc1, tc2, tc3 = st.columns([1.5, 4, 3])
-                with tc1:
-                    start_sec = t.start_ms / 1000.0
-                    end_sec = t.end_ms / 1000.0
-                    st.markdown(f"**[{t.speaker}]**<br><small>{start_sec:.2f}s ~ {end_sec:.2f}s</small>", unsafe_allow_html=True)
-                with tc2:
-                    st.write(t.text)
-                with tc3:
-                    if os.path.exists(t.file_path):
-                        with open(t.file_path, "rb") as f:
-                            st.audio(f.read(), format="audio/mp3")
+            # Load just one selected clip, not hundreds of audio widgets at once.
+            if res["timings"]:
+                clip_index = st.selectbox(
+                    "확인할 대사", range(len(res["timings"])),
+                    format_func=lambda i: f"{res['timings'][i].segment_index}번 · {res['timings'][i].speaker}",
+                    key="result_clip_index")
+                t = res["timings"][clip_index]
+                st.caption(f"{t.start_ms / 1000.0:.2f}초 ~ {t.end_ms / 1000.0:.2f}초")
+                st.write(t.text)
+                if os.path.isfile(t.file_path):
+                    st.audio(t.file_path, format="audio/mp3")
 
 if __name__ == "__main__":
     main()

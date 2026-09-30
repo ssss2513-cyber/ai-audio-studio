@@ -375,7 +375,8 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                     st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
                                f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
                 if "sampling_seconds" in latest:
-                    st.caption(f"발음 순서 계산에 포함된 후보 선택 {latest['sampling_seconds']:.1f}초")
+                    st.caption(f"발음 순서 계산에 포함된 후보 선택·GPU 대기 {latest['sampling_seconds']:.1f}초"
+                               " · 앞선 GPU 계산이 끝나기를 기다린 시간도 포함합니다.")
                 if "retries" in latest:
                     totals = job.get("performance", {})
                     st.caption(f"최근 대사 재시도 {latest['retries']}회 · 추가 처리 {latest.get('retry_seconds', 0):.1f}초"

@@ -229,7 +229,7 @@ def _record_performance(state, item, metrics):
         totals = state["performance"]
         totals["cosy_lines"] = totals.get("cosy_lines", 0) + 1
         for name in ("total_seconds", "audio_seconds", "reference_seconds", "synthesis_seconds",
-                     "transport_seconds", "save_seconds", "postprocess_seconds", "llm_seconds",
+                     "transport_seconds", "save_seconds", "postprocess_seconds", "llm_seconds", "sampling_seconds",
                      "retries", "retry_seconds"):
             if name in metrics:
                 totals[name] = totals.get(name, 0) + metrics[name]

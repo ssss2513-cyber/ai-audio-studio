@@ -39,12 +39,14 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.7'
+SERVER_VERSION = '2.9.8'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
 DURATION_GUARD_CAPABILITY = 'reference_duration_guard_v296'
 PERFORMANCE_CAPABILITY = 'fp32_performance_v297'
+THROUGHPUT_CAPABILITY = 'fp32_throughput_v298'
+UPSTREAM_COMMON_BLOB = '3f235a62e0455abbbf028635978b800e8be951af'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -83,6 +85,7 @@ def health(base, require_current=False):
                  and GENERATION_CAPABILITY in data.get('capabilities', [])
                  and REFERENCE_CACHE_CAPABILITY in data.get('capabilities', [])
                  and PERFORMANCE_CAPABILITY in data.get('capabilities', [])
+                 and THROUGHPUT_CAPABILITY in data.get('capabilities', [])
                  and data.get('acceleration', {}).get('requested') ==
                  ('off' if os.environ.get('COSY_ACCELERATION', 'fp32').lower() == 'off' else 'fp32'))))
 
@@ -214,6 +217,115 @@ def synthesis_chunks(text, prompt_text, tokenizer):
     return chunks
 
 
+def install_same_rule_sampling(llm):
+    """Keep the pinned RAS distribution, stable sort and FP32 prefix sums.
+
+    The upstream nucleus sampler synchronizes a CUDA scalar for every prefix
+    comparison, then copies each shortlisted value back through the CPU. Copy
+    the at-most-top_k prefix once; perform the *same ordered additions* in its
+    original dtype on CPU and sample the original GPU probability vector.
+    Never replace this with cumsum/topk, change a cutoff, or sample on CPU.
+    """
+    import functools
+    import torch
+    from cosyvoice.utils import common
+    contents = Path(common.__file__).read_bytes()
+    blob = hashlib.sha1(b'blob ' + str(len(contents)).encode() + b'\0' + contents).hexdigest()
+    original = llm.sampling
+    function = original.func if isinstance(original, functools.partial) else original
+    if (blob != UPSTREAM_COMMON_BLOB or function is not common.ras_sampling
+            or (isinstance(original, functools.partial) and original.args)):
+        return False
+
+    def same_rule_ras(weighted_scores, decoded_tokens, sampling,
+                      top_p=0.8, top_k=25, win_size=10, tau_r=0.1):
+        # Unknown/unsupported custom settings use the original function.
+        if weighted_scores.dtype != torch.float32 or not isinstance(top_k, int) or top_k < 1:
+            return common.ras_sampling(weighted_scores, decoded_tokens, sampling,
+                                       top_p=top_p, top_k=top_k, win_size=win_size, tau_r=tau_r)
+        sorted_value, sorted_idx = weighted_scores.softmax(dim=0).sort(descending=True, stable=True)
+        prefix = sorted_value[:min(top_k, sorted_value.numel())].detach().cpu()
+        cumulative = prefix.new_zeros(())
+        count = 0
+        for probability in prefix:
+            if not bool(cumulative < top_p):
+                break
+            cumulative += probability
+            count += 1
+        if count == 0:
+            return common.ras_sampling(weighted_scores, decoded_tokens, sampling,
+                                       top_p=top_p, top_k=top_k, win_size=win_size, tau_r=tau_r)
+        probabilities = sorted_value[:count].contiguous()
+        indices = sorted_idx[:count]
+        top_id = indices[probabilities.multinomial(1, replacement=True)].item()
+        # The pinned decoder already stores Python integer IDs. Count the same
+        # window on CPU, without another host/device transfer and scalar wait.
+        window = decoded_tokens[-win_size:]
+        if all(type(token) is int for token in window):
+            repetitions = sum(token == top_id for token in window)
+        else:
+            repetitions = (torch.tensor(window).to(weighted_scores.device) == top_id).sum().item()
+        if repetitions >= win_size * tau_r:
+            weighted_scores[top_id] = -float('inf')
+            top_id = common.random_sampling(weighted_scores, decoded_tokens, sampling)
+        return top_id
+
+    llm.sampling = functools.partial(same_rule_ras, **(original.keywords or {})) if isinstance(original, functools.partial) else same_rule_ras
+    return True
+
+
+def install_offline_cache_reuse(model):
+    """Same complete-utterance path, with PyTorch's GPU allocator retained.
+
+    The upstream non-streaming path starts a thread and immediately joins it.
+    Execute that same job inline, propagate its errors, and release per-request
+    tensors in finally. A CUDA synchronization is retained; empty_cache is not
+    called for every successful chunk. Streaming/voice conversion use upstream.
+    """
+    import torch
+    import uuid
+    from types import MethodType
+    original = model.model.tts
+
+    # Mirror upstream defaults: instruct2 intentionally omits the LLM prompt
+    # speech token, while cross-lingual mode also omits prompt_text.
+    def offline_tts(self, text=torch.zeros(1, 0, dtype=torch.int32),
+                    flow_embedding=torch.zeros(0, 192), llm_embedding=torch.zeros(0, 192),
+                    prompt_text=torch.zeros(1, 0, dtype=torch.int32),
+                    llm_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
+                    flow_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
+                    prompt_speech_feat=torch.zeros(1, 0, 80),
+                    source_speech_token=torch.zeros(1, 0, dtype=torch.int32),
+                    stream=False, speed=1.0, **kwargs):
+        if stream or source_speech_token.shape[1] != 0:
+            yield from original(text=text, flow_embedding=flow_embedding, llm_embedding=llm_embedding,
+                                prompt_text=prompt_text, llm_prompt_speech_token=llm_prompt_speech_token,
+                                flow_prompt_speech_token=flow_prompt_speech_token,
+                                prompt_speech_feat=prompt_speech_feat, source_speech_token=source_speech_token,
+                                stream=stream, speed=speed, **kwargs)
+            return
+        request = str(uuid.uuid4())
+        with self.lock:
+            self.tts_speech_token_dict[request], self.llm_end_dict[request] = [], False
+            self.hift_cache_dict[request] = None
+        try:
+            self.llm_job(text, prompt_text, llm_prompt_speech_token, llm_embedding, request)
+            tokens = torch.tensor(self.tts_speech_token_dict[request]).unsqueeze(dim=0)
+            speech = self.token2wav(token=tokens, prompt_token=flow_prompt_speech_token,
+                                    prompt_feat=prompt_speech_feat, embedding=flow_embedding,
+                                    token_offset=0, uuid=request, finalize=True, speed=speed)
+            yield {'tts_speech': speech.cpu()}
+        finally:
+            with self.lock:
+                self.tts_speech_token_dict.pop(request, None)
+                self.llm_end_dict.pop(request, None)
+                self.hift_cache_dict.pop(request, None)
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().synchronize()
+
+    model.model.tts = MethodType(offline_tts, model.model)
+
+
 def configure_fp32_acceleration(model):
     """Inference-only adapters; retain upstream files, weights and sampling.
 
@@ -228,7 +340,8 @@ def configure_fp32_acceleration(model):
     import torch
     import transformers
     from types import MethodType
-    result = {'precision': 'fp32', 'llm': 'standard', 'flow': 'pytorch', 'notes': [], 'requested': 'fp32'}
+    result = {'precision': 'fp32', 'llm': 'standard', 'flow': 'pytorch',
+              'sampling': 'standard', 'memory_cache': False, 'notes': [], 'requested': 'fp32'}
     if os.environ.get('COSY_ACCELERATION', 'fp32').lower() == 'off':
         result['requested'] = 'off'
         result['label'] = 'FP32 기본 계산'
@@ -244,12 +357,14 @@ def configure_fp32_acceleration(model):
                      and type(encoder).__module__ == 'cosyvoice.llm.llm'
                      and type(encoder.model).__name__ == 'Qwen2ForCausalLM'
                      and type(encoder.model.model).__name__ == 'Qwen2Model'
+                     and type(model.model).__name__ == 'CosyVoice2Model'
+                     and type(model.model.llm).__name__ == 'Qwen2LM'
                      and not hasattr(model.model.llm, 'vllm'))
         if supported:
             def decoder_step(self, xs, masks, cache=None):
                 outputs = self.model.model(
                     inputs_embeds=xs, attention_mask=masks[:, -1, :],
-                    output_hidden_states=True, return_dict=True,
+                    output_hidden_states=False, return_dict=True,
                     use_cache=True, past_key_values=cache,
                 )
                 return outputs.last_hidden_state, outputs.past_key_values
@@ -257,6 +372,14 @@ def configure_fp32_acceleration(model):
             encoder.forward_one_step = MethodType(decoder_step, encoder)
             result['llm'] = 'decoder_only'
             print('FP32 속도 개선: 사용하지 않는 문자 예측 계산을 생략합니다. 음성 토큰 계산·가중치·샘플링은 유지합니다.', flush=True)
+            if install_same_rule_sampling(model.model.llm):
+                result['sampling'] = 'same_rule_prefix_transfer'
+                print('발음 후보 일괄 전송 적용: 후보 확률·정렬·누적 순서·반복 억제 설정을 유지합니다.', flush=True)
+            else:
+                result['notes'].append('발음 선택 코드가 고정 버전과 달라 기본 선택 방식을 사용합니다.')
+            install_offline_cache_reuse(model)
+            result['memory_cache'] = True
+            print('구간별 GPU 메모리 캐시를 재사용합니다. 모델 계산 단계는 유지합니다.', flush=True)
         else:
             result['notes'].append('지원 모델·라이브러리 조합이 아니어서 기본 발음 계산을 사용합니다.')
     except Exception as exc:
@@ -280,6 +403,10 @@ def configure_fp32_acceleration(model):
         labels.append('불필요 계산 생략')
     if result['flow'] == 'jit_fp32':
         labels.append('음향 인코더 가속')
+    if result['sampling'] == 'same_rule_prefix_transfer':
+        labels.append('발음 선택 대기 단축')
+    if result['memory_cache']:
+        labels.append('GPU 메모리 재사용')
     result['label'] = ' · '.join(labels)
     for note in result['notes']:
         logging.warning(note)
@@ -287,13 +414,14 @@ def configure_fp32_acceleration(model):
 
 
 def install_generation_timer(model):
-    """Time the upstream LLM thread once per chunk, not every GPU kernel.
+    """Measure LLM and candidate selection wall time without extra CUDA waits.
 
-    The request lock serializes synthesis and upstream joins this thread before
-    returning speech. Reading this timer after inference is therefore safe.
+    The request lock serializes synthesis; the LLM job completes before speech
+    is returned. Candidate selection time is included in LLM time, not added.
     """
-    totals = {'llm_seconds': 0.0}
+    totals = {'llm_seconds': 0.0, 'sampling_seconds': 0.0}
     original_job = model.model.llm_job
+    original_sampling = model.model.llm.sampling
 
     def timed_job(*args, **kwargs):
         started = time.monotonic()
@@ -303,6 +431,13 @@ def install_generation_timer(model):
             totals['llm_seconds'] += time.monotonic() - started
 
     model.model.llm_job = timed_job
+    def timed_sampling(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return original_sampling(*args, **kwargs)
+        finally:
+            totals['sampling_seconds'] += time.monotonic() - started
+    model.model.llm.sampling = timed_sampling
     return totals
 
 
@@ -501,7 +636,8 @@ def serve(port):
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
                 'gpu_name': gpu_name, 'acceleration': acceleration,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
-                                 REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY]}
+                                 REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
+                                 THROUGHPUT_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
@@ -620,6 +756,7 @@ def serve(port):
                              request_id, 'style' if style_instruction else 'zero_shot', duration, len(text), len(chunks))
                 synthesis_started = time.monotonic()
                 generation_timer['llm_seconds'] = 0.0
+                generation_timer['sampling_seconds'] = 0.0
                 recovery_count, recovery_seconds = 0, 0.0
                 # One recovery attempt per entire request, not an unbounded
                 # per-chunk loop. No model/precision/voice/speed change on retry.
@@ -707,7 +844,7 @@ def serve(port):
                 sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
                 postprocess_seconds = time.monotonic() - postprocess_started
                 print(f'생성 완료 · 참고 분석 {preparation_seconds:.1f}초 · 음성 계산 {synthesis_seconds:.1f}초 '
-                      f'(발음 순서 계산 {generation_timer["llm_seconds"]:.1f}초) · 후처리 {postprocess_seconds:.1f}초 '
+                      f'(발음 순서 계산 {generation_timer["llm_seconds"]:.1f}초, 그중 후보 선택 {generation_timer["sampling_seconds"]:.1f}초) · 후처리 {postprocess_seconds:.1f}초 '
                       f'· 재시도 {recovery_count}회 / 추가 {recovery_seconds:.1f}초', flush=True)
                 return Response(output.getvalue(), media_type='audio/wav', headers={
                     'X-CosyVoice-Version': SERVER_VERSION, 'X-Request-ID': request_id,
@@ -720,6 +857,7 @@ def serve(port):
                     'X-Synthesis-Seconds': f'{synthesis_seconds:.3f}',
                     'X-Postprocess-Seconds': f'{postprocess_seconds:.3f}',
                     'X-LLM-Seconds': f'{generation_timer["llm_seconds"]:.3f}',
+                    'X-Sampling-Seconds': f'{generation_timer["sampling_seconds"]:.3f}',
                     'X-Generation-Retries': str(recovery_count),
                     'X-Retry-Seconds': f'{recovery_seconds:.3f}',
                 })

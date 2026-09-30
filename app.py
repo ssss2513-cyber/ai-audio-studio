@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.14 · CosyVoice 속도 개선 · 원음 저장 · 생성 시간 표시"
+APP_VERSION = "v2.9.15 · CosyVoice 계산 대기 단축 · GPU 상태 표시"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -358,6 +358,11 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         if latest.get("engine") == "cosyvoice":
             st.caption(f"최근 {latest['index']}번: 처리 {latest.get('total_seconds', 0):.1f}초"
                        f" · 만들어진 음성 길이 {latest.get('audio_seconds', 0):.1f}초")
+            runtime = [latest.get("gpu_name"), latest.get("acceleration")]
+            st.caption(f"코랩 v{latest.get('server_version') or '확인 필요'} · "
+                       + " · ".join(value for value in runtime if value))
+            if latest.get("server_version") != "2.9.8":
+                st.caption("추가 속도 개선은 코랩 v2.9.8부터 적용됩니다. 사이트 왼쪽의 업데이트 코드를 실행한 뒤 새 주소로 연결해주세요.")
             with st.expander("CosyVoice 처리 시간 자세히"):
                 parts = []
                 for field, label in (("reference_seconds", "참고 분석"), ("synthesis_seconds", "음성 계산"),
@@ -369,15 +374,14 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 if "llm_seconds" in latest:
                     st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
                                f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
+                if "sampling_seconds" in latest:
+                    st.caption(f"발음 순서 계산에 포함된 후보 선택 {latest['sampling_seconds']:.1f}초")
                 if "retries" in latest:
                     totals = job.get("performance", {})
                     st.caption(f"최근 대사 재시도 {latest['retries']}회 · 추가 처리 {latest.get('retry_seconds', 0):.1f}초"
                                f" · 저장 완료 대사 누적 재시도 {int(totals.get('retries', 0))}회")
                 else:
                     st.caption("재시도 상세 표시는 코랩 v2.9.7부터 지원됩니다.")
-                runtime = [latest.get("gpu_name"), latest.get("acceleration")]
-                st.caption(f"코랩 v{latest.get('server_version') or '확인 필요'} · "
-                           + " · ".join(value for value in runtime if value))
                 st.caption("개별 대사는 WAV 원음으로 저장하고, 마지막에 MP3 한 파일로 변환합니다.")
         if job.get("merge_seconds") is not None:
             st.caption(f"전체 MP3 합치기: {job['merge_seconds']:.1f}초")

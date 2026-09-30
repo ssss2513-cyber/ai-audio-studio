@@ -85,7 +85,7 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY}.issubset(status.get("capabilities", [])):
             transport.invalidate()
             return False, (
-                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.7 바로 열기'로 "
+                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.8 바로 열기'로 "
                 "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
             ), status
         if transport.status is not status:
@@ -98,7 +98,7 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
             message += " · " + str(status["gpu_name"])[:80]
         acceleration = status.get("acceleration", {})
         if isinstance(acceleration, dict) and acceleration.get("label"):
-            message += " · " + str(acceleration["label"])[:120]
+            message += " · " + str(acceleration["label"])[:200]
         return True, message, status
     except (requests.RequestException, ValueError, AttributeError) as exc:
         if "transport" in locals():
@@ -188,7 +188,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                 detail = detail.get("message", "음성 결과 검사를 통과하지 못했습니다. 코랩의 마지막 기록을 확인해주세요.")
             elif "대사 길이에 비해 생성 음성 길이" in str(detail):
                 detail = ("이전 코랩의 고정 길이 검사에서 생성 결과가 차단됐습니다. "
-                          "사이트 왼쪽의 CosyVoice v2.9.7 속도 개선 코드를 실행한 뒤 새 주소로 연결해주세요. "
+                          "사이트 왼쪽의 CosyVoice v2.9.8 속도 개선 코드를 실행한 뒤 새 주소로 연결해주세요. "
                           + str(detail))
             raise RuntimeError(f"{label} 생성 실패 (HTTP {response.status_code}): {str(detail)[:800]}")
     except requests.Timeout as exc:
@@ -247,6 +247,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             "synthesis_seconds": "X-Synthesis-Seconds",
             "postprocess_seconds": "X-Postprocess-Seconds",
             "llm_seconds": "X-LLM-Seconds",
+            "sampling_seconds": "X-Sampling-Seconds",
             "retry_seconds": "X-Retry-Seconds",
             "retries": "X-Generation-Retries",
             "chunks": "X-Text-Chunks",
@@ -263,6 +264,6 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                                                 - metrics.get("postprocess_seconds", 0.0))
         acceleration = (status or {}).get("acceleration", {})
         if isinstance(acceleration, dict):
-            metrics["acceleration"] = str(acceleration.get("label", ""))[:120]
+            metrics["acceleration"] = str(acceleration.get("label", ""))[:200]
     response.close()
     return str(output_file)

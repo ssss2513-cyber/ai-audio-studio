@@ -22,15 +22,15 @@ from core.tts_engine import (
 )
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
-from core.voice_recommendations import recommend_style, preview_text, style_note
+from core.voice_recommendations import recommend_style, preview_text, style_note, speaker_gender
 from core.generation_jobs import (
-    GenerationItem, start_job, get_job, is_running, request_pause, clear_job, partial_bundle, valid_audio,
+    GenerationItem, start_job, get_job, is_running, request_pause, clear_job, start_partial_merge, valid_audio,
 )
 from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.12 · CosyVoice 반복 전송 개선"
+APP_VERSION = "v2.9.13 · MP3 한 파일 다운로드 · Gemini 성우 성별 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -94,7 +94,7 @@ GEMINI_CHARACTER_PRESETS = {
     "나레이션": {"voice": "Kore", "style": "📖 동화 나레이션", "role_desc": "차분하고 따뜻한 여성 해설"},
     "달래": {"voice": "Aoede", "style": "💌 부드럽고 감성적", "role_desc": "맑고 생기 있는 여주인공"},
     "덕쇠": {"voice": "Fenrir", "style": "💪 힘차게", "role_desc": "씩씩하고 충직한 소년/청년"},
-    "송 노인": {"voice": "Gacrux", "style": "👴 시니어 중후한 (60대)", "role_desc": "연륜과 깊이가 있는 염색장 어르신"},
+    "송 노인": {"voice": "Sadaltager", "style": "👴 시니어 중후한 (60대)", "role_desc": "연륜과 깊이가 있는 남성 염색장 어르신"},
     "말숙": {"voice": "Zephyr", "style": "😊 밝고 활기차게", "role_desc": "화사하고 개성 있는 여인"},
     "봉 행수": {"voice": "Zubenelgenubi", "style": "🏛️ 40대 안정적인", "role_desc": "산전수전 겪은 노련한 행수"},
     "이방 오익환": {"voice": "Sadaltager", "style": "🎩 50대 깊이 있는", "role_desc": "무게감 있고 영악한 관아 이방"},
@@ -110,7 +110,7 @@ GEMINI_CHARACTER_PRESETS = {
     "노모": {"voice": "Sulafat", "style": "👵 시니어 따뜻한 (70대)", "role_desc": "자애롭고 포근한 노모"},
     "장인": {"voice": "Charon", "style": "🎩 50대 깊이 있는", "role_desc": "무뚝뚝한 장인 어른"},
     "훈장": {"voice": "Sadaltager", "style": "🎓 강의/교육", "role_desc": "점잖은 마을 훈장"},
-    "박씨 노인": {"voice": "Gacrux", "style": "👴 시니어 중후한 (60대)", "role_desc": "동네 토박이 노인"},
+    "박씨 노인": {"voice": "Charon", "style": "👴 시니어 중후한 (60대)", "role_desc": "동네 토박이 남성 노인"},
     "젊은 아낙": {"voice": "Callirrhoe", "style": "😊 밝고 활기차게", "role_desc": "생기 넘치는 마을 아낙"},
     "청년": {"voice": "Enceladus", "style": "💪 힘차게", "role_desc": "패기 넘치는 동네 청년"},
 }
@@ -177,6 +177,59 @@ def get_edge_voice_label(v_key: str) -> str:
     info = KOREAN_EDGE_VOICES.get(v_key, {})
     return f"{info.get('name', v_key)} | {info.get('description', '')}"
 
+
+def gemini_preset(speaker, current=None):
+    """Keep a chosen voice, and preserve gender when switching engines."""
+    current = current or {}
+    preset = GEMINI_CHARACTER_PRESETS.get(speaker, {})
+    catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
+               "edge-tts": KOREAN_EDGE_VOICES}.get(current.get("engine"), {})
+    gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
+              or speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", "")))
+    voice = current.get("voice") if current.get("engine") == "gemini" else preset.get("voice")
+    if voice not in GEMINI_VOICES or (gender and GEMINI_VOICES[voice]["gender"] != gender):
+        voice = "Charon" if gender == "남성" else "Kore"
+    return {"engine": "gemini", "voice": voice, "gender": GEMINI_VOICES[voice]["gender"],
+            "style": current.get("style", preset.get("style", "🎤 기본")), "speed": 1.0}
+
+
+def change_gemini_gender(speaker):
+    gender = st.session_state[f"gemini_gender_{speaker}"]
+    config = st.session_state["voice_settings"][speaker]
+    voice = st.session_state.get(f"gemini_voice_{speaker}", config.get("voice"))
+    if GEMINI_VOICES.get(voice, {}).get("gender") != gender:
+        candidate = GEMINI_CHARACTER_PRESETS.get(speaker, {}).get("voice")
+        voice = (candidate if GEMINI_VOICES.get(candidate, {}).get("gender") == gender
+                 else "Charon" if gender == "남성" else "Kore")
+    config.update(voice=voice, gender=gender)
+    st.session_state[f"gemini_voice_{speaker}"] = voice
+
+
+def correct_legacy_gemini_voices():
+    """Repair selections made under the three incorrect gender labels once."""
+    if st.session_state.get("_gemini_gender_catalog_v2913"):
+        return
+    corrections = {"Gacrux": ("남성", "Sadaltager"),
+                   "Achernar": ("남성", "Umbriel"),
+                   "Sadachbia": ("여성", "Zephyr")}
+    changed = []
+    for name, config in st.session_state.get("voice_settings", {}).items():
+        old = config.get("voice")
+        if config.get("engine") != "gemini" or old not in corrections:
+            continue
+        old_gender, replacement = corrections[old]
+        intended = (config.get("gender")
+                    or speaker_gender(name, st.session_state.get(f"voice_profile_{name}", ""))
+                    or old_gender)
+        if GEMINI_VOICES[old]["gender"] != intended:
+            config.update(voice=replacement, gender=intended)
+            st.session_state[f"gemini_voice_{name}"] = replacement
+            st.session_state[f"gemini_gender_{name}"] = intended
+            changed.append(f"{name}: {old} → {replacement}")
+    st.session_state["_gemini_gender_corrections"] = changed
+    st.session_state["_gemini_gender_catalog_v2913"] = True
+
+
 def apply_preset_to_speakers(speakers, engine_type):
     """현재 화자 목록에 특정 엔진의 프리셋을 일괄 적용 (스타일 포함)"""
     new_settings = {}
@@ -192,14 +245,7 @@ def apply_preset_to_speakers(speakers, engine_type):
                 v_idx = idx % len(SUPERTONIC_VOICE_KEYS)
                 new_settings[spk] = {"engine": "supertonic", "voice": SUPERTONIC_VOICE_KEYS[v_idx], "style": def_style, "speed": 1.0}
         elif engine_type == "gemini":
-            if spk in GEMINI_CHARACTER_PRESETS:
-                p = GEMINI_CHARACTER_PRESETS[spk]
-                new_settings[spk] = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", def_style), "speed": 1.0}
-            elif "나레이션" in spk or "해설" in spk:
-                new_settings[spk] = {"engine": "gemini", "voice": "Kore", "style": "📖 동화 나레이션", "speed": 1.0}
-            else:
-                v_idx = idx % len(GEMINI_VOICE_KEYS)
-                new_settings[spk] = {"engine": "gemini", "voice": GEMINI_VOICE_KEYS[v_idx], "style": def_style, "speed": 1.0}
+            new_settings[spk] = gemini_preset(spk, st.session_state.get("voice_settings", {}).get(spk))
         elif engine_type == "cosyvoice":
             new_settings[spk] = {
                 "engine": "cosyvoice",
@@ -276,6 +322,7 @@ def set_speakers_preset(engine_type: str):
                 set_state_safe(f"cosy_saved_path_{spk}", sdata.get("ref_audio_path"))
         elif eng == "gemini":
             set_state_safe(f"gemini_voice_{spk}", voice)
+            set_state_safe(f"gemini_gender_{spk}", GEMINI_VOICES[voice]["gender"])
         elif eng == "edge-tts":
             set_state_safe(f"edge_voice_{spk}", voice)
         elif eng == "gpt-sovits":
@@ -287,7 +334,7 @@ def set_speakers_preset(engine_type: str):
                 set_state_safe(f"sovits_saved_path_{spk}", sdata.get("ref_audio_path"))
         set_state_safe(f"style_select_{spk}", style)
 
-def render_generation_status(work_dir, active_at_render):
+def render_generation_status(work_dir, active_at_render, pause_ms=500):
     # Only the small status panel polls. The worker never touches Streamlit state.
     @st.fragment(run_every=2 if active_at_render else None)
     def panel():
@@ -306,11 +353,12 @@ def render_generation_status(work_dir, active_at_render):
             if job.get("stage_started"):
                 elapsed = max(0, int(time.time() - job["stage_started"]))
                 st.caption(f"현재 단계 경과: {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다.")
-            if st.button("현재 대사 저장 후 멈추기", key="pause_generation_job"):
-                request_pause(work_dir)
-                st.session_state["_pause_requested_job"] = job["id"]
-            if st.session_state.get("_pause_requested_job") == job["id"]:
-                st.warning("정지 요청을 받았습니다. 이미 요청한 음성은 응답을 받아 저장한 뒤 멈춥니다.")
+            if job.get("stage") != "partial_merge":
+                if st.button("현재 대사 저장 후 멈추기", key="pause_generation_job"):
+                    request_pause(work_dir)
+                    st.session_state["_pause_requested_job"] = job["id"]
+                if st.session_state.get("_pause_requested_job") == job["id"]:
+                    st.warning("정지 요청을 받았습니다. 이미 요청한 음성은 응답을 받아 저장한 뒤 멈춥니다.")
         elif job.get("status") == "complete":
             if st.session_state.get("_generation_result_job") != job["id"]:
                 result = job["result"]
@@ -324,17 +372,22 @@ def render_generation_status(work_dir, active_at_render):
                 st.warning(job.get("message", "작업이 중단되었습니다."))
             st.caption("위의 '완료 파일도 새로 만들기'를 끄고 생성 버튼을 누르면, 같은 대사·설정의 완료 파일을 재사용합니다.")
             if job.get("done", 0):
-                if st.button("완료된 대사 다운로드 준비", key="prepare_partial_download"):
+                if job.get("partial_error"):
+                    st.error(job["partial_error"])
+                partial_audio = job.get("partial_audio", "")
+                if job.get("partial_status") == "complete" and os.path.isfile(partial_audio):
+                    st.download_button("⬇️ 완료된 대사 MP3 한 파일 받기", Path(partial_audio).read_bytes,
+                                       file_name="completed_audio.mp3", mime="audio/mpeg", type="primary",
+                                       key="download_partial_audio_v2913", on_click="ignore", use_container_width=True)
+                    st.caption(f"저장된 {job.get('partial_count', job['done'])}개 대사만 대본 순서대로 합쳤습니다. 아직 생성하지 않은 대사는 포함되지 않습니다.")
+                elif st.button("완료된 대사 한 파일로 합치기", key="prepare_partial_download_v2913",
+                               type="primary", use_container_width=True):
                     try:
-                        path = partial_bundle(work_dir)
-                        st.session_state["_partial_download"] = (job["id"], path)
+                        start_partial_merge(work_dir, pause_ms=pause_ms)
                     except Exception as exc:
                         st.error(str(exc))
-                prepared = st.session_state.get("_partial_download")
-                if prepared and prepared[0] == job["id"] and os.path.isfile(prepared[1]):
-                    st.download_button("완료된 대사 ZIP 받기", Path(prepared[1]).read_bytes,
-                                       file_name="tts_partial_segments.zip", mime="application/zip",
-                                       key="download_partial_audio", on_click="ignore")
+                    else:
+                        st.rerun()
     panel()
 
 
@@ -696,6 +749,7 @@ def main():
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)
     generation_active = is_running(work_dir)
+    correct_legacy_gemini_voices()
 
     # 지연된 대본 텍스트가 있다면 위젯 생성 전에 안전하게 적용
     if "pending_script_text" in st.session_state:
@@ -1086,6 +1140,10 @@ def main():
     if st.session_state["speakers"]:
         st.divider()
         st.subheader("2️⃣ 화자별 목소리 및 성우 배정")
+        if st.session_state.get("_gemini_gender_corrections"):
+            st.info("이전 버전의 잘못된 성별 표기를 바로잡고 성우를 조정했습니다. "
+                    + " · ".join(st.session_state["_gemini_gender_corrections"])
+                    + " · 이미 만든 음성은 다음 생성부터 수정됩니다.")
         
         # 일괄 변경 원클릭 버튼 바
         col_bar1, col_bar2, col_bar3 = st.columns(3)
@@ -1250,9 +1308,9 @@ def main():
                             if candidate_ref:
                                 set_state_safe(f"cosy_saved_path_{spk}", candidate_ref)
                         elif chosen_engine == "gemini":
-                            p = GEMINI_CHARACTER_PRESETS.get(spk, {"voice": "Kore", "style": cur_style})
-                            current_cfg = {"engine": "gemini", "voice": p["voice"], "style": p.get("style", cur_style), "speed": 1.0}
-                            set_state_safe(f"gemini_voice_{spk}", p["voice"])
+                            current_cfg = gemini_preset(spk, current_cfg)
+                            set_state_safe(f"gemini_voice_{spk}", current_cfg["voice"])
+                            set_state_safe(f"gemini_gender_{spk}", current_cfg["gender"])
                         elif chosen_engine == "gpt-sovits":
                             candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav") if ("나레이션" in spk or "해설" in spk) else ""
                             candidate_prompt = ""
@@ -1294,7 +1352,14 @@ def main():
                                       placeholder="예: 70대 할머니, 다정하고 차분함")
                     recommendation = recommend_style(spk, st.session_state["parsed_segments"],
                                                      st.session_state.get(f"voice_profile_{spk}", ""))
-                    st.markdown(f"**💡 추천: {recommendation.style}**")
+                    recommendation_label = recommendation.style
+                    if spk_engine == "gemini":
+                        voice_gender = GEMINI_VOICES.get(current_cfg.get("voice"), {}).get("gender")
+                        if voice_gender == "남성":
+                            recommendation_label = recommendation_label.replace("👵", "👴")
+                        elif voice_gender == "여성":
+                            recommendation_label = recommendation_label.replace("👴", "👵")
+                    st.markdown(f"**💡 추천: {recommendation_label}**")
                     st.caption(recommendation.reason)
                     st.button("추천 참조 스타일 선택" if spk_engine == "gpt-sovits" else "추천 스타일 적용",
                               key=f"recommend_style_{spk}", on_click=apply_recommended_styles,
@@ -1359,15 +1424,20 @@ def main():
                     # 2. Gemini Flash TTS 설정 폼
                     elif spk_engine == "gemini":
                         default_v = current_cfg.get("voice", "Kore")
-                        try:
-                            def_idx = GEMINI_VOICE_KEYS.index(default_v)
-                        except ValueError:
-                            def_idx = 0
-                            
+                        default_gender = GEMINI_VOICES.get(default_v, {}).get("gender", "여성")
+                        selected_gender = st.radio(
+                            "성우 성별", ["남성", "여성"],
+                            index=0 if default_gender == "남성" else 1, horizontal=True,
+                            key=f"gemini_gender_{spk}", on_change=change_gemini_gender, args=(spk,))
+                        voice_options = [voice for voice in GEMINI_VOICE_KEYS
+                                         if GEMINI_VOICES[voice]["gender"] == selected_gender]
+                        selected_key = f"gemini_voice_{spk}"
+                        if st.session_state.get(selected_key, default_v) not in voice_options:
+                            st.session_state[selected_key] = voice_options[0]
                         selected_voice = st.selectbox(
                             "보이스 선택",
-                            options=GEMINI_VOICE_KEYS,
-                            index=def_idx,
+                            options=voice_options,
+                            index=voice_options.index(default_v) if default_v in voice_options else 0,
                             format_func=get_gemini_voice_label,
                             key=f"gemini_voice_{spk}"
                         )
@@ -1376,6 +1446,7 @@ def main():
                             "🎨 음성 스타일 (감정 연기 지시)",
                             options=VOICE_STYLE_KEYS,
                             index=style_idx,
+                            format_func=lambda value, gender=selected_gender: value.replace("👵", "👴") if gender == "남성" else value.replace("👴", "👵"),
                             key=f"style_select_{spk}"
                         )
                         st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
@@ -1384,6 +1455,7 @@ def main():
                         st.session_state["voice_settings"][spk] = {
                             "engine": "gemini",
                             "voice": selected_voice,
+                            "gender": selected_gender,
                             "style": selected_style,
                             "speed": 1.0
                         }
@@ -2003,7 +2075,8 @@ def main():
                 # 화자 설정(엔진, 보이스, 스타일, 참조 오디오, 배속, 텍스트)의 고유 해시 생성
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
-                generation_revision = "v7_cosy_generation" if seg_engine == "cosyvoice" else "v6_style_directions"
+                generation_revision = {"cosyvoice": "v7_cosy_generation",
+                                       "gemini": "v8_gemini_voice_identity"}.get(seg_engine, "v6_style_directions")
                 cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_{generation_revision}"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
@@ -2104,13 +2177,13 @@ def main():
                 st.session_state.pop("play_full_result", None)
                 st.rerun()
 
-        render_generation_status(work_dir, generation_active)
+        render_generation_status(work_dir, generation_active, pause_ms=pause_ms)
 
     # Step 4: 결과 화면 및 다운로드
     if st.session_state.get("generation_result"):
         res = st.session_state["generation_result"]
         st.divider()
-        st.success("✨ 오디오 생성 및 병합이 완벽하게 완료되었습니다!")
+        st.success("✨ 생성한 대사를 순서대로 합친 MP3 한 파일이 준비되었습니다.")
 
         col_main, col_down = st.columns([3, 2])
         with col_main:
@@ -2120,19 +2193,24 @@ def main():
 
         with col_down:
             st.markdown("### 📥 내 결과 다운로드")
+            path = res.get("full_audio", "")
+            if path and os.path.isfile(path):
+                st.download_button("⬇️ 전체 대사 MP3 한 파일 받기", Path(path).read_bytes,
+                                   file_name="full_audio.mp3", mime="audio/mpeg", type="primary",
+                                   key="result_download_full_audio", use_container_width=True, on_click="ignore")
+            st.caption("생성한 구간의 나레이션과 인물 대사를 대본 순서대로 합친 MP3 1개입니다.")
             downloads = [
                 ("📦 완성본 패키지 (오디오 + 자막)", "main_zip", "tts_main_bundle.zip", "application/zip"),
-                ("🎵 전체 오디오 (MP3)", "full_audio", "full_audio.mp3", "audio/mpeg"),
                 ("📝 자막 파일 (SRT)", "srt", "subtitles.srt", "text/plain"),
                 ("📝 자막 파일 (VTT)", "vtt", "subtitles.vtt", "text/vtt"),
-                ("🗄️ 인물별 대사 압축팩", "seg_zip", "tts_segments_bundle.zip", "application/zip"),
             ]
-            for label, result_key, filename, mime in downloads:
-                path = res.get(result_key, "")
-                if path and os.path.isfile(path):
-                    st.download_button(label, Path(path).read_bytes, file_name=filename,
-                                       mime=mime, key="result_download_" + result_key,
-                                       use_container_width=True, on_click="ignore")
+            with st.expander("자막 및 오디오+자막 묶음 받기", expanded=False):
+                for label, result_key, filename, mime in downloads:
+                    path = res.get(result_key, "")
+                    if path and os.path.isfile(path):
+                        st.download_button(label, Path(path).read_bytes, file_name=filename,
+                                           mime=mime, key="result_download_" + result_key,
+                                           use_container_width=True, on_click="ignore")
             st.caption("현재 접속에서 생성한 파일입니다. 창을 닫거나 작업을 지우기 전에 다운로드해주세요.")
 
         # 개별 대사별 타임라인 및 재생 목록

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import List, Tuple
 try:
@@ -90,51 +91,63 @@ class AudioProcessor:
         if not valid_segments:
             raise ValueError("병합할 수 있는 유효한 오디오 파일이 없습니다.")
 
-        # 2. FFmpeg streams the merge; never decode the entire story into RAM.
-        silence_file = os.path.join(out_dir, "temp_silence.mp3")
-        if AudioSegment is not None:
-            AudioSegment.silent(duration=pause_ms).export(silence_file, format="mp3", bitrate="192k")
-        else:
-            # ffmpeg command to create silent mp3
-            cmd_silence = [
-                "ffmpeg", "-y", "-f", "lavfi", "-i",
-                "anullsrc=r=44100:cl=mono", "-t", str(max(pause_ms / 1000.0, 0.1)),
-                "-c:a", "libmp3lame", "-b:a", "192k", silence_file
-            ]
-            subprocess.run(cmd_silence, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=30, check=True)
+        # Match silence and clip sample rates/channels. The concat demuxer
+        # requires compatible streams; mismatches can distort timing or pitch.
+        # Normalize mixed-engine clips to lossless PCM on disk, never in RAM.
+        profiles = []
+        for seg in valid_segments:
+            info = mutagen.mp3.MP3(seg["file_path"]).info
+            profiles.append((info.sample_rate, info.channels))
+        sample_rate = max(profile[0] for profile in profiles)
+        channels = max(profile[1] for profile in profiles)
 
-        concat_list_path = os.path.join(out_dir, "concat_list.txt")
+        def ffmpeg(arguments, timeout):
+            result = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y"] + arguments,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            if result.returncode:
+                detail = result.stderr.decode("utf-8", errors="replace")[-1000:]
+                raise RuntimeError("전체 오디오 병합에 실패했습니다. 개별 음성은 보관됩니다. " + detail)
+
         try:
-            with open(concat_list_path, "w", encoding="utf-8") as f:
-                for idx, seg in enumerate(valid_segments):
-                    # Windows 역슬래시를 슬래시로 변경하여 ffmpeg 호환성 유지
-                    safe_path = os.path.abspath(seg['file_path']).replace('\\', '/').replace("'", "'\\''")
-                    f.write(f"file '{safe_path}'\n")
-                    if idx < len(valid_segments) - 1 and pause_ms > 0:
-                        safe_silence = silence_file.replace('\\', '/').replace("'", "'\\''")
-                        f.write(f"file '{safe_silence}'\n")
+            with tempfile.TemporaryDirectory(prefix=".audio_merge_", dir=out_dir) as temporary:
+                paths = [seg["file_path"] for seg in valid_segments]
+                mixed_profiles = len(set(profiles)) > 1
+                if mixed_profiles:
+                    normalized = []
+                    for index, source in enumerate(paths):
+                        target = os.path.join(temporary, f"{index:06d}.wav")
+                        ffmpeg(["-i", source, "-map", "0:a:0", "-vn", "-ar", str(sample_rate),
+                                "-ac", str(channels), "-c:a", "pcm_s16le", "-threads", "2", target], 120)
+                        normalized.append(target)
+                    paths = normalized
 
-            # ffmpeg concat 실행
-            cmd = [
-                "ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", "0",
-                "-i", concat_list_path,
-                "-c:a", "libmp3lame", "-b:a", "192k", "-threads", "2",
-                output_file
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
-            if res.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                silence_file = None
+                if pause_ms > 0 and len(paths) > 1:
+                    silence_file = os.path.join(temporary, "silence.wav" if mixed_profiles else "silence.mp3")
+                    codec_args = ["-c:a", "pcm_s16le"] if mixed_profiles else ["-c:a", "libmp3lame", "-b:a", "192k"]
+                    ffmpeg(["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl={'mono' if channels == 1 else 'stereo'}",
+                            "-t", str(pause_ms / 1000.0), "-ar", str(sample_rate), "-ac", str(channels)]
+                           + codec_args + [silence_file], 30)
+
+                concat_list_path = os.path.join(temporary, "concat.txt")
+                with open(concat_list_path, "w", encoding="utf-8") as handle:
+                    for index, source in enumerate(paths):
+                        entries = [source]
+                        if silence_file and index < len(paths) - 1:
+                            entries.append(silence_file)
+                        for entry in entries:
+                            safe_path = os.path.abspath(entry).replace('\\', '/').replace("'", "'\\''")
+                            handle.write(f"file '{safe_path}'\n")
+                merged = os.path.join(temporary, "merged.mp3")
+                ffmpeg(["-f", "concat", "-safe", "0", "-i", concat_list_path, "-map", "0:a:0",
+                        "-ar", str(sample_rate), "-ac", str(channels), "-c:a", "libmp3lame",
+                        "-b:a", "192k", "-threads", "2", merged], 600)
+                if not os.path.isfile(merged) or os.path.getsize(merged) < 100 or self.get_audio_duration_ms(merged) <= 0:
+                    raise RuntimeError("병합된 MP3 파일을 읽을 수 없습니다. 개별 음성은 보관됩니다.")
+                os.replace(merged, output_file)
                 return output_file, timings
-            detail = res.stderr.decode("utf-8", errors="replace")[-1000:]
-            raise RuntimeError("전체 오디오 병합에 실패했습니다. 개별 음성은 보관됩니다. " + detail)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("오디오 병합 시간이 초과됐습니다. 개별 음성은 보관되며 이어서 생성하면 병합을 다시 진행합니다.") from exc
-        finally:
-            if os.path.exists(concat_list_path):
-                try:
-                    os.remove(concat_list_path)
-                except OSError:
-                    pass
 
         # An in-memory pydub fallback for 30–40 minute stories can exhaust the
         # shared site's RAM and disconnect every visitor. Keep the saved clips

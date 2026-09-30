@@ -83,6 +83,9 @@ def get_job(work_dir):
             "사이트 작업이 중단되었습니다. 저장된 음성은 유지됩니다. "
             "덮어쓰기를 끄고 생성 버튼을 누르면 완료 파일을 확인해 이어서 만듭니다."
         )
+    if state.get("partial_status") == "running" and not is_running(work_dir):
+        state["partial_status"] = "interrupted"
+        state["partial_error"] = "MP3 합치기가 중단되었습니다. 저장된 대사는 유지되며 다시 합칠 수 있습니다."
     return state
 
 
@@ -164,6 +167,7 @@ def start_job(work_dir, items, *, force_overwrite=False, pause_ms=500, include_s
             "current_index": items[0].index, "current_speaker": items[0].speaker,
             "progress": 0.0, "message": "음성 생성을 준비하고 있습니다.",
             "started": time.time(), "error": "", "result": None,
+            "pause_ms": pause_ms,
         }
         pause = threading.Event()
         thread = threading.Thread(
@@ -241,7 +245,7 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
             state.update(status="paused", message="음성을 모두 저장했습니다. 이어서 생성하면 병합부터 진행합니다.")
             return
         # Result files are separate from earlier successful bundles. Publishing
-        # a result requires merging, subtitles and both ZIPs to finish.
+        # a result requires merging, subtitles and the final bundle to finish.
         folder = Path(work_dir) / "results" / state["id"]
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         state.update(stage="merge", message="음성 생성 완료 · 전체 오디오를 합치고 있습니다.",
@@ -257,15 +261,14 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
         SubtitleGenerator.generate_vtt(timings, vtt, include_speaker=include_speaker)
         state.update(stage="package", progress=0.97, message="다운로드 파일을 준비하고 있습니다.")
         _save(work_dir, state)
-        main_zip, seg_zip = str(folder / "tts_main_bundle.zip"), str(folder / "tts_segments_bundle.zip")
+        main_zip = str(folder / "tts_main_bundle.zip")
         with zipfile.ZipFile(main_zip, "w", zipfile.ZIP_DEFLATED) as bundle:
             bundle.write(full_audio, "full_audio.mp3", compress_type=zipfile.ZIP_STORED)
             bundle.write(srt, "subtitles.srt")
             bundle.write(vtt, "subtitles.vtt")
-        _segment_bundle(seg_zip, state["completed"])
         state.update(status="complete", progress=1.0, message="모든 음성과 자막을 저장했습니다.", result={
             "full_audio": full_audio, "srt": srt, "vtt": vtt,
-            "main_zip": main_zip, "seg_zip": seg_zip,
+            "main_zip": main_zip,
             "timings": [asdict(timing) for timing in timings],
             "audio_info_list": state["completed"],
         })
@@ -285,24 +288,61 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
                 ownership.close()
 
 
-def _segment_bundle(target, completed):
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as bundle:
-        for item in completed:
-            path = Path(item["file_path"])
-            if path.is_file():
-                bundle.write(path, "segments/" + path.name)
-
-
-def partial_bundle(work_dir):
-    """Only called on an explicit download-preparation click, never by polling."""
+def start_partial_merge(work_dir, *, pause_ms=500):
+    """Join saved lines in a background worker; never call a TTS engine."""
+    work_dir = _key(work_dir)
     with _LOCK:
         if is_running(work_dir):
             raise RuntimeError("진행 중인 대사를 저장한 뒤 멈추고 다운로드해주세요.")
         state = get_job(work_dir)
         if not state or not state.get("completed"):
             raise ValueError("아직 저장된 대사가 없습니다.")
+        ownership = (Path(work_dir) / ".generation.lock").open("a+b")
+        try:
+            if fcntl is not None:
+                fcntl.flock(ownership, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            state = deepcopy(state)
+            previous_stage = state.get("stage", "voice")
+            previous_message = state.get("message", "완료된 음성은 보관됩니다.")
+            state.update(stage="partial_merge", partial_status="running", partial_error="",
+                         stage_started=time.time(), message=f"저장된 대사 {len(state['completed'])}개를 MP3 하나로 합치고 있습니다.")
+            thread = threading.Thread(
+                target=_run_partial_merge,
+                args=(work_dir, state, state.get("pause_ms", pause_ms), ownership,
+                      previous_stage, previous_message),
+                name="merge-" + state["id"][:8], daemon=True)
+            _JOBS[work_dir] = {"thread": thread, "pause": threading.Event()}
+            _save(work_dir, state)
+            thread.start()
+        except BaseException:
+            _JOBS.pop(work_dir, None)
+            ownership.close()
+            raise
+    return state["id"]
+
+
+def _run_partial_merge(work_dir, state, pause_ms, ownership, previous_stage, previous_message):
+    temporary = None
+    try:
         folder = Path(work_dir) / "results" / state["id"]
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = folder / "tts_partial_segments.zip"
-        _segment_bundle(target, state["completed"])
-        return str(target)
+        target = folder / "completed_audio.mp3"
+        temporary = folder / ".completed_audio.part.mp3"
+        completed = sorted(state["completed"], key=lambda item: item["index"])
+        AudioProcessor(pause_ms=pause_ms).merge_segments(completed, str(temporary), pause_ms=pause_ms)
+        os.replace(temporary, target)
+        state.update(partial_status="complete", partial_audio=str(target), partial_count=len(completed))
+    except Exception as exc:
+        state.update(partial_status="failed", partial_error=str(exc)[:1600])
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        state.update(stage=previous_stage, message=previous_message)
+        if state.get("partial_status") == "running":
+            state.update(partial_status="interrupted", partial_error="MP3 합치기가 중단되었습니다. 다시 합쳐주세요.")
+        try:
+            _save(work_dir, state)
+        finally:
+            with _LOCK:
+                _JOBS.pop(work_dir, None)
+                ownership.close()

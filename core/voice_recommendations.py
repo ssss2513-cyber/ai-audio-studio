@@ -9,6 +9,26 @@ class StyleRecommendation:
     reason: str
 
 
+def speaker_gender(speaker, profile=""):
+    """Use explicit identity only, never a person addressed in the dialogue."""
+    for identity in (profile.strip().lower(), speaker.lower()):
+        if not identity:
+            continue
+        male = bool(re.search(r'남성|남자|\bmale\b|\bman\b', identity))
+        female = bool(re.search(r'여성|여자|\bfemale\b|\bwoman\b', identity))
+        if male != female:
+            return "남성" if male else "여성"
+        if male and female:
+            return ""
+        male = bool(re.search(r'할아버|노옹|영감|아버지|남편|소년|사내|사나이|머슴', identity))
+        female = bool(re.search(r'할머|노모|노파|노부인|어머니|아내|소녀|아낙|여인|낭자|유모', identity))
+        if male != female:
+            return "남성" if male else "여성"
+        if male and female:
+            return ""
+    return ""
+
+
 def speaker_lines(speaker, segments):
     return [seg.text for seg in segments if seg.speaker == speaker and seg.text.strip()]
 
@@ -45,7 +65,7 @@ def recommend_style(speaker, segments, profile=""):
         if has(r'감성|회상|그리움|슬픔') or re.search(r'그립|그리워|먼저 간|지나온 세월|그때가|옛날에는', dialogue):
             return choice('🎭 시니어 감성적인 (70대 이상)', '노년 인물의 회상과 그리움이 드러나 차분하고 감성적인 연기를 추천합니다.')
         if has(r'할머|노모|노파|노부인') or (has(r'여성|여자') and has(r'70대|80대|칠순|팔순')):
-            return choice('👵 시니어 따뜻한 (70대)', '노년 여성 역할에 맞춰 다정하고 포근한 말투를 추천합니다.')
+            return choice('👵 시니어 따뜻한 (70대)', '노년 인물에 어울리는 다정하고 포근한 말투입니다. 선택한 성우의 성별은 유지합니다.')
         if has(r'안정|또렷|정확|65\s*세'):
             return choice('📰 시니어 안정적인 (65세)', '연륜을 살리면서 발음과 전달력을 우선하는 역할입니다.')
         if has(r'60대|6\d\s*세|환갑|중후|위엄'):
@@ -88,5 +108,5 @@ def style_note(engine, style, styles):
         return ('CosyVoice 코랩에 연기 지시를 전달합니다. 나이·음색은 참조 목소리의 영향을 받으므로 '
                 '시니어 역할에는 시니어 참조 음성을 권장합니다.')
     if engine == 'gemini':
-        return '선택한 연령·감정·말투를 생성 지시문에 반영합니다. 표현 정도는 선택한 보이스에 따라 달라집니다.'
+        return '선택한 성우와 성별을 유지하도록 지시하고, 연령·감정·말투를 반영합니다. 추천 스타일은 성우 선택을 바꾸지 않습니다.'
     return '속도·피치·음량을 조절합니다. 연령 자체를 변환하는 기능은 아닙니다.'

@@ -225,9 +225,9 @@ VOICE_STYLES = {
         "desc": "연륜과 위엄을 간직한 60대 어르신"
     },
     "👵 시니어 따뜻한 (70대)": {
-        "gemini_prompt": "Perform a warm grandmother in her 70s: naturally aged, softly textured voice, affectionate warmth, steady breath, and clear gentle diction.",
+        "gemini_prompt": "Perform a warm elder in their 70s while preserving the selected voice's gender: naturally aged, softly textured voice, affectionate warmth, steady breath, and clear gentle diction.",
         "rate": -15, "pitch": -5, "volume": -5,
-        "desc": "손주를 보듬듯 다정하고 포근한 70대 할머니"
+        "desc": "손주를 보듬듯 다정하고 포근한 70대 어르신"
     },
     "🧙 시니어 지혜로운 (70~80대)": {
         "gemini_prompt": "Perform a wise elder in their 70s or 80s: a naturally seasoned voice, calm unhurried phrasing, grounded resonance, and precise Korean articulation without exaggerated shaking.",
@@ -310,9 +310,10 @@ SUPERTONIC_VOICES = {
     }
 }
 
-# 2. Gemini Flash TTS 공식 30대 보이스 전체 목록
+# Gender metadata: https://firebase.google.com/docs/ai-logic/generate-speech#voice-names
+# 2. Gemini Flash TTS 공식 30개 보이스 (여성 14 / 남성 16)
 GEMINI_VOICES = {
-    # --- [여성 보이스 (13종)] ---
+    # Display order is kept stable; gender filtering uses each entry's metadata.
     "Kore": {
         "name": "코레 (Kore) - 차분하고 단호한 여성 (Firm)",
         "gender": "여성",
@@ -380,10 +381,10 @@ GEMINI_VOICES = {
         "default_role": "어머니 / 자애로운 부인 / 할머니"
     },
     "Sadachbia": {
-        "name": "사다크비아 (Sadachbia) - 생기 넘치는 쾌활한 여성 (Lively)",
-        "gender": "여성",
+        "name": "사다크비아 (Sadachbia) - 생기 넘치는 쾌활한 남성 (Lively)",
+        "gender": "남성",
         "description": "생동감 있고 발랄하게 이야기를 이끄는 톤",
-        "default_role": "젊은 여인 / 유쾌한 조연"
+        "default_role": "젊은 남성 / 유쾌한 조연"
     },
     "Sulafat": {
         "name": "술라파트 (Sulafat) - 포근하고 따뜻한 여성 (Warm)",
@@ -392,7 +393,6 @@ GEMINI_VOICES = {
         "default_role": "노모 / 포근한 어머니 / 유모"
     },
 
-    # --- [남성 보이스 (17종)] ---
     "Charon": {
         "name": "카론 (Charon) - 중후하고 신뢰감 넘치는 저음 남성 (Informative)",
         "gender": "남성",
@@ -454,10 +454,10 @@ GEMINI_VOICES = {
         "default_role": "의원 / 책사 / 관찰자"
     },
     "Achernar": {
-        "name": "아케르나르 (Achernar) - 따뜻하고 부드러운 남성 (Soft)",
-        "gender": "남성",
+        "name": "아케르나르 (Achernar) - 따뜻하고 부드러운 여성 (Soft)",
+        "gender": "여성",
         "description": "자상하고 온화하게 감싸주는 온정 넘치는 톤",
-        "default_role": "자상한 아버지 / 다정한 청년"
+        "default_role": "자상한 어머니 / 다정한 여성"
     },
     "Alnilam": {
         "name": "알닐람 (Alnilam) - 곧고 당당한 기개의 남성 (Firm)",
@@ -472,10 +472,10 @@ GEMINI_VOICES = {
         "default_role": "역사 다큐 나레이션 / 중립적 관찰자"
     },
     "Gacrux": {
-        "name": "가크룩스 (Gacrux) - 연륜 있고 깊이 있는 시니어 남성 (Mature)",
-        "gender": "남성",
+        "name": "가크룩스 (Gacrux) - 연륜 있고 깊이 있는 시니어 여성 (Mature)",
+        "gender": "여성",
         "description": "산전수전을 겪은 어르신의 깊은 연륜 톤",
-        "default_role": "송 노인 / 촌장 / 백발 노옹"
+        "default_role": "할머니 / 노모 / 연륜 있는 여성 해설"
     },
     "Achird": {
         "name": "아키르드 (Achird) - 친근하고 다정한 남성 (Friendly)",
@@ -553,12 +553,17 @@ def get_supertonic_engine():
         _supertonic_instance = supertonic.TTS(auto_download=False)
     return _supertonic_instance
 
-def build_gemini_tts_prompt(text: str, style: str = "🎤 기본") -> str:
+def build_gemini_tts_prompt(text: str, style: str = "🎤 기본", voice: str = "") -> str:
     """Gemini 2.5/3.1 TTS reads performance direction from the content prompt."""
     direction = VOICE_STYLES.get(style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+    gender = {"남성": "male", "여성": "female"}.get(GEMINI_VOICES.get(voice, {}).get("gender"))
+    identity = (f"A single native Korean {gender} voice actor using the selected {voice} voice. "
+                if gender else "A single native Korean voice actor. ")
     return (
-        "# AUDIO PROFILE\nA single native Korean voice actor. " + direction + "\n"
+        "# AUDIO PROFILE\n" + identity + direction + "\n"
         "# DIRECTOR'S NOTES\nRead only the TRANSCRIPT below, verbatim, in Korean. "
+        "Preserve the selected speaker's gender and vocal identity throughout. "
+        "Style changes affect delivery and emotion, never replace the speaker with another voice. "
         "Keep consonants clear, vowels natural, and pauses comfortable. "
         "Do not slur, exaggerate vocal aging, add words, or read these headings and instructions aloud. "
         "Do not add a greeting or closing line.\n"
@@ -678,9 +683,11 @@ class TTSEngine:
 
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
-        v_name = voice_config.voice if voice_config.voice in GEMINI_VOICES else "Kore"
+        v_name = voice_config.voice
+        if v_name not in GEMINI_VOICES:
+            raise ValueError("선택한 Gemini 보이스를 찾을 수 없습니다. 화자 카드에서 성우를 다시 선택해주세요.")
 
-        request_prompt = build_gemini_tts_prompt(text, voice_config.style)
+        request_prompt = build_gemini_tts_prompt(text, voice_config.style, v_name)
 
         # 사용 가능한 공식 Google Gemini TTS 모델 목록 (무료/유료 공용 Flash 모델 우선)
         VALID_GEMINI_TTS_MODELS = [

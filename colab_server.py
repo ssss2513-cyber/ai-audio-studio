@@ -39,10 +39,11 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.5'
+SERVER_VERSION = '2.9.6'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
+DURATION_GUARD_CAPABILITY = 'reference_duration_guard_v296'
 MODEL_REVISION = COSY_MODEL_REVISION
 
 
@@ -146,7 +147,27 @@ def normalize_speech_text(value, label):
 def speech_units(text):
     """A deliberately loose duration estimate, not speech recognition."""
     return sum(1 for char in text if char.isalnum() and not char.isascii()) + sum(
-        max(1, len(word) / 3) for word in re.findall(r'[A-Za-z0-9]+', text))
+        max(1, len(word) / 3) for word in re.findall(r'[A-Za-z]+', text)) + sum(
+        2 * len(number) for number in re.findall(r'[0-9]+', text))
+
+
+def duration_limits(text, reference_units, reference_seconds):
+    """Loose plausibility bounds, with reference pace and number pronunciation.
+
+    Duration alone cannot verify the spoken words. Keep the bound finite even
+    with a slow reference, without treating all speakers as equally paced.
+    """
+    units = speech_units(text)
+    reference_rate = reference_units / max(reference_seconds, 0.8)
+    reference_rate = min(10.0, max(1.5, reference_rate))
+    pauses = min(4.0, len(re.findall(r'[,.!?，。！？]', text)) * 0.3)
+    upper = min(90.0, max(10.0, units * 0.8 + 4.0,
+                          units / reference_rate * 1.8 + 4.0 + pauses))
+    return max(0.15, units / 30.0), upper
+
+
+class GeneratedAudioValidationError(RuntimeError):
+    pass
 
 
 def synthesis_chunks(text, prompt_text, tokenizer):
@@ -207,10 +228,10 @@ def setup():
     elif isinstance(state.get('pid'), int) and (Path('/proc') / str(state['pid'])).exists():
         stop_previous_worker(state)
     # A healthy earlier worker proves this installation already loaded. A
-    # transport-only upgrade can reuse it without reinstalling packages/models.
+    # runner upgrade can reuse it without reinstalling packages/models.
     if existing_ready and PYTHON.is_file() and all((MODEL / name).is_file() for name in
             ('cosyvoice2.yaml', 'llm.pt', 'flow.pt', 'hift.pt', 'campplus.onnx', 'speech_tokenizer_v2.onnx')):
-        print('기존 설치와 모델을 그대로 사용해 CosyVoice 속도 개선 서버를 시작합니다.', flush=True)
+        print('기존 설치와 모델을 그대로 사용해 수정된 CosyVoice 서버를 시작합니다.', flush=True)
         start_server()
         return
     if shutil.which('nvidia-smi') is None:
@@ -379,7 +400,7 @@ def serve(port):
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
-                                 REFERENCE_TRANSPORT_CAPABILITY]}
+                                 REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
@@ -436,6 +457,8 @@ def serve(port):
                 if reference_hit:
                     reference_cache.move_to_end(reference_id)
                     duration = cached['duration']
+                    reference_spoken_seconds = cached['spoken_seconds']
+                    reference_units = cached['speech_units']
                     print('참고 목소리 분석 결과를 재사용합니다.', flush=True)
                 else:
                     print('참고 목소리를 분석합니다. 같은 음성은 다음 대사부터 재사용합니다.', flush=True)
@@ -483,7 +506,10 @@ def serve(port):
                     with torch.inference_mode():
                         model.add_zero_shot_spk(instruction or prompt_text, str(prepared), reference_id)
                     reference_cache[reference_id] = {'duration': duration, 'prompt_text': prompt_text,
-                                                     'instruction': instruction}
+                                                     'instruction': instruction,
+                                                     'spoken_seconds': spoken_seconds, 'speech_units': units}
+                    reference_spoken_seconds = spoken_seconds
+                    reference_units = units
                 preparation_seconds = time.monotonic() - preparation_started
 
                 pieces = []
@@ -492,32 +518,47 @@ def serve(port):
                 logging.info('request=%s mode=%s ref_seconds=%.2f text_chars=%d chunks=%d',
                              request_id, 'style' if style_instruction else 'zero_shot', duration, len(text), len(chunks))
                 synthesis_started = time.monotonic()
+                # One recovery attempt per entire request, not an unbounded
+                # per-chunk loop. No model/precision/voice/speed change on retry.
+                recovery_remaining = 1
                 with torch.inference_mode():
                     for index, chunk in enumerate(chunks, 1):
                         chunk_started = time.monotonic()
                         print(f'음성 생성 {index}/{len(chunks)} 구간 처리 중…', flush=True)
-                        if style_instruction:
-                            generated = model.inference_instruct2(chunk, instruction, '',
-                                                                 zero_shot_spk_id=reference_id,
-                                                                 stream=False, speed=1.0, text_frontend=False)
-                        else:
-                            generated = model.inference_zero_shot(chunk, prompt_text, '',
-                                                                  zero_shot_spk_id=reference_id,
-                                                                  stream=False, speed=1.0, text_frontend=False)
-                        chunk_pieces = []
-                        for item in generated:
-                            chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
-                        if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
-                            raise RuntimeError(f'{index}번째 구간에서 빈 음성이 반환되었습니다. 파일을 저장하지 않았습니다.')
-                        speech = np.concatenate(chunk_pieces)
-                        seconds = speech.size / sample_rate
-                        if not np.all(np.isfinite(speech)) or float(np.sqrt(np.mean(speech ** 2))) < 0.0001:
-                            raise RuntimeError(f'{index}번째 구간의 음성이 무음이거나 손상되었습니다. 파일을 저장하지 않았습니다.')
-                        # Only reject gross duration failures. This is not a claim
-                        # that the generated words match the script (no ASR here).
-                        units = speech_units(chunk)
-                        if seconds > max(10.0, units * 0.8 + 4.0) or seconds < max(0.15, units / 30.0):
-                            raise RuntimeError(f'{index}번째 구간의 대사 길이에 비해 생성 음성 길이({seconds:.1f}초)가 비정상적입니다. 참고 음성과 실제 대사를 확인해주세요. 잘못된 결과는 저장하지 않았습니다.')
+                        lower, upper = duration_limits(chunk, reference_units, reference_spoken_seconds)
+                        while True:
+                            if style_instruction:
+                                generated = model.inference_instruct2(chunk, instruction, '',
+                                                                     zero_shot_spk_id=reference_id,
+                                                                     stream=False, speed=1.0, text_frontend=False)
+                            else:
+                                generated = model.inference_zero_shot(chunk, prompt_text, '',
+                                                                      zero_shot_spk_id=reference_id,
+                                                                      stream=False, speed=1.0, text_frontend=False)
+                            chunk_pieces = []
+                            for item in generated:
+                                chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
+                            if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
+                                raise GeneratedAudioValidationError(f'{index}번째 구간에서 빈 음성이 반환되어 저장하지 않았습니다.')
+                            speech = np.concatenate(chunk_pieces)
+                            seconds = speech.size / sample_rate
+                            if not np.all(np.isfinite(speech)) or float(np.sqrt(np.mean(speech ** 2))) < 0.0001:
+                                raise GeneratedAudioValidationError(f'{index}번째 구간의 음성이 무음이거나 손상되어 저장하지 않았습니다.')
+                            if lower <= seconds <= upper:
+                                break
+                            logging.warning('request=%s chunk=%d duration=%.2f bounds=%.2f..%.2f units=%.1f ref_units=%.1f ref_spoken=%.2f',
+                                            request_id, index, seconds, lower, upper, speech_units(chunk),
+                                            reference_units, reference_spoken_seconds)
+                            if recovery_remaining:
+                                recovery_remaining -= 1
+                                print(f'{index}번째 구간 결과 길이({seconds:.1f}초)가 검사 범위를 벗어나 해당 구간만 한 번 다시 생성합니다. 음질 설정은 유지합니다.', flush=True)
+                                del speech, chunk_pieces
+                                continue
+                            raise GeneratedAudioValidationError(
+                                f'{index}번째 구간이 길이 검사를 통과하지 못했습니다 '
+                                f'(생성 {seconds:.1f}초, 검사 범위 {lower:.1f}~{upper:.1f}초). '
+                                '추가 생성은 요청당 한 번까지만 하며, 통과하지 않은 결과는 저장하지 않습니다. '
+                                '길이만으로 참고 대사 오류 여부를 확정할 수 없습니다. 이전 완료 대사는 유지됩니다.')
                         logging.info('request=%s chunk=%d/%d chars=%d seconds=%.2f',
                                      request_id, index, len(chunks), len(chunk), seconds)
                         print(f'음성 생성 {index}/{len(chunks)} 완료 · 처리 {time.monotonic() - chunk_started:.1f}초 · 음성 {seconds:.1f}초', flush=True)
@@ -562,6 +603,10 @@ def serve(port):
                     'X-Reference-Seconds': f'{preparation_seconds:.3f}',
                     'X-Synthesis-Seconds': f'{time.monotonic() - synthesis_started:.3f}',
                 })
+        except GeneratedAudioValidationError as exc:
+            logging.warning('%s output validation failed: %s', LABEL, exc)
+            raise HTTPException(502, {'code': 'audio_validation_failed', 'message': str(exc),
+                                     'synthesis_started': True, 'automatic_retry': False}) from exc
         except HTTPException:
             raise
         except Exception as exc:

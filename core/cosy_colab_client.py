@@ -177,6 +177,12 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                 detail = response.json().get("detail", "")
             except ValueError:
                 detail = "코랩 실행 상태와 새 연결 주소를 확인해주세요."
+            if isinstance(detail, dict):
+                detail = detail.get("message", "음성 결과 검사를 통과하지 못했습니다. 코랩의 마지막 기록을 확인해주세요.")
+            elif "대사 길이에 비해 생성 음성 길이" in str(detail):
+                detail = ("이전 코랩의 고정 길이 검사에서 생성 결과가 차단됐습니다. "
+                          "사이트 왼쪽의 CosyVoice v2.9.6 길이 오류 수정 코드를 실행한 뒤 새 주소로 연결해주세요. "
+                          + str(detail))
             raise RuntimeError(f"{label} 생성 실패 (HTTP {response.status_code}): {str(detail)[:800]}")
     except requests.Timeout as exc:
         transport.invalidate()

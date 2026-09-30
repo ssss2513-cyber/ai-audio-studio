@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
 NOTEBOOK_RELEASE_REVISION = "fc0a7215efad6e00b76cce55489efec7b9516e91"
-COSY_NOTEBOOK_RELEASE_REVISION = "826640cb82d471cc326a39661037dec3c6bdac8d"
+COSY_NOTEBOOK_RELEASE_REVISION = "671ee35b59bcdb7af059442b7932f2b8cc4ff9bd"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
@@ -45,15 +45,15 @@ def render_connections(mode):
                 st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.5 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.5.ipynb"))
-        st.caption("v2.9.5는 FP32·음질 설정을 유지하며 같은 참고 음성의 반복 전송을 줄입니다. 첫 분석과 GPU 음성 계산 시간은 필요합니다.")
-        recovery = ROOT / "CosyVoice_Speed_Update_v2.9.5.py"
+        notebooks.append(("CosyVoice 코랩 v2.9.6 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.6.ipynb"))
+        st.caption("v2.9.6은 참고 목소리의 속도를 반영해 음성 길이를 검사하고, 길이 검사 실패에만 요청당 한 번 해당 구간을 다시 만듭니다. FP32·음질 설정과 반복 전송 개선은 유지합니다.")
+        recovery = ROOT / "CosyVoice_Recovery_v2.9.6.py"
         if recovery.is_file():
-            with st.expander("CosyVoice 속도 개선 · 기존 코랩에서 실행"):
-                st.write("음성 생성이 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
+            with st.expander("CosyVoice v2.9.6 길이 오류 수정 · 기존 코랩에서 실행"):
+                st.write("음성 생성이 멈췄거나 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
                 st.caption("실행 중인 기존 설치·모델을 재사용합니다. 마지막에 나온 새 연결 주소를 아래 칸에 넣어주세요.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
-        st.caption("기존 v2.9.4 서버도 계속 연결할 수 있습니다. 반복 전송 생략은 v2.9.5 서버에서 적용됩니다.")
+        st.caption("기존 서버도 계속 연결할 수 있습니다. 이번 음성 길이 검사 수정은 코랩 v2.9.6에서 적용됩니다.")
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")
     for label, filename, download_name in notebooks:
         revision = COSY_NOTEBOOK_RELEASE_REVISION if filename == "CosyVoice_Colab_API.ipynb" else NOTEBOOK_RELEASE_REVISION

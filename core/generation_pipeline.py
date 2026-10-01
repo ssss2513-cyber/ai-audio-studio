@@ -199,7 +199,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                     if used_batch:
                         position += len(group)
                         continue
-                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.14로 업데이트하면 실제 속도에 맞춰 동시 수를 선택하고 빈자리를 계속 채웁니다.')
+                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.15로 업데이트하면 최대 4개를 생성하며 빈자리를 계속 채웁니다.')
                 _generate_one(item, state['id'], cancel, emit)
                 position += 1
             except CancelledError:

@@ -16,6 +16,7 @@ from .cosy_colab_client import _transport, check_connection, decode_audio_bytes,
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
+FIXED_FOUR_CAPABILITY = 'fixed_four_continuous_v2915'
 MAX_QUEUE_ITEMS = 4096
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
 
@@ -56,6 +57,11 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
         raise RuntimeError(message)
     if BATCH_CAPABILITY not in status.get('capabilities', []):
         return False
+    if (PARALLEL_CAPABILITY in status.get('capabilities', [])
+            and FIXED_FOUR_CAPABILITY not in status.get('capabilities', [])):
+        raise RuntimeError('현재 코랩에는 최대 4개 설정이 아직 적용되지 않았습니다. '
+                           '사이트 왼쪽의 CosyVoice v2.9.15 업데이트 코드를 기존 코랩에서 실행하고, '
+                           '새 연결 주소를 입력한 뒤 이어서 생성해주세요. 완료 파일은 유지됩니다.')
     continuous = CONTINUOUS_CAPABILITY in status.get('capabilities', [])
     if not continuous and len(entries) > 32:
         raise ValueError('이전 코랩은 32개 묶음까지만 지원합니다. v2.9.13 연속 생성 업데이트를 실행해주세요.')

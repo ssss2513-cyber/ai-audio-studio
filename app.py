@@ -40,7 +40,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.32 · Gemini 요청 간격 7초"
+APP_VERSION = "v2.9.33 · Cosy 최대 4개 연속 생성 · Gemini 7초"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -397,7 +397,7 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
         if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920", "ordered_independent_v2921"):
-            st.caption("Gemini 최대 2개 · Cosy 최대 10개 · 각 엔진은 빈자리에 다음 대사를 넣으며, 모든 대사가 완료되면 번호순으로 한 번 합칩니다.")
+            st.caption("Gemini 최대 2개 · Cosy 현재 동시 수는 아래에 표시됩니다. 각 엔진은 빈자리에 다음 대사를 넣으며, 모든 대사가 완료되면 번호순으로 한 번 합칩니다.")
             engine_names = {"gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
             for engine, progress in (job.get("engine_progress") or {}).items():
                 label = engine_names.get(engine, engine)
@@ -420,6 +420,11 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
             if parallel:
                 if parallel.get("enabled") is False:
                     st.caption("Cosy 순차 생성 · 현재 동시 1개")
+                elif parallel.get("selection") == "fixed_four":
+                    if parallel.get("calibrated"):
+                        st.caption(f"Cosy 최대 4개 연속 생성 · 현재 허용 {parallel.get('limit', 1)}개 · 하나가 끝나면 다음 대사를 바로 시작합니다.")
+                    else:
+                        st.caption("Cosy 첫 대사를 생성·저장한 뒤 메모리 여유에 맞춰 최대 4개까지 채웁니다.")
                 elif parallel.get("selection") == "measured_throughput":
                     phase = "속도 비교 중" if parallel.get("tuning") else "관측 결과 적용 중"
                     st.caption(f"Cosy 동시 생성: 현재 {parallel.get('limit', 1)}개 · {phase} · 관측상 선택 {parallel.get('best_limit', 1)}개")
@@ -440,9 +445,9 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 if parallel.get("memory_retries"):
                     st.caption(f"메모리 부족 대사 재처리 {parallel['memory_retries']}회 · 완료 파일과 음질 설정 유지")
                 if parallel.get("continuous_queue") is False:
-                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.14로 업데이트하면 묶음 사이의 대기를 줄이고 빈자리를 계속 채웁니다.")
-                if parallel.get("selection") != "measured_throughput":
-                    st.caption("현재 연결에는 속도 기준 자동 조절이 적용되지 않았습니다. Cosy 코랩 v2.9.14 업데이트와 서버 준비 상태를 확인해주세요.")
+                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.15로 업데이트하면 최대 4개 안에서 빈자리를 계속 채웁니다.")
+                if parallel.get("selection") != "fixed_four":
+                    st.caption("현재 작업은 이전 코랩 설정으로 실행 중입니다. 최대 4개 설정은 작업이 끝난 뒤 코랩 v2.9.15로 업데이트하고 다음 생성부터 적용됩니다.")
             for note in job.get("execution_notes", []):
                 st.caption(note)
             if job.get("gemini_key_usage"):
@@ -2188,7 +2193,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
-        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. 하나가 끝나면 다음 대사를 바로 시작하고, 모든 대사가 완료되면 번호순으로 MP3 하나로 합칩니다. Gemini는 최대 2개이며, Cosy v2.9.14는 실제 생성 속도를 비교해 최대 10개 안에서 동시 수를 선택합니다.")
+        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.15는 최대 4개를 생성하고, 하나가 끝날 때마다 다음 대사를 바로 넣습니다. 2개가 끝나면 다음 2개를 채우며 나머지를 기다리지 않습니다. 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 첫 대사 준비와 메모리 부족 시에는 동시 수가 줄어들 수 있습니다.")
         st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
         
         total_segs = len(st.session_state["parsed_segments"])

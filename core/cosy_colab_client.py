@@ -100,6 +100,10 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         acceleration = status.get("acceleration", {})
         if isinstance(acceleration, dict) and acceleration.get("label"):
             message += " · " + str(acceleration["label"])[:200]
+        parallel = status.get("concurrency", {})
+        if isinstance(parallel, dict) and parallel.get("mode") == "auto":
+            message += (f" · 자동 동시 생성 {parallel.get('limit', 1)}개"
+                        if parallel.get("calibrated") else " · 자동 동시 생성 준비 · 첫 대사에서 메모리 측정")
         return True, message, status
     except (requests.RequestException, ValueError, AttributeError) as exc:
         if "transport" in locals():

@@ -1,4 +1,4 @@
-"""Bounded Gemini concurrency and one serial GPU lane, with ordered checkpoints."""
+"""Gemini concurrency and server-scheduled Cosy GPU batches, with ordered checkpoints."""
 from concurrent.futures import CancelledError
 from pathlib import Path
 import os
@@ -56,7 +56,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     failures = []
     threads = []
     by_index = {item.index: item for item in items}
-    state.update(execution_mode='ordered_parallel_v2918', active_indices=[], execution_notes=[])
+    state.update(execution_mode='ordered_parallel_v2919', active_indices=[], execution_notes=[], cosy_parallel={})
 
     def stopped():
         if pause_path.exists():
@@ -132,11 +132,12 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                                     index=part.index, output_file=str(_target(part))) for part in group]
                     used_batch = synthesize_batch(entries, cancel=stopped,
                         on_started=lambda index: emit('started', by_index[index], {'batch_stream': True}),
-                        on_completed=lambda index, path, metrics: emit('completed', by_index[index], (path, metrics)))
+                        on_completed=lambda index, path, metrics: emit('completed', by_index[index], (path, metrics)),
+                        on_status=lambda details: emit('capacity', item, details))
                     if used_batch:
                         position += len(group)
                         continue
-                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.10으로 업데이트하면 생성과 전송을 겹칩니다.')
+                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.11로 업데이트하면 GPU 메모리에 맞춰 동시 생성합니다.')
                 _generate_one(item, state['id'], stopped, emit)
                 position += 1
             except CancelledError:
@@ -184,6 +185,8 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             elif kind == 'notice':
                 if details not in state['execution_notes']:
                     state['execution_notes'].append(details)
+            elif kind == 'capacity':
+                state['cosy_parallel'] = details
             elif kind == 'completed':
                 complete(item, *details)
             elif kind in ('started', 'phase'):
@@ -193,6 +196,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                 if kind == 'started':
                     state['stage_started'] = time.time()
             state['active_indices'] = sorted(active)
+            state['active_cosy_indices'] = sorted(index for index in active if by_index[index].config.engine == 'cosyvoice')
             running = ', '.join(str(index) for index in sorted(active))
             state['message'] = (f"생성·수신 중: {running}번 · 저장 완료 {state['done']}/{state['total']}개"
                                 if running else f"대사 {state['done']}/{state['total']}개 저장 완료")
@@ -207,6 +211,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
         for thread in threads:
             thread.join()
         state['active_indices'] = []
+        state['active_cosy_indices'] = []
     if failures:
         item, exc = failures[0]
         if item:

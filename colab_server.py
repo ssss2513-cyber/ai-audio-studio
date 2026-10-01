@@ -8,6 +8,8 @@
 import argparse
 import base64
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from contextlib import contextmanager, nullcontext
 import hashlib
 import io
 import json
@@ -42,8 +44,9 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.10'
+SERVER_VERSION = '2.9.11'
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
+PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
@@ -418,13 +421,25 @@ def configure_fp32_acceleration(model):
     return result
 
 
+class RequestTimer(threading.local):
+    """Sampling and decoder timers belong to the calling inference thread."""
+    def __init__(self):
+        self.values = {'llm_seconds': 0.0, 'sampling_seconds': 0.0}
+
+    def __getitem__(self, key):
+        return self.values[key]
+
+    def __setitem__(self, key, value):
+        self.values[key] = value
+
+
 def install_generation_timer(model):
     """Measure LLM and candidate selection wall time without extra CUDA waits.
 
-    The request lock serializes synthesis; the LLM job completes before speech
-    is returned. Candidate selection time is included in LLM time, not added.
+    The offline adapter runs the LLM job on the request's thread. Candidate
+    selection time is included in LLM time, not added. No cross-request totals.
     """
-    totals = {'llm_seconds': 0.0, 'sampling_seconds': 0.0}
+    totals = RequestTimer()
     original_job = model.model.llm_job
     original_sampling = model.model.llm.sampling
 
@@ -444,6 +459,103 @@ def install_generation_timer(model):
             totals['sampling_seconds'] += time.monotonic() - started
     model.model.llm.sampling = timed_sampling
     return totals
+
+
+class AutoConcurrency:
+    """Estimate a memory budget from real work; never claim a measured speedup.
+
+    The first requested clip is retained, not an extra test generation. Use its
+    peak plus headroom and a 2 GiB floor per active utterance. An OOM lowers the
+    session ceiling. 32 is the existing bounded batch protocol's hard limit,
+    not a promise that any GPU can run 32 copies at once.
+    """
+    GIB = 1024 ** 3
+
+    def __init__(self, snapshot, reset_peak, recover=lambda: None, enabled=True):
+        self.snapshot, self.reset_peak, self.recover = snapshot, reset_peak, recover
+        self.calibrated = False
+        self.limit = 1
+        self.ceiling = 32 if enabled else 1
+        self.per_request = 2 * self.GIB
+        self.reserve = 2 * self.GIB
+        self.baseline = 0
+        self.memory_retries = 0
+        self.reason = '' if enabled else '현재 모델 조합은 순차 처리로 실행합니다.'
+
+    def begin(self):
+        if not self.calibrated:
+            self.baseline = self.snapshot()['allocated']
+            self.reset_peak()
+
+    def calibrated_after_success(self):
+        if not self.calibrated:
+            info = self.snapshot()
+            observed = max(0, info['peak'] - self.baseline)
+            self.per_request = max(self.per_request, int(observed * 1.5 + self.GIB / 2))
+            self.calibrated = True
+        self.refresh()
+
+    def refresh(self):
+        """Only recalculate the total ceiling while no request is in flight."""
+        if self.calibrated:
+            info = self.snapshot()
+            self.reserve = max(2 * self.GIB, int(info['total'] * 0.12))
+            usable = info['free'] + max(0, info['reserved'] - info['allocated']) - self.reserve
+            self.limit = max(1, min(self.ceiling, int(usable // self.per_request)))
+        return self.limit
+
+    def can_add(self, active):
+        if active >= self.limit:
+            return False
+        if active == 0:
+            return True
+        info = self.snapshot()
+        available = info['free'] + max(0, info['reserved'] - info['allocated'])
+        return available >= self.reserve + self.per_request
+
+    def memory_failure(self, active_count):
+        self.ceiling = max(1, min(self.ceiling, active_count // 2))
+        self.limit = min(self.limit, self.ceiling)
+        self.reason = '메모리 부족이 발생해 동시 수를 줄였습니다. 음질 설정은 유지합니다.'
+
+    def status(self):
+        return dict(mode='auto', limit=self.limit, calibrated=self.calibrated,
+                    hard_limit=32, estimated_request_gib=round(self.per_request / self.GIB, 2),
+                    reserve_gib=round(self.reserve / self.GIB, 2),
+                    memory_retries=self.memory_retries, reason=self.reason)
+
+
+@contextmanager
+def exclusive_gpu_lease():
+    """One whole batch owns the GPU relative to GPT and notebook upgrades."""
+    import fcntl
+    from fastapi import HTTPException
+    with (ROOT.parent / 'gpu.lock').open('a+') as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise HTTPException(409, '다른 엔진이 음성을 생성 중입니다. 완료 후 실행해주세요.') from None
+        yield
+
+
+def install_request_streams(model):
+    """Keep FP32 weights and per-UUID inference caches; separate CUDA streams.
+
+    The pinned offline path is reentrant. Its original llm_context is a single
+    reusable CUDA context manager and cannot be entered by multiple threads.
+    Running the inline LLM on each request's current stream removes that shared
+    context and also keeps the following flow/vocoder ordered on that stream.
+    """
+    import torch
+    revision = subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'],
+                                       text=True, timeout=5).strip()
+    if (revision != SOURCE_REVISION or type(model.model).__name__ != 'CosyVoice2Model' or model.model.fp16
+            or hasattr(model.model.llm, 'vllm')):
+        raise RuntimeError('동시 생성은 고정된 CosyVoice 2 FP32 모델에서만 사용할 수 있습니다.')
+    install_offline_cache_reuse(model)
+    model.model.llm_context = nullcontext()
+    torch.cuda.synchronize()
+    return True
 
 
 def setup():
@@ -588,8 +700,8 @@ def start_server():
             worker.terminate()
 
 
-def install_batch_routes(app, synthesize, authorize):
-    """Keep one model producer busy while a bounded queue streams prior audio."""
+def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease=nullcontext):
+    """Bound GPU work and stream indexed results; drain active work on stop/error."""
     from fastapi import Body, File, Form, HTTPException, UploadFile
     from fastapi.responses import StreamingResponse
 
@@ -606,8 +718,9 @@ def install_batch_routes(app, synthesize, authorize):
         if not gate.acquire(blocking=False):
             raise HTTPException(409, '전체 음성을 생성 중입니다. 완료하거나 멈춘 뒤 실행해주세요.')
         try:
-            return synthesize(token, text, prompt_text, speed, reference,
-                              style_instruction, reference_id, audio_format)
+            with gpu_lease():
+                return synthesize(token, text, prompt_text, speed, reference,
+                                  style_instruction, reference_id, audio_format)
         finally:
             gate.release()
 
@@ -681,31 +794,120 @@ def install_batch_routes(app, synthesize, authorize):
             return False
 
         def produce():
-            count = 0
-            index = None
-            try:
-                for item in items:
-                    if cancel.is_set() or disconnected.is_set():
-                        break
-                    index = item['index']
-                    if not put({'type': 'started', 'index': index}):
-                        break
-                    if cancel.is_set() or disconnected.is_set():
-                        break
-                    started = time.monotonic()
-                    reference = UploadFile(filename='reference.wav', file=io.BytesIO(decoded[item['reference']]))
+            count, position = 0, 0
+            failures, memory_failed = [], []
+            pending = {}
+            retry_count = 0
+
+            def runtime():
+                return concurrency.status() if concurrency else {'limit': 1, 'calibrated': True}
+
+            def generate(item):
+                index = item['index']
+                if cancel.is_set() or disconnected.is_set():
+                    return None
+                if not put({'type': 'started', 'index': index, 'parallel': runtime()}):
+                    return None
+                if cancel.is_set() or disconnected.is_set():
+                    return None
+                started = time.monotonic()
+                reference = UploadFile(filename='reference.wav', file=io.BytesIO(decoded[item['reference']]))
+                try:
                     response = synthesize(token, item['text'], item['prompt_text'], float(item.get('speed', 1.0)),
                                           reference, item.get('style_instruction', ''), '', 'flac')
-                    if not put({'type': 'audio', 'index': index, 'headers': dict(response.headers),
-                                'server_seconds': time.monotonic() - started}, bytes(response.body)):
-                        break
+                    return ({'type': 'audio', 'index': index, 'headers': dict(response.headers),
+                             'server_seconds': time.monotonic() - started, 'parallel': runtime(),
+                             'memory_retries': retry_count}, bytes(response.body))
+                finally:
+                    reference.file.close()
+
+            def save_result(result):
+                nonlocal count
+                if result is not None and put(*result):
                     count += 1
-                put({'type': 'end', 'done': count, 'paused': cancel.is_set()})
+
+            def record_failure(item, exc, retrying=False):
+                detail = getattr(exc, 'detail', str(exc))
+                memory = isinstance(detail, dict) and detail.get('code') == 'cuda_memory_limit'
+                if memory and concurrency and not retrying:
+                    concurrency.memory_failure(max(1, len(pending) + 1))
+                    memory_failed.append(item)
+                    # Future exceptions otherwise retain every tensor in the
+                    # failed model frame and prevent the idle OOM recovery.
+                    failure = exc
+                    visited = set()
+                    while failure is not None and id(failure) not in visited:
+                        visited.add(id(failure))
+                        failure.__traceback__ = None
+                        failure = failure.__cause__ or failure.__context__
+                else:
+                    failures.append((item['index'], exc))
+
+            try:
+                with gpu_lease():
+                    if concurrency:
+                        concurrency.begin()
+                        concurrency.refresh()
+                    with ThreadPoolExecutor(max_workers=32 if concurrency else 1,
+                                            thread_name_prefix='cosy-inference') as pool:
+                        while position < len(items) or pending or memory_failed:
+                            stopped = cancel.is_set() or disconnected.is_set()
+                            # Do not dispatch new work after any failure. Already
+                            # running successes must reach the client before error.
+                            while (position < len(items) and not stopped and not failures and not memory_failed
+                                   and len(pending) < (concurrency.limit if concurrency else 1)
+                                   and (not concurrency or concurrency.can_add(len(pending)))):
+                                item = items[position]
+                                pending[pool.submit(generate, item)] = item
+                                position += 1
+                            if pending:
+                                ready, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                                for future in ready:
+                                    item = pending.pop(future)
+                                    try:
+                                        save_result(future.result())
+                                    except Exception as exc:
+                                        record_failure(item, exc)
+                                if not pending and concurrency and not failures and not memory_failed and count:
+                                    concurrency.calibrated_after_success()
+                                continue
+                            if stopped or failures:
+                                break
+                            if memory_failed:
+                                # All other CUDA work is finished. Clear only idle
+                                # allocator cache, then retry failed clips once at
+                                # one-at-a-time FP32 with unchanged voice settings.
+                                concurrency.recover()
+                                retry_items, memory_failed = memory_failed, []
+                                for item in retry_items:
+                                    if cancel.is_set() or disconnected.is_set():
+                                        break
+                                    retry_count += 1
+                                    concurrency.memory_retries += 1
+                                    try:
+                                        save_result(generate(item))
+                                    except Exception as exc:
+                                        record_failure(item, exc, retrying=True)
+                                        break
+                                if not failures:
+                                    concurrency.calibrated_after_success()
+                                continue
+                            if position >= len(items):
+                                break
+                if failures:
+                    index, exc = failures[0]
+                    detail = getattr(exc, 'detail', str(exc))
+                    if isinstance(detail, dict):
+                        detail = detail.get('message', str(detail))
+                    put({'type': 'error', 'index': index, 'message': str(detail)[:1200],
+                         'status': getattr(exc, 'status_code', 500)})
+                else:
+                    put({'type': 'end', 'done': count, 'paused': cancel.is_set(), 'parallel': runtime()})
             except Exception as exc:
                 detail = getattr(exc, 'detail', str(exc))
                 if isinstance(detail, dict):
                     detail = detail.get('message', str(detail))
-                put({'type': 'error', 'index': index, 'message': str(detail)[:1200],
+                put({'type': 'error', 'index': None, 'message': str(detail)[:1200],
                      'status': getattr(exc, 'status_code', 500)})
             finally:
                 with registry_lock:
@@ -763,7 +965,14 @@ def serve(port):
     print('[모델 준비 3/4] 음성 모델·토크나이저를 불러옵니다. 세부 기록이 이어집니다.', flush=True)
     model = CosyVoice2(model_dir=str(MODEL), load_jit=False, load_trt=False, fp16=False)
     acceleration = configure_fp32_acceleration(model)
+    parallel_enabled = install_request_streams(model)
     generation_timer = install_generation_timer(model)
+    def memory_snapshot():
+        free, total = torch.cuda.mem_get_info()
+        return dict(free=free, total=total, allocated=torch.cuda.memory_allocated(),
+                    reserved=torch.cuda.memory_reserved(), peak=torch.cuda.max_memory_allocated())
+    concurrency = AutoConcurrency(memory_snapshot, torch.cuda.reset_peak_memory_stats,
+                                  torch.cuda.empty_cache, enabled=parallel_enabled)
     gpu_name = torch.cuda.get_device_name(0)
     print(f'실행 환경: {gpu_name} · {acceleration["label"]}', flush=True)
     faulthandler.cancel_dump_traceback_later()
@@ -772,9 +981,10 @@ def serve(port):
     if sample_rate != 24000:
         raise RuntimeError('CosyVoice 2 출력 설정이 올바르지 않습니다. 모델 설정을 다시 확인해주세요.')
     access_token = os.environ['COSY_ACCESS_TOKEN']
-    model_lock = threading.Lock()
-    # Cache only this personal server's reference features, under model_lock.
-    # Entries are never saved to disk and are bounded to limit GPU memory use.
+    reference_lock = threading.Lock()
+    reference_pins = {}
+    # Preparation/eviction is locked; inference reads pinned conditioning tensors.
+    # The soft cache limit is 16 plus at most 32 currently pinned requests.
     reference_cache = OrderedDict()
     reference_cache_limit = 16
     instance_id = secrets.token_hex(12)
@@ -794,10 +1004,10 @@ def serve(port):
         authorize(token)
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
-                'gpu_name': gpu_name, 'acceleration': acceleration,
+                'gpu_name': gpu_name, 'acceleration': acceleration, 'concurrency': concurrency.status(),
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
-                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY]}
+                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY, PARALLEL_CAPABILITY]}
 
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile | None = File(None),
@@ -820,15 +1030,12 @@ def serve(port):
         style_instruction = style_instruction.strip()
         if len(style_instruction) > 800 or '<|' in style_instruction or '|>' in style_instruction:
             raise HTTPException(422, '스타일 지시문 형식이 올바르지 않습니다.')
-        if not model_lock.acquire(blocking=False):
-            raise HTTPException(409, '다른 음성을 생성 중입니다. 완료 후 다시 실행해주세요.')
-        gpu_lock = None
+        pinned_reference = None
+        stream = torch.cuda.Stream(device=0)
+        stream.wait_stream(torch.cuda.default_stream(0))
+        stream_context = torch.cuda.stream(stream)
+        stream_context.__enter__()
         try:
-            gpu_lock = (ROOT.parent / 'gpu.lock').open('a+')
-            try:
-                fcntl.flock(gpu_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise HTTPException(409, '다른 엔진이 음성을 생성 중입니다. 완료 후 실행해주세요.')
             instruction = ('Speak in Korean. ' + style_instruction + '<|endofprompt|>') if style_instruction else ''
             payload = None
             if reference is not None:
@@ -840,75 +1047,85 @@ def serve(port):
                 reference_id = 'studio_' + hashlib.sha256(identity.encode('utf-8')).hexdigest()
             elif not re.fullmatch(r'studio_[a-f0-9]{64}', reference_id):
                 raise HTTPException(422, '참고 음성을 등록해주세요.')
-            cached = reference_cache.get(reference_id)
-            reference_hit = (cached is not None and reference_id in model.frontend.spk2info
-                             and cached.get('prompt_text') == prompt_text
-                             and cached.get('instruction') == instruction)
-            if payload is None and not reference_hit:
-                # This response is strictly before ANY model call. The client
-                # may restore the reference bytes without duplicating speech.
-                raise HTTPException(428, {'code': 'reference_required', 'synthesis_started': False,
-                                          'message': '참고 음성 정보를 다시 전송해주세요.'})
             with tempfile.TemporaryDirectory(prefix='cosy_ref_') as folder:
-                # Include the conditioning text and mode: instruction-mode voices
-                # must never reuse a basic-mode transcript (upstream issue #1400).
                 preparation_started = time.monotonic()
-                if reference_hit:
-                    reference_cache.move_to_end(reference_id)
-                    duration = cached['duration']
-                    reference_spoken_seconds = cached['spoken_seconds']
-                    reference_units = cached['speech_units']
-                    print('참고 목소리 분석 결과를 재사용합니다.', flush=True)
-                else:
-                    print('참고 목소리를 분석합니다. 같은 음성은 다음 대사부터 재사용합니다.', flush=True)
-                    original = Path(folder) / 'reference.audio'
-                    original.write_bytes(payload)
-                    prepared = Path(folder) / 'reference.wav'
-                    result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
-                                             '-t', '31', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_f32le', str(prepared)],
-                                            capture_output=True, text=True, timeout=60)
-                    if result.returncode:
-                        raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
-                    audio, sr = sf.read(prepared, dtype='float32')
-                    duration = len(audio) / sr
-                    if not 3 <= duration <= 30:
-                        raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
-                    if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
-                        raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
+                with reference_lock:
+                    cached = reference_cache.get(reference_id)
+                    reference_hit = (cached is not None and reference_id in model.frontend.spk2info
+                                     and cached.get('prompt_text') == prompt_text
+                                     and cached.get('instruction') == instruction)
+                    if payload is None and not reference_hit:
+                        # This response is strictly before ANY model call. The client
+                        # may restore the reference bytes without duplicating speech.
+                        raise HTTPException(428, {'code': 'reference_required', 'synthesis_started': False,
+                                                  'message': '참고 음성 정보를 다시 전송해주세요.'})
+                    # Include the conditioning text and mode: instruction-mode voices
+                    # must never reuse a basic-mode transcript (upstream issue #1400).
+                    if reference_hit:
+                        reference_cache.move_to_end(reference_id)
+                        duration = cached['duration']
+                        reference_spoken_seconds = cached['spoken_seconds']
+                        reference_units = cached['speech_units']
+                        print('참고 목소리 분석 결과를 재사용합니다.', flush=True)
+                    else:
+                        print('참고 목소리를 분석합니다. 같은 음성은 다음 대사부터 재사용합니다.', flush=True)
+                        original = Path(folder) / 'reference.audio'
+                        original.write_bytes(payload)
+                        prepared = Path(folder) / 'reference.wav'
+                        result = subprocess.run(['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(original),
+                                                 '-t', '31', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_f32le', str(prepared)],
+                                                capture_output=True, text=True, timeout=60)
+                        if result.returncode:
+                            raise HTTPException(422, '참조 오디오를 읽을 수 없습니다. WAV 또는 MP3를 확인해주세요.')
+                        audio, sr = sf.read(prepared, dtype='float32')
+                        duration = len(audio) / sr
+                        if not 3 <= duration <= 30:
+                            raise HTTPException(422, f'참조 음성은 3~30초여야 합니다. 현재 {duration:.1f}초입니다.')
+                        if not np.all(np.isfinite(audio)) or np.max(np.abs(audio)) < 0.00001:
+                            raise HTTPException(422, '참조 음성에 들리는 목소리가 없습니다.')
 
-                    # Remove only nearly silent outer padding; never cut spoken audio
-                    # to a fixed length without also aligning its transcript.
-                    frame = int(sr * 0.02)
-                    padded = np.pad(audio, (0, (-len(audio)) % frame))
-                    levels = np.sqrt(np.mean(padded.reshape(-1, frame) ** 2, axis=1))
-                    active = np.flatnonzero(levels > max(0.0001, float(levels.max()) * 0.015))
-                    if active.size == 0 or active.size * 0.02 < 0.8:
-                        raise HTTPException(422, '참고 음성의 실제 발화가 너무 짧거나 조용합니다. 배경음 없이 한 사람이 문장을 말하는 녹음을 사용해주세요.')
-                    spoken_seconds = active.size * 0.02
-                    units = speech_units(prompt_text)
-                    if (spoken_seconds > 6 and units / spoken_seconds < 0.75) or units / spoken_seconds > 25:
-                        raise HTTPException(422, f'참고 음성 길이({duration:.1f}초)와 입력한 참고 대사 길이가 크게 다릅니다. 새로 만들 대사가 아니라 녹음 전체의 실제 대사를 입력해주세요.')
-                    margin = int(sr * 0.15)
-                    start = max(0, int(active[0]) * frame - margin)
-                    end = min(len(audio), (int(active[-1]) + 1) * frame + margin)
-                    audio = audio[start:end]
-                    peak = float(np.max(np.abs(audio)))
-                    # Leave ordinary recordings untouched and avoid amplifying noise.
-                    if peak > 0.95:
-                        audio = audio * (0.95 / peak)
-                    elif peak < 0.1:
-                        audio = audio * min(4.0, 0.1 / peak)
-                    sf.write(prepared, audio, sr, subtype='FLOAT')
-                    if len(reference_cache) >= reference_cache_limit:
-                        oldest, _ = reference_cache.popitem(last=False)
-                        model.frontend.spk2info.pop(oldest, None)
-                    with torch.inference_mode():
-                        model.add_zero_shot_spk(instruction or prompt_text, str(prepared), reference_id)
-                    reference_cache[reference_id] = {'duration': duration, 'prompt_text': prompt_text,
-                                                     'instruction': instruction,
-                                                     'spoken_seconds': spoken_seconds, 'speech_units': units}
-                    reference_spoken_seconds = spoken_seconds
-                    reference_units = units
+                        # Remove only nearly silent outer padding; never cut spoken audio
+                        # to a fixed length without also aligning its transcript.
+                        frame = int(sr * 0.02)
+                        padded = np.pad(audio, (0, (-len(audio)) % frame))
+                        levels = np.sqrt(np.mean(padded.reshape(-1, frame) ** 2, axis=1))
+                        active = np.flatnonzero(levels > max(0.0001, float(levels.max()) * 0.015))
+                        if active.size == 0 or active.size * 0.02 < 0.8:
+                            raise HTTPException(422, '참고 음성의 실제 발화가 너무 짧거나 조용합니다. 배경음 없이 한 사람이 문장을 말하는 녹음을 사용해주세요.')
+                        spoken_seconds = active.size * 0.02
+                        units = speech_units(prompt_text)
+                        if (spoken_seconds > 6 and units / spoken_seconds < 0.75) or units / spoken_seconds > 25:
+                            raise HTTPException(422, f'참고 음성 길이({duration:.1f}초)와 입력한 참고 대사 길이가 크게 다릅니다. 새로 만들 대사가 아니라 녹음 전체의 실제 대사를 입력해주세요.')
+                        margin = int(sr * 0.15)
+                        start = max(0, int(active[0]) * frame - margin)
+                        end = min(len(audio), (int(active[-1]) + 1) * frame + margin)
+                        audio = audio[start:end]
+                        peak = float(np.max(np.abs(audio)))
+                        # Leave ordinary recordings untouched and avoid amplifying noise.
+                        if peak > 0.95:
+                            audio = audio * (0.95 / peak)
+                        elif peak < 0.1:
+                            audio = audio * min(4.0, 0.1 / peak)
+                        sf.write(prepared, audio, sr, subtype='FLOAT')
+                        for oldest in list(reference_cache):
+                            if len(reference_cache) < reference_cache_limit:
+                                break
+                            if not reference_pins.get(oldest):
+                                reference_cache.pop(oldest)
+                                model.frontend.spk2info.pop(oldest, None)
+                        with torch.inference_mode():
+                            model.add_zero_shot_spk(instruction or prompt_text, str(prepared), reference_id)
+                        reference_cache[reference_id] = {'duration': duration, 'prompt_text': prompt_text,
+                                                         'instruction': instruction,
+                                                         'spoken_seconds': spoken_seconds, 'speech_units': units}
+                        ready = torch.cuda.Event()
+                        ready.record(stream)
+                        reference_cache[reference_id]['ready'] = ready
+                        reference_spoken_seconds = spoken_seconds
+                        reference_units = units
+                    stream.wait_event(reference_cache[reference_id]['ready'])
+                    reference_pins[reference_id] = reference_pins.get(reference_id, 0) + 1
+                    pinned_reference = reference_id
                 preparation_seconds = time.monotonic() - preparation_started
 
                 pieces = []
@@ -1035,6 +1252,9 @@ def serve(port):
                     'X-Generation-Retries': str(recovery_count),
                     'X-Retry-Seconds': f'{recovery_seconds:.3f}',
                 })
+        except torch.cuda.OutOfMemoryError as exc:
+            raise HTTPException(503, {'code': 'cuda_memory_limit',
+                'message': 'GPU 메모리가 부족합니다. 동시 수를 줄여 실패한 대사만 한 번 다시 생성합니다.'}) from exc
         except GeneratedAudioValidationError as exc:
             logging.warning('%s output validation failed: %s', LABEL, exc)
             detail = str(exc) + f' (추가 생성 {recovery_count}회, 추가 처리 {recovery_seconds:.1f}초)'
@@ -1048,11 +1268,23 @@ def serve(port):
         finally:
             if reference is not None:
                 reference.file.close()
-            if gpu_lock is not None:
-                gpu_lock.close()
-            model_lock.release()
+            try:
+                stream.synchronize()
+            finally:
+                stream_context.__exit__(None, None, None)
+                if pinned_reference is not None:
+                    with reference_lock:
+                        reference_pins[pinned_reference] -= 1
+                        if not reference_pins[pinned_reference]:
+                            reference_pins.pop(pinned_reference)
+                        for oldest in list(reference_cache):
+                            if len(reference_cache) <= reference_cache_limit:
+                                break
+                            if not reference_pins.get(oldest):
+                                reference_cache.pop(oldest)
+                                model.frontend.spk2info.pop(oldest, None)
 
-    install_batch_routes(app, synthesize, authorize)
+    install_batch_routes(app, synthesize, authorize, concurrency, exclusive_gpu_lease)
     uvicorn.run(app, host='127.0.0.1', port=port, access_log=False)
 
 

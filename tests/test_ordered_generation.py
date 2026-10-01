@@ -172,7 +172,11 @@ def test_shared_pacer_spaces_starts_without_serializing_responses():
 @pytest.fixture
 def local_cosy():
     app = FastAPI()
-    control = SimpleNamespace(calls=[], fail=None, capability=True, second=threading.Event())
+    gib = 1024 ** 3
+    control = SimpleNamespace(calls=[], fail=None, capability=True, second=threading.Event(), hook=None)
+    control.parallel = colab_server.AutoConcurrency(
+        lambda: dict(free=12*gib, total=16*gib, allocated=4*gib, reserved=4*gib, peak=5*gib),
+        lambda: None, enabled=False)
     def authorize(token):
         if token != 'test-token':
             raise HTTPException(403)
@@ -191,10 +195,12 @@ def local_cosy():
             control.second.set()
         if text == control.fail:
             raise HTTPException(502, 'simulated audio failure')
+        if control.hook is not None:
+            control.hook(int(text))
         time.sleep(0.015)
         return Response(audio_bytes(int(text)), media_type='audio/wav',
                         headers={'X-CosyVoice-Version': '2.9.10', 'X-Synthesis-Seconds': '0.015'})
-    colab_server.install_batch_routes(app, synthesize, authorize)
+    colab_server.install_batch_routes(app, synthesize, authorize, control.parallel)
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
     server = uvicorn.Server(uvicorn.Config(app, log_level='error'))
@@ -287,3 +293,156 @@ def test_truncated_audio_cannot_replace_previous_file(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='전송이 끊겼습니다'):
         batch.synthesize_batch(entries, cancel=lambda: False, on_completed=lambda *a: None, on_started=lambda *a: None)
     assert target.read_bytes() == audio_bytes(99)
+
+
+def test_auto_concurrency_uses_measured_memory_and_limits_after_oom():
+    gib = 1024 ** 3
+    info = dict(free=20*gib, total=24*gib, allocated=4*gib, reserved=4*gib, peak=5*gib)
+    policy = colab_server.AutoConcurrency(lambda: info, lambda: None)
+    policy.begin()
+    assert policy.limit == 1 and not policy.calibrated
+    policy.calibrated_after_success()
+    assert policy.limit == 8  # remaining memory / observed requirement + reserves
+    info['free'] = gib
+    assert not policy.can_add(1)
+    policy.memory_failure(8)
+    info['free'] = 20*gib
+    policy.refresh()
+    assert policy.limit == 4
+    # A large GPU is bounded by the 32-entry request, not a fixed 2-worker setting.
+    large = dict(free=90*gib, total=96*gib, allocated=6*gib, reserved=6*gib, peak=7*gib)
+    other = colab_server.AutoConcurrency(lambda: large, lambda: None)
+    other.begin(); other.calibrated_after_success()
+    assert other.limit == 32
+
+
+def test_real_cosy_requests_overlap_to_memory_limit_and_save_matching_indices(tmp_path, local_cosy):
+    local_cosy.parallel.ceiling = 32
+    barrier = threading.Barrier(5)
+    reached, done, statuses = [], [], []
+    guard = threading.Lock()
+    def hook(index):
+        if 2 <= index <= 6:
+            with guard:
+                reached.append(index)
+            barrier.wait(timeout=3)
+            time.sleep((7 - index) * 0.015)
+    local_cosy.hook = hook
+    assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 9), cancel=lambda: False,
+        on_started=lambda index: None, on_completed=lambda index, *args: done.append(index),
+        on_status=statuses.append)
+    assert sorted(reached) == [2, 3, 4, 5, 6]
+    assert done[0] == 1 and done[1] == 6
+    assert sorted(done) == list(range(1, 10))
+    assert max(status['limit'] for status in statuses) == 5
+    for index in done:
+        assert (tmp_path / f'{index}.wav').read_bytes() == audio_bytes(index)
+
+
+def test_parallel_cosy_error_drains_other_inflight_successes_before_error(tmp_path, local_cosy):
+    local_cosy.parallel.ceiling = 32
+    barrier, done = threading.Barrier(5), []
+    def hook(index):
+        if 2 <= index <= 6:
+            barrier.wait(timeout=3)
+            if index == 2:
+                raise HTTPException(502, 'parallel voice failure')
+            time.sleep(0.06)
+    local_cosy.hook = hook
+    with pytest.raises(RuntimeError, match='parallel voice failure'):
+        batch.synthesize_batch(entries_at(tmp_path, local_cosy, 10), cancel=lambda: False,
+            on_started=lambda index: None, on_completed=lambda index, *args: done.append(index))
+    assert sorted(done) == [1, 3, 4, 5, 6]
+    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3, 4, 5, 6]
+    assert not (tmp_path / '2.wav').exists()
+
+
+def test_parallel_cosy_oom_drains_then_retries_only_failed_clip_once(tmp_path, local_cosy):
+    local_cosy.parallel.ceiling = 32
+    barrier, done, statuses = threading.Barrier(5), [], []
+    counts, guard = {}, threading.Lock()
+    def hook(index):
+        with guard:
+            counts[index] = counts.get(index, 0) + 1
+            attempt = counts[index]
+        if 2 <= index <= 6 and attempt == 1:
+            barrier.wait(timeout=3)
+            if index == 2:
+                raise HTTPException(503, {'code': 'cuda_memory_limit', 'message': 'simulated OOM'})
+            time.sleep(0.05)
+    local_cosy.hook = hook
+    assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 9), cancel=lambda: False,
+        on_started=lambda index: None, on_completed=lambda index, *args: done.append(index), on_status=statuses.append)
+    assert sorted(done) == list(range(1, 10))
+    assert counts[2] == 2 and all(count == 1 for index, count in counts.items() if index != 2)
+    assert done.index(2) > max(done.index(index) for index in range(3, 7))
+    assert local_cosy.parallel.limit <= 2
+    assert statuses[-1]['memory_retries'] == 1
+
+
+def test_parallel_cosy_pause_saves_every_started_calculation_without_refill(tmp_path, local_cosy):
+    local_cosy.parallel.ceiling = 32
+    all_running, release, pause = threading.Event(), threading.Event(), threading.Event()
+    seen, done, guard = set(), [], threading.Lock()
+    def hook(index):
+        if 2 <= index <= 6:
+            with guard:
+                seen.add(index)
+                if len(seen) == 5:
+                    all_running.set()
+            assert release.wait(3)
+    local_cosy.hook = hook
+    def pauser():
+        assert all_running.wait(3)
+        pause.set()
+        # Stop is sent on the next streamed heartbeat, before CUDA work returns.
+        time.sleep(1.2)
+        release.set()
+    local_cosy.hook = hook
+    thread = threading.Thread(target=pauser)
+    thread.start()
+    try:
+        assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 12), cancel=pause.is_set,
+            on_started=lambda index: None, on_completed=lambda index, *args: done.append(index))
+    finally:
+        release.set(); thread.join(timeout=4)
+    assert sorted(done) == [1, 2, 3, 4, 5, 6]
+    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3, 4, 5, 6]
+
+
+def test_generation_timers_are_isolated_between_threads():
+    timer = colab_server.RequestTimer()
+    barrier = threading.Barrier(4)
+    def worker(index):
+        timer['llm_seconds'] = index
+        barrier.wait(timeout=2)
+        return timer['llm_seconds']
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert list(pool.map(worker, [1, 2, 3, 4])) == [1, 2, 3, 4]
+    assert timer['llm_seconds'] == 0
+
+
+def test_persistent_oom_stops_after_one_retry_and_keeps_saved_clips(tmp_path, local_cosy):
+    local_cosy.parallel.ceiling = 32
+    def hook(index):
+        if index == 2:
+            raise HTTPException(503, {'code': 'cuda_memory_limit', 'message': 'persistent memory shortage'})
+    local_cosy.hook = hook
+    done = []
+    with pytest.raises(RuntimeError, match='persistent memory shortage'):
+        batch.synthesize_batch(entries_at(tmp_path, local_cosy, 12), cancel=lambda: False,
+            on_started=lambda index: None, on_completed=lambda index, *args: done.append(index))
+    assert len([call for call in local_cosy.calls if call[0] == '2']) == 2
+    assert 1 in done and not (tmp_path / '2.wav').exists()
+    assert len(done) == len(set(done))
+
+
+def test_whole_batch_gpu_lease_blocks_other_engines_and_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr(colab_server, 'ROOT', tmp_path / 'cosy')
+    with colab_server.exclusive_gpu_lease():
+        with pytest.raises(HTTPException) as blocked:
+            with colab_server.exclusive_gpu_lease():
+                pytest.fail('two owners held the GPU lease')
+        assert blocked.value.status_code == 409
+    with colab_server.exclusive_gpu_lease():
+        pass

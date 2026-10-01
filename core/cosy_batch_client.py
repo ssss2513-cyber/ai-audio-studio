@@ -14,6 +14,7 @@ import requests
 from .cosy_colab_client import _transport, check_connection, decode_audio_bytes, normalize_url
 
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
+PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
 
 
@@ -27,7 +28,7 @@ def _read_exact(raw, size):
     return bytes(data)
 
 
-def synthesize_batch(entries, *, cancel, on_completed, on_started):
+def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=None):
     """Return False only before any synthesis, when an older server lacks support."""
     if not entries or len(entries) > 32:
         raise ValueError('연속 생성은 한 요청에 1~32개 대사를 사용합니다.')
@@ -37,6 +38,9 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started):
         raise RuntimeError(message)
     if BATCH_CAPABILITY not in status.get('capabilities', []):
         return False
+    if PARALLEL_CAPABILITY not in status.get('capabilities', []) and on_status is not None:
+        on_status(dict(enabled=False, limit=1, calibrated=True,
+                       reason='현재 코랩은 순차 생성입니다. v2.9.11 동시 생성 업데이트를 실행해주세요.'))
     references, items, by_index = {}, [], {}
     for entry in entries:
         if normalize_url(entry['url']) != base or entry['index'] in by_index:
@@ -85,6 +89,11 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started):
             if type(body_size) is not int or not 0 <= body_size <= MAX_AUDIO_BYTES:
                 raise RuntimeError('코랩 음성 크기가 올바르지 않습니다.')
             kind, index = header.get('type'), header.get('index')
+            parallel = header.get('parallel')
+            if isinstance(parallel, dict) and type(parallel.get('limit')) is int and 1 <= parallel['limit'] <= 32:
+                if on_status is not None:
+                    on_status(dict({key: parallel[key] for key in ('limit', 'calibrated', 'memory_retries', 'reason')
+                                    if key in parallel}, enabled=parallel.get('mode') == 'auto'))
             if kind != 'audio' and body_size:
                 raise RuntimeError('코랩 제어 정보에 잘못된 음성 데이터가 있습니다.')
             if kind == 'heartbeat':
@@ -135,6 +144,10 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started):
                            gpu_name=str(status.get('gpu_name', ''))[:80],
                            acceleration=str(status.get('acceleration', {}).get('label', ''))[:200],
                            reference_cached=headers.get('X-Reference-Cache') == 'hit')
+            if isinstance(parallel, dict):
+                metrics['parallel_limit'] = parallel.get('limit', 1)
+                metrics['parallel_calibrated'] = bool(parallel.get('calibrated'))
+                metrics['memory_retries'] = header.get('memory_retries', 0)
             for name, key in (('reference_seconds', 'X-Reference-Seconds'), ('synthesis_seconds', 'X-Synthesis-Seconds'),
                               ('postprocess_seconds', 'X-Postprocess-Seconds'), ('llm_seconds', 'X-LLM-Seconds'),
                               ('sampling_seconds', 'X-Sampling-Seconds'), ('retries', 'X-Generation-Retries'),

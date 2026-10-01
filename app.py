@@ -22,7 +22,7 @@ from core.tts_engine import (
     VOICE_STYLES
 )
 from core.personal_colab import session_workspace, upload_name
-from core.colab_ui import render_connections, render_reset
+from core.colab_session_ui import render_connections, render_reset, render_qwen_bank_connection
 from core.voice_recommendations import (
     recommend_style, preview_text, style_note, speaker_gender,
     resolve_style, style_display_label, style_description,
@@ -35,7 +35,7 @@ from core.chirp_ui import render_chirp_settings, render_chirp_voice
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
 from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
 from core.qwen_bank_connection import connection_status as qwen_bank_status
-from core.qwen_bank_controls import render_connection as render_qwen_bank_connection, render_voice as render_qwen_bank_voice, preset as bank_preset
+from core.qwen_bank_controls import render_voice as render_qwen_bank_voice, preset as bank_preset
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -46,7 +46,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.40 · Qwen 20종 전용 · 이전 9종 제거"
+APP_VERSION = "v2.9.41 · 코랩 서버 감독 · 연결 복구"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Qwen3 · Chirp · Gemini) - {APP_VERSION}",

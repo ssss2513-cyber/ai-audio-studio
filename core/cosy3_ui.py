@@ -12,7 +12,7 @@ from .tts_engine import VoiceConfig, GEMINI_VOICES, SUPERTONIC_VOICES, KOREAN_ED
 from .voice_recommendations import speaker_gender, preview_text
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTEBOOK_REVISION = '147bdca03c690135082f22d9bb729bd6b558ab37'
+NOTEBOOK_REVISION = '94316f84ffd282028f478cc35925781b9dfb5d4a'
 
 
 def preset(speaker, current=None, used=(), known_gender='', profile=''):
@@ -50,14 +50,19 @@ def render_connection(prominent=False):
         st.markdown('1. 아래 **CosyVoice 3 전용 코랩**을 새로 엽니다.\n'
                     '2. **T4 GPU** 선택 후 **1번 설치 → 2번 서버 준비**를 실행합니다.\n'
                     '3. **4번 사이트 연결**의 전체 주소를 아래에 넣고 연결합니다.')
-        st.link_button('CosyVoice 3 전용 코랩 v1.0.0 열기 ↗',
+        st.link_button('CosyVoice 3 전용 코랩 v1.0.1 열기 ↗',
             'https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/'
             + NOTEBOOK_REVISION + '/CosyVoice3_Colab_API.ipynb', use_container_width=True)
         notebook = ROOT / 'CosyVoice3_Colab_API.ipynb'
         if notebook.is_file():
-            st.download_button('⬇️ CosyVoice 3 코랩 v1.0.0 받기', notebook.read_bytes(),
-                file_name='CosyVoice3_Colab_v1.0.0.ipynb', mime='application/x-ipynb+json',
+            st.download_button('⬇️ CosyVoice 3 코랩 v1.0.1 받기', notebook.read_bytes(),
+                file_name='CosyVoice3_Colab_v1.0.1.ipynb', mime='application/x-ipynb+json',
                 key='download_cosy3_notebook', use_container_width=True)
+        recovery = ROOT / 'CosyVoice3_Show_Address_v1.0.py'
+        if recovery.is_file() and st.checkbox('서버는 정상인데 연결 주소가 안 보일 때', key='cosy3_show_address_help'):
+            st.write('기존 코랩 4번의 ■를 누른 뒤 ＋코드에 아래 내용을 붙여넣고 실행하세요. 모델을 재설치하지 않고 주소를 다시 표시합니다.')
+            st.code(recovery.read_text(encoding='utf-8'), language='python')
+        st.caption('‘음성 서버: 정상 · 외부 연결: 정상’이 반복되면 연결을 유지하는 중입니다. 다음 완료 화면을 기다리지 말고 출력된 주소를 아래 칸에 붙여넣으세요.')
         st.caption('4번 셀은 실행 상태로 두세요. 같은 코랩에 버전 2와 3을 함께 올리지 않습니다. 무료 계정에서 GPU 런타임 두 개가 배정되는 것은 보장되지 않습니다.')
         st.caption('외부 연결이 제한되면 사이트의 ‘CosyVoice 3 코랩 대본 받기’ 파일을 코랩 3번에 올려 직접 생성할 수 있습니다.')
         key = 'input_cosyvoice3_url'

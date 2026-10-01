@@ -50,7 +50,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.43 · CosyVoice 2 문장 끊김·병렬 음향 처리 수정"
+APP_VERSION = "v2.9.44 · CosyVoice 2 음성 끊김 수정 · 3 연결 주소 표시"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",

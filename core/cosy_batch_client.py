@@ -17,6 +17,7 @@ BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
 FIXED_FOUR_CAPABILITY = 'fixed_four_continuous_v2915'
+ADAPTIVE_FOUR_CAPABILITY = 'bounded_throughput_v2916'
 MAX_QUEUE_ITEMS = 4096
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
 
@@ -58,9 +59,9 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
     if BATCH_CAPABILITY not in status.get('capabilities', []):
         return False
     if (PARALLEL_CAPABILITY in status.get('capabilities', [])
-            and FIXED_FOUR_CAPABILITY not in status.get('capabilities', [])):
+            and not {FIXED_FOUR_CAPABILITY, ADAPTIVE_FOUR_CAPABILITY}.intersection(status.get('capabilities', []))):
         raise RuntimeError('현재 코랩에는 최대 4개 설정이 아직 적용되지 않았습니다. '
-                           '사이트 왼쪽의 CosyVoice v2.9.15 업데이트 코드를 기존 코랩에서 실행하고, '
+                           '사이트 왼쪽의 CosyVoice v2.9.16 업데이트 코드를 기존 코랩에서 실행하고, '
                            '새 연결 주소를 입력한 뒤 이어서 생성해주세요. 완료 파일은 유지됩니다.')
     continuous = CONTINUOUS_CAPABILITY in status.get('capabilities', [])
     if not continuous and len(entries) > 32:
@@ -191,6 +192,7 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
                 metrics['memory_retries'] = header.get('memory_retries', 0)
             for name, key in (('reference_seconds', 'X-Reference-Seconds'), ('synthesis_seconds', 'X-Synthesis-Seconds'),
                               ('postprocess_seconds', 'X-Postprocess-Seconds'), ('llm_seconds', 'X-LLM-Seconds'),
+                              ('acoustic_seconds', 'X-Acoustic-Seconds'), ('native_audio_seconds', 'X-Native-Audio-Duration'),
                               ('sampling_seconds', 'X-Sampling-Seconds'), ('retries', 'X-Generation-Retries'),
                               ('retry_seconds', 'X-Retry-Seconds'), ('chunks', 'X-Text-Chunks')):
                 try:

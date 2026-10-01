@@ -47,7 +47,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.37 · Qwen 코랩 진행 로그·연결 주소 표시 수정"
+APP_VERSION = "v2.9.38 · Cosy 계산 대기 완화 · 최대 4개 속도 자동 조절"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Qwen3 · Chirp · Gemini) - {APP_VERSION}",
@@ -492,6 +492,15 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
             if parallel:
                 if parallel.get("enabled") is False:
                     st.caption("Cosy 순차 생성 · 현재 동시 1개")
+                elif parallel.get("selection") == "adaptive_four":
+                    phase = "실제 대사로 동시 수 조절 중" if parallel.get("tuning") else "관측한 속도에 맞춰 생성 중"
+                    st.caption(f"Cosy 속도 자동 조절 · 최대 4개 · 현재 허용 {parallel.get('limit', 1)}개 · {phase}")
+                    st.caption("빈자리가 생기면 다음 대사를 바로 시작합니다. 동시 수를 줄일 때도 진행 중인 대사는 끝까지 저장합니다.")
+                    if parallel.get("measurements"):
+                        with st.expander("Cosy 동시 수별 처리 속도"):
+                            st.table([{"동시 수": row['limit'], "추정 처리율 (음성 초/초)": row['audio_per_second'],
+                                       "관측 대사": row['samples']} for row in parallel['measurements']])
+                            st.caption("완료한 실제 대사로 계산합니다. 참고 음성을 처음 분석한 대사·재생성·동시 수 전환 구간은 비교에서 제외하며, 말하기 속도 조절 전 길이를 사용합니다.")
                 elif parallel.get("selection") == "fixed_four":
                     if parallel.get("calibrated"):
                         st.caption(f"Cosy 최대 4개 연속 생성 · 현재 허용 {parallel.get('limit', 1)}개 · 하나가 끝나면 다음 대사를 바로 시작합니다.")
@@ -517,9 +526,9 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 if parallel.get("memory_retries"):
                     st.caption(f"메모리 부족 대사 재처리 {parallel['memory_retries']}회 · 완료 파일과 음질 설정 유지")
                 if parallel.get("continuous_queue") is False:
-                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.15로 업데이트하면 최대 4개 안에서 빈자리를 계속 채웁니다.")
-                if parallel.get("selection") != "fixed_four":
-                    st.caption("현재 작업은 이전 코랩 설정으로 실행 중입니다. 최대 4개 설정은 작업이 끝난 뒤 코랩 v2.9.15로 업데이트하고 다음 생성부터 적용됩니다.")
+                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.16은 최대 4개 안에서 빈자리를 계속 채웁니다.")
+                if parallel.get("selection") != "adaptive_four":
+                    st.caption("속도 자동 조절은 코랩 v2.9.16부터 적용됩니다. 현재 작업을 완료하거나 저장 후 멈춘 다음, 왼쪽 업데이트 코드를 실행하고 새 주소로 연결해주세요.")
             for note in job.get("execution_notes", []):
                 st.caption(note)
             if job.get("voice_preparation"):
@@ -569,8 +578,13 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                         st.caption(f"무손실 전송: WAV {latest.get('wav_bytes', 0) / 1024:.0f}KB"
                                    f" → 전송 {latest.get('wire_bytes', 0) / 1024:.0f}KB · 동일 PCM 원음으로 복원")
                 if "llm_seconds" in latest:
-                    st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
-                               f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
+                    if "acoustic_seconds" in latest:
+                        st.caption(f"음성 계산 중 발음 순서 {latest['llm_seconds']:.1f}초"
+                                   f" · 음향·파형 생성 {latest['acoustic_seconds']:.1f}초")
+                    else:
+                        st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
+                                   f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
+                st.caption("음성 계산은 해당 대사가 처리된 경과 시간이며 GPU 대기와 재생성을 포함합니다. 전체 속도는 위의 ‘최근 완료 속도’로 확인해주세요.")
                 if "sampling_seconds" in latest:
                     st.caption(f"발음 순서 계산에 포함된 후보 선택·GPU 대기 {latest['sampling_seconds']:.1f}초"
                                " · 앞선 GPU 계산이 끝나기를 기다린 시간도 포함합니다.")
@@ -2363,7 +2377,7 @@ def main():
         st.caption("새 기본 목소리 20종은 선택한 목소리를 처음 한 번 준비합니다. 전체 생성에서는 사용할 목소리를 먼저 한꺼번에 준비한 뒤 대사를 연속 생성하고, 번호순으로 MP3 하나로 합칩니다.")
         st.caption("기존 Qwen 9종은 코랩 모델을 한 번 올려 재사용합니다. GPU 배치는 최대 2개이며, 사이트는 최대 4개 요청을 미리 보내 전송·저장 동안 다음 작업을 이어갑니다. 메모리가 부족하면 정밀도를 유지하고 배치만 1개로 줄입니다.")
         st.caption("Chirp는 코랩 없이 최대 4개를 연속 생성합니다. 한 대사가 끝나면 다음 대사를 바로 요청하고, 전부 완료되면 번호순으로 MP3 하나로 합칩니다.")
-        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.15는 최대 4개를 생성하고, 하나가 끝날 때마다 다음 대사를 바로 넣습니다. 2개가 끝나면 다음 2개를 채우며 나머지를 기다리지 않습니다. 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 첫 대사 준비와 메모리 부족 시에는 동시 수가 줄어들 수 있습니다.")
+        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.16은 첫 대사를 저장한 뒤 실제 처리 속도에 맞춰 동시 1~4개 중 선택합니다. 빈자리가 나면 다음 대사를 바로 넣고, 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 동시 수를 줄일 때도 진행 중인 대사는 끝까지 저장합니다.")
         st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
         
         total_segs = len(st.session_state["parsed_segments"])

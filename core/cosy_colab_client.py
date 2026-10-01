@@ -86,7 +86,7 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY}.issubset(status.get("capabilities", [])):
             transport.invalidate()
             return False, (
-                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.8 바로 열기'로 "
+                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.16 바로 열기'로 "
                 "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
             ), status
         if transport.status is not status:
@@ -104,6 +104,8 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         if isinstance(parallel, dict) and parallel.get("mode") == "auto":
             message += (f" · 자동 동시 생성 {parallel.get('limit', 1)}개"
                         if parallel.get("calibrated") else " · 자동 동시 생성 준비 · 첫 대사에서 메모리 측정")
+            if parallel.get("selection") == "adaptive_four":
+                message += " · 처리 속도에 맞춰 최대 4개 안에서 조절"
         return True, message, status
     except (requests.RequestException, ValueError, AttributeError) as exc:
         if "transport" in locals():
@@ -265,6 +267,8 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             "synthesis_seconds": "X-Synthesis-Seconds",
             "postprocess_seconds": "X-Postprocess-Seconds",
             "llm_seconds": "X-LLM-Seconds",
+            "acoustic_seconds": "X-Acoustic-Seconds",
+            "native_audio_seconds": "X-Native-Audio-Duration",
             "sampling_seconds": "X-Sampling-Seconds",
             "retry_seconds": "X-Retry-Seconds",
             "retries": "X-Generation-Retries",

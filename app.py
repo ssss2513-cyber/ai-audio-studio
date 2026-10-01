@@ -22,7 +22,10 @@ from core.tts_engine import (
 )
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
-from core.voice_recommendations import recommend_style, preview_text, style_note, speaker_gender
+from core.voice_recommendations import (
+    recommend_style, preview_text, style_note, speaker_gender,
+    resolve_style, style_display_label, style_description,
+)
 from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
@@ -34,7 +37,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.24 · Gemini 키 입력 호환 수정"
+APP_VERSION = "v2.9.25 · 음성 스타일 선택 오류 복구"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -166,6 +169,22 @@ SUPERTONIC_VOICE_KEYS = list(SUPERTONIC_VOICES.keys())
 GEMINI_VOICE_KEYS = list(GEMINI_VOICES.keys())
 EDGE_VOICE_KEYS = list(KOREAN_EDGE_VOICES.keys())
 VOICE_STYLE_KEYS = list(VOICE_STYLES.keys())
+
+def render_style_selector(label, speaker, configured_style):
+    """Repair stale/empty widget values before rendering any engine's selector."""
+    key = f"style_select_{speaker}"
+    fallback = resolve_style(configured_style, VOICE_STYLES)
+    saved = st.session_state.get(key, fallback)
+    canonical = resolve_style(saved, VOICE_STYLES, fallback=fallback)
+    if key in st.session_state and saved != canonical:
+        st.session_state[key] = canonical
+    selected = st.selectbox(
+        label, options=VOICE_STYLE_KEYS, index=VOICE_STYLE_KEYS.index(canonical),
+        format_func=style_display_label, key=key,
+    )
+    # A cleared browser selection can arrive during this rerun. Keep the last
+    # configured style now; the widget is repaired before its next render.
+    return resolve_style(selected, VOICE_STYLES, fallback=canonical)
 
 def get_supertonic_voice_label(v_key: str) -> str:
     info = SUPERTONIC_VOICES.get(v_key, {})
@@ -317,7 +336,8 @@ def apply_recommended_styles(speaker=None):
             continue
         recommendation = recommend_style(name, st.session_state.get("parsed_segments", []),
                                          st.session_state.get(f"voice_profile_{name}", ""))
-        style = current_casting_report().get(name, {}).get("style", recommendation.style)
+        style = resolve_style(current_casting_report().get(name, {}).get("style", recommendation.style),
+                              VOICE_STYLES, fallback=config.get("style", "🎤 기본"))
         config["style"] = style
         st.session_state[f"style_select_{name}"] = style
 
@@ -1441,11 +1461,8 @@ def main():
                     )
                     
                     # 현재 스타일 가져오기
-                    cur_style = current_cfg.get("style", DEFAULT_CHARACTER_STYLES.get(spk, "🎤 기본"))
-                    try:
-                        style_idx = VOICE_STYLE_KEYS.index(cur_style)
-                    except ValueError:
-                        style_idx = 0
+                    cur_style = resolve_style(current_cfg.get("style"), VOICE_STYLES,
+                                              fallback=DEFAULT_CHARACTER_STYLES.get(spk, "🎤 기본"))
 
                     if chosen_engine != spk_engine:
                         # 화자 엔진이 바뀌면 해당 엔진 기본 프리셋으로 갱신
@@ -1530,13 +1547,7 @@ def main():
                         st.caption(f"대본 분석: {cast_info['age']} · {cast_info['role']} · {cast_info['personality']}")
                         if cast_info["gender_quote"]:
                             st.caption(f"성별 근거: {cast_info['gender_quote']}")
-                    recommendation_label = recommendation.style
-                    if spk_engine == "gemini":
-                        voice_gender = GEMINI_VOICES.get(current_cfg.get("voice"), {}).get("gender")
-                        if voice_gender == "남성":
-                            recommendation_label = recommendation_label.replace("👵", "👴")
-                        elif voice_gender == "여성":
-                            recommendation_label = recommendation_label.replace("👴", "👵")
+                    recommendation_label = style_display_label(resolve_style(recommendation.style, VOICE_STYLES))
                     st.markdown(f"**💡 추천: {recommendation_label}**")
                     st.caption(recommendation.reason)
                     st.button("추천 참조 스타일 선택" if spk_engine == "gpt-sovits" else "추천 스타일 적용",
@@ -1559,13 +1570,8 @@ def main():
                             key=f"supertonic_voice_{spk}"
                         )
 
-                        selected_style = st.selectbox(
-                            "🎨 스타일 (속도·음량 보정)",
-                            options=VOICE_STYLE_KEYS,
-                            index=style_idx,
-                            key=f"style_select_{spk}"
-                        )
-                        st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        selected_style = render_style_selector("🎨 스타일 (속도·음량 보정)", spk, cur_style)
+                        st.caption(f"✨ {style_description(selected_style, VOICE_STYLES)}")
                         st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
@@ -1620,14 +1626,8 @@ def main():
                             key=f"gemini_voice_{spk}"
                         )
 
-                        selected_style = st.selectbox(
-                            "🎨 음성 스타일 (감정 연기 지시)",
-                            options=VOICE_STYLE_KEYS,
-                            index=style_idx,
-                            format_func=lambda value, gender=selected_gender: value.replace("👵", "👴") if gender == "남성" else value.replace("👴", "👵"),
-                            key=f"style_select_{spk}"
-                        )
-                        st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        selected_style = render_style_selector("🎨 음성 스타일 (감정 연기 지시)", spk, cur_style)
+                        st.caption(f"✨ {style_description(selected_style, VOICE_STYLES)}")
                         st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
@@ -1765,7 +1765,7 @@ def main():
                         )
 
                         speed_cosy = st.slider("말하기 속도", 0.5, 2.0, float(speed_val), 0.05, key=f"cosy_speed_{spk}")
-                        selected_style = st.selectbox("🎨 스타일", options=VOICE_STYLE_KEYS, index=style_idx, key=f"style_select_{spk}")
+                        selected_style = render_style_selector("🎨 스타일", spk, cur_style)
                         st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
@@ -2036,12 +2036,7 @@ def main():
                                                      help="32단계는 계산 시간이 더 걸립니다. 실제 음질은 참조 녹음과 대사에도 영향을 받습니다.")
                         st.caption("처음 비교할 때는 속도 1.0을 사용하세요. 미리듣기와 전체 생성에 같은 설정이 적용됩니다.")
 
-                        selected_style = st.selectbox(
-                            "🎨 참조 음성 스타일 가이드",
-                            options=VOICE_STYLE_KEYS,
-                            index=style_idx,
-                            key=f"style_select_{spk}"
-                        )
+                        selected_style = render_style_selector("🎨 참조 음성 스타일 가이드", spk, cur_style)
                         st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         st.session_state["voice_settings"][spk] = {
@@ -2116,13 +2111,8 @@ def main():
                             key=f"edge_voice_{spk}"
                         )
 
-                        selected_style = st.selectbox(
-                            "🎨 음성 스타일 (감정/연령/톤)",
-                            options=VOICE_STYLE_KEYS,
-                            index=style_idx,
-                            key=f"style_select_{spk}"
-                        )
-                        st.caption(f"✨ {VOICE_STYLES[selected_style]['desc']}")
+                        selected_style = render_style_selector("🎨 음성 스타일 (감정/연령/톤)", spk, cur_style)
+                        st.caption(f"✨ {style_description(selected_style, VOICE_STYLES)}")
                         st.caption(style_note(spk_engine, selected_style, VOICE_STYLES))
 
                         rate_val = st.slider(

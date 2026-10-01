@@ -1,6 +1,40 @@
 """Explainable style suggestions from speaker roles and their own dialogue."""
 from dataclasses import dataclass
 import re
+import unicodedata
+
+
+def _style_title(value):
+    if not isinstance(value, str):
+        return ""
+    value = unicodedata.normalize("NFKC", value).replace("\ufe0f", "")
+    value = re.sub(r"^[^A-Za-z0-9가-힣]+", "", value)
+    return " ".join(value.split())
+
+
+def resolve_style(value, styles, fallback="🎤 기본"):
+    """Map old display labels back to catalog keys without changing the style.
+
+    Gendered/neutral emoji are decoration, never a second style definition.
+    Empty or removed choices keep the last usable configured style.
+    """
+    for candidate in (value, fallback, "🎤 기본"):
+        if isinstance(candidate, str) and candidate in styles:
+            return candidate
+        title = _style_title(candidate)
+        matches = [key for key in styles if title and _style_title(key) == title]
+        if len(matches) == 1:
+            return matches[0]
+    return next(iter(styles))
+
+
+def style_display_label(style):
+    # Stable across gender/engine changes; the selected voice owns gender.
+    return style.replace("👴", "🧓").replace("👵", "🧓")
+
+
+def style_description(style, styles):
+    return styles.get(resolve_style(style, styles), {}).get("desc", "선택한 음성 스타일입니다.")
 
 
 @dataclass(frozen=True)

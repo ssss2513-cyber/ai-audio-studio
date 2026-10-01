@@ -29,6 +29,7 @@ from core.voice_recommendations import (
 )
 from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
 from core.gemini_key_ui import render_key_inputs
+from core.gemini_recovery_ui import render_gemini_recovery
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -39,7 +40,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.29 · Gemini 한도 판정 수정·요청 모델 확인"
+APP_VERSION = "v2.9.30 · Gemini 모델 선택 복구·완료 음성 재사용"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1115,8 +1116,8 @@ def main():
 
             def _format_model_name(m: str) -> str:
                 labels = {
-                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (추천 · 최신 고음질 · 무료/유료 공용)",
-                    "gemini-2.5-flash-preview-tts": "🚀 Gemini 2.5 Flash TTS (안정형 고속 · 무료/유료 공용)",
+                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (미리보기 · 프로젝트 한도 적용)",
+                    "gemini-2.5-flash-preview-tts": "🚀 Gemini 2.5 Flash TTS (기존 재시도 모델 · 프로젝트 한도 적용)",
                     "gemini-2.5-pro-preview-tts": "💎 Gemini 2.5 Pro TTS (유료 결제 계정 전용 · 무료 키는 한도 0)"
                 }
                 return labels.get(m, m)
@@ -2235,12 +2236,37 @@ def main():
 
         btn_label = f"🚀 TTS 및 자막 생성 시작 ({seg_range[0]}번 ~ {seg_range[1]}번, 총 {seg_range[1] - seg_range[0] + 1}개)"
         previous_job = get_job(work_dir)
+        recovery_request = st.session_state.pop("_gemini_recovery_request", None)
+        if recovery_request and (
+                generation_active or not previous_job
+                or previous_job.get("id") != recovery_request.get("job_id")
+                or gemini_model != recovery_request.get("model")
+                or not 1 <= recovery_request.get("first", 0) <= recovery_request.get("last", 0) <= total_segs):
+            recovery_request = None
+            st.warning("작업 또는 대본이 바뀌어 자동 시작하지 않았습니다. 생성 범위를 확인하고 다시 눌러주세요.")
+        render_gemini_recovery(work_dir, previous_job, generation_active)
+        try:
+            keys_for_start = parse_gemini_keys(gemini_api_key)
+            key_input_error = ""
+        except GeminiKeyInputError as exc:
+            keys_for_start, key_input_error = [], str(exc)
+        selected_segments = st.session_state["parsed_segments"][seg_range[0] - 1 : seg_range[1]]
+        has_gemini = any(st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "gemini"
+                        for seg in selected_segments)
+        if has_gemini:
+            st.caption(f"다음 생성에 사용할 Gemini 키: 서로 다른 {len(keys_for_start)}개 · 모델: {gemini_model}")
+            if key_input_error:
+                st.error(key_input_error)
         if previous_job and previous_job.get("status") in ("failed", "paused", "interrupted") and not force_overwrite:
             btn_label = f"▶ 남은 대사 이어서 생성 ({seg_range[0]}번 ~ {seg_range[1]}번)"
         if generation_active:
             st.caption("생성 중인 작업은 시작할 때의 대본과 음성 설정을 사용합니다. 진행 상황은 아래에서 확인하세요.")
-        if st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
-                     disabled=generation_active):
+        start_clicked = st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
+                                  disabled=generation_active)
+        if start_clicked or recovery_request:
+            if recovery_request:
+                seg_range = (recovery_request["first"], recovery_request["last"])
+                force_overwrite = False
             all_segments = st.session_state["parsed_segments"]
             target_segments = all_segments[seg_range[0] - 1 : seg_range[1]]
 
@@ -2327,8 +2353,8 @@ def main():
             checked_engines = set()
             for item in pending_items:
                 cfg = item.config
-                if cfg.engine == "gemini" and not gemini_api_key:
-                    st.error("Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
+                if cfg.engine == "gemini" and not keys_for_start:
+                    st.error(key_input_error or "Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
                     return
                 if cfg.engine in ("cosyvoice", "gpt-sovits"):
                     if not cfg.prompt_text.strip():

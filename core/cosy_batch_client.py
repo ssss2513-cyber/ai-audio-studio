@@ -117,7 +117,8 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
             parallel = header.get('parallel')
             if isinstance(parallel, dict) and type(parallel.get('limit')) is int and 1 <= parallel['limit'] <= 32:
                 if on_status is not None:
-                    details = dict({key: parallel[key] for key in ('limit', 'target_limit', 'calibrated', 'memory_retries', 'reason')
+                    details = dict({key: parallel[key] for key in ('limit', 'target_limit', 'calibrated', 'memory_retries', 'reason',
+                                                                  'selection', 'tuning', 'best_limit', 'measurements')
                                     if key in parallel}, enabled=parallel.get('mode') == 'auto', continuous_queue=continuous)
                     if details != last_parallel:
                         on_status(details)

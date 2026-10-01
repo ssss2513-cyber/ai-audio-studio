@@ -57,12 +57,13 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     active = set()
     calculating = set()
     completed = {}
+    key_attempts, line_keys = {}, {}
     failures = []
     threads = []
     by_index = {item.index: item for item in items}
     engine_stops = {item.config.engine: threading.Event() for item in items}
     state.update(execution_mode='ordered_independent_v2921', active_indices=[], execution_notes=[],
-                 cosy_parallel={}, engine_progress={}, engine_errors={}, retrying_lines={})
+                 cosy_parallel={}, engine_progress={}, engine_errors={}, retrying_lines={}, gemini_key_usage={})
     for item in items:
         progress = state['engine_progress'].setdefault(item.config.engine, dict(total=0, done=0, active=0))
         progress['total'] += 1
@@ -82,6 +83,16 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
         # A Gemini quota error must not cancel the independent Cosy queue.
         engine_stops[item.config.engine].set()
         emit('error', item, exc)
+
+    def key_record(item, details=None):
+        details = details or {}
+        index = details.get('key_index', line_keys.get(item.index))
+        if not index:
+            return None
+        line_keys[item.index] = index
+        for number in range(1, int(details.get('key_count', index)) + 1):
+            state['gemini_key_usage'].setdefault(number, dict(requests=0, completed=0, errors=0, status='아직 요청 없음'))
+        return state['gemini_key_usage'][index]
 
     def update_progress():
         state['active_indices'] = sorted(active)
@@ -111,6 +122,10 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             state['reused'] += 1
         else:
             record_performance(state, item, metrics)
+            record = key_record(item, metrics)
+            if record is not None:
+                record['completed'] += 1
+                record['status'] = '생성 완료'
         active.discard(item.index)
         calculating.discard(item.index)
 
@@ -184,7 +199,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                     if used_batch:
                         position += len(group)
                         continue
-                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.13으로 업데이트하면 빈자리를 채우며 최대 10개까지 연속 생성합니다.')
+                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.14로 업데이트하면 실제 속도에 맞춰 동시 수를 선택하고 빈자리를 계속 채웁니다.')
                 _generate_one(item, state['id'], cancel, emit)
                 position += 1
             except CancelledError:
@@ -227,6 +242,10 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             if kind == 'error':
                 failures.append((item, details))
                 if item:
+                    record = key_record(item)
+                    if record is not None:
+                        record['errors'] += 1
+                        record['status'] = '오류 · 아래 사유 확인'
                     state['retrying_lines'].pop(item.index, None)
                     active.discard(item.index)
                     state['engine_errors'].setdefault(item.config.engine, dict(
@@ -240,6 +259,9 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                 else:
                     pause.set()  # Unattributed worker failure: stop safely.
             elif kind == 'cancelled':
+                record = key_record(item)
+                if record is not None:
+                    record['status'] = '대기 취소'
                 state['retrying_lines'].pop(item.index, None)
                 active.discard(item.index)
                 calculating.discard(item.index)
@@ -253,6 +275,13 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             elif kind == 'completed':
                 complete(item, *details)
             elif kind in ('started', 'phase'):
+                record = key_record(item, details)
+                if record is not None:
+                    attempts = int(details.get('attempts', 0))
+                    record['requests'] += max(0, attempts - key_attempts.get(item.index, 0))
+                    key_attempts[item.index] = max(attempts, key_attempts.get(item.index, 0))
+                    record['status'] = ('한도 대기' if details.get('waiting_for_quota') else
+                                        '재시도 중' if details.get('retrying') else '처리 중')
                 if details.get('retrying'):
                     state['retrying_lines'][item.index] = dict(
                         engine=item.config.engine, speaker=item.speaker, phase=details.get('phase', '자동 재시도 중'),

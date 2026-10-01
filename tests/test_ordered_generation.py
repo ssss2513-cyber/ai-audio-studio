@@ -187,7 +187,7 @@ def local_cosy():
                     capabilities=['validated_generation_v293', 'reference_cache_v294']
                     + ([batch.BATCH_CAPABILITY, batch.PARALLEL_CAPABILITY] if control.capability else [])
                     + ([batch.CONTINUOUS_CAPABILITY] if control.capability and control.continuous else []),
-                    instance_id='local-test', server_version='2.9.13', gpu_name='fake-model', acceleration={})
+                    instance_id='local-test', server_version='2.9.14', gpu_name='fake-model', acceleration={})
     def synthesize(token, text, prompt, speed, reference, style, reference_id, audio_format):
         authorize(token)
         control.calls.append((text, prompt, speed, style, reference.file.read()))
@@ -200,7 +200,8 @@ def local_cosy():
             control.hook(int(text))
         time.sleep(0.015)
         return Response(audio_bytes(int(text)), media_type='audio/wav',
-                        headers={'X-CosyVoice-Version': '2.9.13', 'X-Synthesis-Seconds': '0.015'})
+                        headers={'X-CosyVoice-Version': '2.9.14', 'X-Synthesis-Seconds': '0.015',
+                                 'X-Audio-Duration': '0.1'})
     colab_server.install_batch_routes(app, synthesize, authorize, control.parallel)
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
@@ -296,18 +297,15 @@ def test_truncated_audio_cannot_replace_previous_file(tmp_path, monkeypatch):
     assert target.read_bytes() == audio_bytes(99)
 
 
-def test_auto_concurrency_uses_measured_memory_and_limits_after_oom():
+def test_auto_concurrency_keeps_oom_ceiling_despite_more_free_memory():
     gib = 1024 ** 3
     info = dict(free=20*gib, total=24*gib, allocated=4*gib, reserved=4*gib, peak=5*gib)
     policy = colab_server.AutoConcurrency(lambda: info, lambda: None)
     policy.begin()
     assert policy.limit == 1 and not policy.calibrated
     policy.calibrated_after_success()
-    assert policy.limit == 2  # first retained clip enables a gradual ramp
-    for expected in range(3, 11):
-        policy.completed_wave(policy.limit)
-        assert policy.limit == expected
-    policy.completed_wave(10)
+    assert policy.limit == 1  # memory calibration alone does not prove speed
+    policy._switch(10)  # simulate a previously selected throughput result
     assert policy.limit == 10 and policy.status()['target_limit'] == 10
     info['free'] = gib
     assert not policy.can_add(1)
@@ -315,8 +313,7 @@ def test_auto_concurrency_uses_measured_memory_and_limits_after_oom():
     info['free'] = 20*gib
     policy.refresh()
     assert policy.limit == 4
-    policy.completed_wave(4)
-    assert policy.limit == 4  # an OOM downshift persists, avoiding a retry loop
+    assert policy.ceiling == 4  # an OOM downshift persists, avoiding a retry loop
 
 
 def test_concurrency_excludes_shared_reference_memory_and_waits_for_headroom():
@@ -327,24 +324,33 @@ def test_concurrency_excludes_shared_reference_memory_and_waits_for_headroom():
     info.update(free=10*gib, allocated=6*gib, reserved=6*gib, peak=int(6.4*gib))
     policy.calibrated_after_success()
     assert policy.per_request == gib // 2  # shared 2 GiB reference stays allocated once
+    policy._switch(2)
     info['free'] = 2*gib
-    policy.completed_wave(2)
     assert policy.limit == 2 and not policy.can_add(1)
     info['free'] = 10*gib
-    policy.completed_wave(2)
-    assert policy.limit == 3
-    policy.completed_wave(1)
-    assert policy.limit == 3  # a partially filled batch does not prove the next lane
+    assert policy.can_add(1)
+    policy.refresh()
+    assert policy.limit == 2  # free memory alone does not prove the next lane
 
 
-def enable_parallel(control):
+def enable_parallel(control, limit=2):
+    # Isolate queue/drain/error tests from the separate speed-selection tests.
+    # Keep the first warm-up clip, then use an already selected count.
     control.parallel.target_limit = control.parallel.ceiling = 10
     control.parallel.reason = ''
+    original = control.parallel.calibrated_after_success
+    def calibrate():
+        first = not control.parallel.calibrated
+        original()
+        if first:
+            control.parallel._switch(limit)
+            control.parallel.best_limit = limit
+    control.parallel.calibrated_after_success = calibrate
 
 
 @pytest.mark.parametrize('fail_at_ten', [False, True])
-def test_real_cosy_requests_ramp_to_ten_and_save_matching_indices(tmp_path, local_cosy, fail_at_ten):
-    enable_parallel(local_cosy)
+def test_selected_ten_requests_save_matching_indices_and_drain_oom(tmp_path, local_cosy, fail_at_ten):
+    enable_parallel(local_cosy, limit=10)
     ten_running = threading.Event()
     done, statuses = [], []
     active = peak = 0
@@ -383,6 +389,30 @@ def test_real_cosy_requests_ramp_to_ten_and_save_matching_indices(tmp_path, loca
         assert statuses[-1]['memory_retries'] == 1
         assert calls[failed_index] == 2
         assert all(count == 1 for index, count in calls.items() if index != failed_index)
+    for index in done:
+        assert (tmp_path / f'{index}.wav').read_bytes() == audio_bytes(index)
+
+
+def test_live_queue_chooses_faster_count_and_preserves_every_audio(tmp_path, local_cosy):
+    # Real local HTTP queue + synthetic audio/work; this is not a GPU benchmark.
+    policy = local_cosy.parallel
+    policy.enabled = policy.searching = True
+    policy.target_limit = policy.ceiling = 10
+    policy.MIN_WINDOW_SECONDS = 0.03
+    def hook(index):
+        if policy.limit >= 4:
+            time.sleep(0.09)  # model simulated resource contention
+    local_cosy.hook = hook
+    done, statuses = [], []
+    assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 50), cancel=lambda: False,
+        on_started=lambda index: None, on_completed=lambda index, *args: done.append(index),
+        on_status=statuses.append)
+    assert {row['limit'] for row in statuses} == {1, 2, 4}
+    assert policy.limit == policy.best_limit == 2 and not policy.searching
+    assert statuses[-1]['selection'] == 'measured_throughput'
+    assert {row['limit'] for row in statuses[-1]['measurements']} == {1, 2, 4}
+    assert sorted(done) == list(range(1, 51))
+    assert len(local_cosy.calls) == len(done)
     for index in done:
         assert (tmp_path / f'{index}.wav').read_bytes() == audio_bytes(index)
 

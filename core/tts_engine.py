@@ -668,13 +668,19 @@ class TTSEngine:
             raise ValueError("Gemini API 키를 입력해주세요.")
         if voice_config.voice not in GEMINI_VOICES:
             raise ValueError("선택한 Gemini 성우를 다시 확인해주세요.")
-        with _GEMINI_KEY_LOCK:
-            cls._gemini_key_counter = (cls._gemini_key_counter + 1) % len(keys)
-            selected_key = keys[cls._gemini_key_counter]
-        return synthesize(build_gemini_tts_prompt(text, voice_config.style, voice_config.voice),
-                          output_file, api_key=selected_key, pacing_group=tuple(sorted(keys)), cancel=cancel,
-                          model=(voice_config.model or "gemini-3.1-flash-tts-preview").strip(),
-                          voice=voice_config.voice, metrics=metrics, progress=progress)
+        from .gemini_keys import select_gemini_key
+        selected_key, key_index = select_gemini_key(keys)
+        metrics = metrics if metrics is not None else {}
+        metrics.update(key_index=key_index, key_count=len(keys))
+        if progress:
+            progress("Gemini 연결 준비", metrics)
+        try:
+            return synthesize(build_gemini_tts_prompt(text, voice_config.style, voice_config.voice),
+                              output_file, api_key=selected_key, pacing_group=tuple(sorted(keys)), cancel=cancel,
+                              model=(voice_config.model or "gemini-3.1-flash-tts-preview").strip(),
+                              voice=voice_config.voice, metrics=metrics, progress=progress)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Gemini 키 {key_index}/{len(keys)} · {exc}") from None
 
     @classmethod
     async def generate_gemini_speech_async(cls, text, output_file, voice_config, retries=1):

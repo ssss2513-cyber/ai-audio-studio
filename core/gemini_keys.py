@@ -6,6 +6,26 @@ neither errors nor UI summaries may contain any part of a supplied credential.
 from __future__ import annotations
 
 import re
+import hashlib
+import threading
+from collections import OrderedDict
+
+_KEY_COUNTERS = OrderedDict()
+_KEY_COUNTER_LOCK = threading.Lock()
+
+
+def select_gemini_key(keys):
+    """Round robin per registered key list, without changing quota budgets."""
+    if not keys:
+        raise GeminiKeyInputError("Gemini API 키를 입력해주세요.")
+    identity = hashlib.sha256("\0".join(keys).encode()).hexdigest()
+    with _KEY_COUNTER_LOCK:
+        index = _KEY_COUNTERS.get(identity, 0) % len(keys)
+        _KEY_COUNTERS[identity] = index + 1
+        _KEY_COUNTERS.move_to_end(identity)
+        while len(_KEY_COUNTERS) > 128:
+            _KEY_COUNTERS.popitem(last=False)
+    return keys[index], index + 1
 
 
 class GeminiKeyInputError(ValueError):

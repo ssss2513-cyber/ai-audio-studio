@@ -28,6 +28,7 @@ from core.voice_recommendations import (
     resolve_style, style_display_label, style_description,
 )
 from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
+from core.gemini_key_ui import render_key_inputs
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -38,7 +39,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.27 · Gemini 한도 대기 후 자동 이어서 생성"
+APP_VERSION = "v2.9.28 · Cosy 속도 자동 조절·Gemini 다중 키 확인"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -417,12 +418,20 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
             parallel = job.get("cosy_parallel") or {}
             if parallel:
                 if parallel.get("enabled") is False:
-                    st.caption("Cosy 순차 생성 · 동시 생성에는 코랩 업데이트가 필요합니다.")
+                    st.caption("Cosy 순차 생성 · 현재 동시 1개")
+                elif parallel.get("selection") == "measured_throughput":
+                    phase = "속도 비교 중" if parallel.get("tuning") else "관측 결과 적용 중"
+                    st.caption(f"Cosy 동시 생성: 현재 {parallel.get('limit', 1)}개 · {phase} · 관측상 선택 {parallel.get('best_limit', 1)}개")
+                    if parallel.get("measurements"):
+                        with st.expander("Cosy 동시 수별 관측 결과"):
+                            st.table([{"동시 수": row['limit'], "생성 음성 초 / 처리 1초": row['audio_per_second'],
+                                       "관측 대사": row['samples']} for row in parallel['measurements']])
+                            st.caption("실제 생성 중인 대사로 비교합니다. 대사 길이·화자가 달라질 수 있어 고정 성능 시험 결과는 아닙니다.")
                 elif parallel.get("calibrated"):
                     if parallel.get("target_limit"):
                         st.caption(f"Cosy 동시 생성: 설정 상한 {parallel['target_limit']}개 · 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개")
                     else:
-                        st.caption(f"Cosy 동시 생성: 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개 · 10개까지 늘리려면 코랩 v2.9.13으로 업데이트해주세요.")
+                        st.caption(f"Cosy 동시 생성: 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개")
                 else:
                     st.caption("Cosy 첫 대사 생성 중 · 결과를 저장한 뒤 메모리 여유를 보며 동시 수를 단계적으로 늘립니다.")
                 if parallel.get("reason"):
@@ -430,9 +439,17 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 if parallel.get("memory_retries"):
                     st.caption(f"메모리 부족 대사 재처리 {parallel['memory_retries']}회 · 완료 파일과 음질 설정 유지")
                 if parallel.get("continuous_queue") is False:
-                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.13으로 업데이트하면 묶음 사이의 대기를 줄이고 빈자리를 계속 채웁니다.")
+                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.14로 업데이트하면 묶음 사이의 대기를 줄이고 빈자리를 계속 채웁니다.")
+                if parallel.get("selection") != "measured_throughput":
+                    st.caption("현재 연결에는 속도 기준 자동 조절이 적용되지 않았습니다. Cosy 코랩 v2.9.14 업데이트와 서버 준비 상태를 확인해주세요.")
             for note in job.get("execution_notes", []):
                 st.caption(note)
+            if job.get("gemini_key_usage"):
+                with st.expander("Gemini 키별 요청·완료 상태", expanded=bool(job.get('engine_errors', {}).get('gemini'))):
+                    st.table([{"키": f"키 {index}", "요청 횟수": row['requests'], "완료 대사": row['completed'],
+                               "실패 대사": row['errors'], "최근 상태": row['status']}
+                              for index, row in sorted(job['gemini_key_usage'].items(), key=lambda pair: int(pair[0]))])
+                    st.caption("이번 작업의 요청 기록입니다. Google의 남은 한도나 다른 작업의 사용량을 조회한 값은 아닙니다.")
         if job.get("generated", 0):
             estimate = (f"최근 완료 속도: 대사당 {job['throughput_seconds']:.1f}초"
                         if "throughput_seconds" in job else f"최근 새 대사 평균 {job.get('average_seconds', 0):.1f}초")
@@ -1092,16 +1109,7 @@ def main():
 
         def render_gemini_section():
             st.markdown("#### ⚡ Gemini Flash API 설정")
-            saved_key = st.session_state.get("gemini_api_key", "")
-            g_key = st.text_input(
-                "Gemini API Key (선불/무료키 또는 쉼표 구분 다중 키)",
-                value=saved_key,
-                type="password",
-                placeholder="AI Studio에서 복사한 전체 키 · 여러 개는 쉼표로 구분",
-                help="Google AI Studio API 키를 입력하세요. 한도는 프로젝트·모델별로 적용되며 같은 프로젝트의 키를 추가해도 늘어나지 않습니다.",
-                key="input_gemini_api_key"
-            )
-            st.session_state["gemini_api_key"] = g_key
+            g_key, parsed_keys = render_key_inputs()
 
             def _format_model_name(m: str) -> str:
                 labels = {
@@ -1123,16 +1131,8 @@ def main():
             if g_model == "gemini-2.5-pro-preview-tts":
                 st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
-            try:
-                parsed_keys = parse_gemini_keys(g_key)
-            except GeminiKeyInputError as exc:
-                parsed_keys = []
-                st.warning(str(exc))
             if parsed_keys:
-                st.info(f"Gemini API 키 {len(parsed_keys)}개 입력됨 · 연결은 분석·생성 요청 때 확인합니다.")
-                if ",".join(parsed_keys) != g_key.strip():
-                    st.caption("붙여넣은 키의 바깥 따옴표·키 이름·구분문자를 정리했습니다.")
-                st.caption("한도 초과 시 완료 파일을 유지하고 멈춥니다. 선택한 모델·성우를 유지하며, 35초씩 자동 대기하거나 다른 모델로 바꾸지 않습니다.")
+                st.caption("일시적인 요청 제한은 서버가 안내한 시간 후 재시도합니다. 일일 한도·권한 오류는 키 번호와 함께 표시하며 완료 음성은 보관합니다.")
             elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
                 st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")
@@ -2184,7 +2184,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
-        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Gemini 최대 2개·Cosy 최대 10개 안에서 하나가 끝나면 다음 대사를 바로 시작하고, 모든 대사가 완료되면 번호순으로 MP3 하나로 합칩니다. Cosy 연속 대기열은 코랩 v2.9.13부터 적용됩니다.")
+        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. 하나가 끝나면 다음 대사를 바로 시작하고, 모든 대사가 완료되면 번호순으로 MP3 하나로 합칩니다. Gemini는 최대 2개이며, Cosy v2.9.14는 실제 생성 속도를 비교해 최대 10개 안에서 동시 수를 선택합니다.")
         
         total_segs = len(st.session_state["parsed_segments"])
         

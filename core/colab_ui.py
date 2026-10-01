@@ -45,15 +45,15 @@ def render_connections(mode):
                 st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.13 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.13.ipynb"))
-        st.caption("v2.9.13은 최대 10개 안에서 빈자리가 생기면 다음 대사를 바로 시작합니다. Gemini와 각각 생성한 결과는 모두 완료된 뒤 번호순으로 합칩니다.")
-        recovery = ROOT / "CosyVoice_Recovery_v2.9.13.py"
+        notebooks.append(("CosyVoice 코랩 v2.9.14 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.14.ipynb"))
+        st.caption("v2.9.14는 실제 대사의 생성 속도를 비교해 동시 수를 자동 선택합니다. 수를 늘려도 빨라지지 않으면 관측상 더 빠른 적은 수로 돌아갑니다.")
+        recovery = ROOT / "CosyVoice_Recovery_v2.9.14.py"
         if recovery.is_file():
-            with st.expander("CosyVoice v2.9.13 연속 생성 업데이트 · 기존 코랩에서 실행"):
+            with st.expander("CosyVoice v2.9.14 속도 자동 조절 업데이트 · 기존 코랩에서 실행"):
                 st.write("음성 생성이 멈췄거나 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
                 st.caption("실행 중인 기존 설치·모델을 재사용합니다. 마지막에 나온 새 연결 주소를 아래 칸에 넣어주세요.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
-        st.caption("32개 묶음 사이의 대기를 줄이고 연속으로 보충하려면 코랩 v2.9.13으로 업데이트해주세요. 목소리·FP32 설정을 유지하며, 실제 동시 수는 메모리 여유에 따라 정합니다.")
+        st.caption("첫 대사를 포함한 모든 완료 음성을 저장하면서 속도를 비교합니다. 빈자리는 계속 보충하고, 양쪽 엔진이 끝나면 번호순으로 합칩니다. 목소리·FP32 설정을 유지하며 메모리 여유도 확인합니다.")
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")
     for label, filename, download_name in notebooks:
         revision = COSY_NOTEBOOK_RELEASE_REVISION if filename == "CosyVoice_Colab_API.ipynb" else NOTEBOOK_RELEASE_REVISION

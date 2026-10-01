@@ -63,6 +63,11 @@ class AudioProcessor:
         if not segment_info_list:
             raise ValueError("병합할 오디오 세그먼트가 없습니다.")
 
+        indices = [segment.get("index") for segment in segment_info_list]
+        if any(type(index) is not int or index <= 0 for index in indices) or len(set(indices)) != len(indices):
+            raise ValueError("대사 번호가 중복되거나 올바르지 않아 병합하지 않았습니다.")
+        segment_info_list = sorted(segment_info_list, key=lambda segment: segment["index"])
+
         out_dir = os.path.dirname(os.path.abspath(output_file))
         os.makedirs(out_dir, exist_ok=True)
 

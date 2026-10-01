@@ -5,9 +5,12 @@ import re
 import time
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import edge_tts
+
+_GEMINI_KEY_LOCK = threading.Lock()
 
 def clean_spoken_text(text: str) -> str:
     """
@@ -652,7 +655,7 @@ class TTSEngine:
         return output_file
 
     @classmethod
-    def generate_gemini_speech(cls, text, output_file, voice_config, *, metrics=None, progress=None):
+    def generate_gemini_speech(cls, text, output_file, voice_config, *, metrics=None, progress=None, cancel=None):
         from .gemini_client import synthesize
         text = clean_spoken_text(text)
         if not text:
@@ -663,9 +666,11 @@ class TTSEngine:
             raise ValueError("Gemini API 키를 입력해주세요.")
         if voice_config.voice not in GEMINI_VOICES:
             raise ValueError("선택한 Gemini 성우를 다시 확인해주세요.")
-        cls._gemini_key_counter = (cls._gemini_key_counter + 1) % len(keys)
+        with _GEMINI_KEY_LOCK:
+            cls._gemini_key_counter = (cls._gemini_key_counter + 1) % len(keys)
+            selected_key = keys[cls._gemini_key_counter]
         return synthesize(build_gemini_tts_prompt(text, voice_config.style, voice_config.voice),
-                          output_file, api_key=keys[cls._gemini_key_counter],
+                          output_file, api_key=selected_key, pacing_group=tuple(sorted(keys)), cancel=cancel,
                           model=(voice_config.model or "gemini-3.1-flash-tts-preview").strip(),
                           voice=voice_config.voice, metrics=metrics, progress=progress)
 
@@ -846,19 +851,23 @@ class TTSEngine:
     ) -> str:
         """CosyVoice 2 standalone Colab API; errors do not trigger duplicate GPU jobs."""
         from .cosy_colab_client import synthesize
+        return synthesize(output_file=output_file, metrics=metrics,
+                          **cls.cosyvoice_request(text, voice_config))
+
+    @staticmethod
+    def cosyvoice_request(text, voice_config):
+        """Use identical text, conditioning and speed in single and batch paths."""
         text = clean_spoken_text(text)
         ref_path = getattr(voice_config, "ref_audio_path", "")
         prompt = (getattr(voice_config, "prompt_text", "") or "").strip()
         if not prompt and ref_path and os.path.isfile(ref_path + ".txt"):
             with open(ref_path + ".txt", encoding="utf-8") as saved:
                 prompt = saved.read().strip()
-        return synthesize(
-            getattr(voice_config, "cosyvoice_url", ""), text, ref_path, prompt,
-            float(getattr(voice_config, "speed_factor", 1.0)), output_file,
-            style_instruction=(VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
-                               if voice_config.style != "🎤 기본" else ""),
-            metrics=metrics,
-        )
+        return dict(url=getattr(voice_config, "cosyvoice_url", ""), text=text,
+                    ref_path=ref_path, prompt_text=prompt,
+                    speed=float(getattr(voice_config, "speed_factor", 1.0)),
+                    style_instruction=(VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+                                       if voice_config.style != "🎤 기본" else ""))
 
 
     @classmethod

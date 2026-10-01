@@ -6,6 +6,7 @@
 --serve: internal worker, launched with the isolated Python interpreter.
 """
 import argparse
+import base64
 from collections import OrderedDict
 import hashlib
 import io
@@ -14,11 +15,13 @@ import logging
 import os
 from pathlib import Path
 import re
+import queue
 import secrets
 import signal
 import shutil
 import socket
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -39,7 +42,8 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.9'
+SERVER_VERSION = '2.9.10'
+BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
@@ -584,6 +588,161 @@ def start_server():
             worker.terminate()
 
 
+def install_batch_routes(app, synthesize, authorize):
+    """Keep one model producer busy while a bounded queue streams prior audio."""
+    from fastapi import Body, File, Form, HTTPException, UploadFile
+    from fastapi.responses import StreamingResponse
+
+    gate = threading.Lock()
+    registry_lock = threading.Lock()
+    active = {}
+
+    @app.post('/v1/{token}/synthesize')
+    def single(token: str, text: str = Form(...), prompt_text: str = Form(''),
+               speed: float = Form(1.0), reference: UploadFile | None = File(None),
+               style_instruction: str = Form(''), reference_id: str = Form(''),
+               audio_format: str = Form('wav')):
+        authorize(token)
+        if not gate.acquire(blocking=False):
+            raise HTTPException(409, '전체 음성을 생성 중입니다. 완료하거나 멈춘 뒤 실행해주세요.')
+        try:
+            return synthesize(token, text, prompt_text, speed, reference,
+                              style_instruction, reference_id, audio_format)
+        finally:
+            gate.release()
+
+    @app.post('/v1/{token}/batch/{job_id}/stop')
+    def stop(token: str, job_id: str):
+        authorize(token)
+        with registry_lock:
+            event = active.get(job_id)
+            if event is not None:
+                event.set()
+        return {'stopping': event is not None}
+
+    @app.post('/v1/{token}/synthesize_batch')
+    def batch(token: str, payload: dict = Body(...)):
+        authorize(token)
+        job_id = payload.get('job_id', '')
+        items, references = payload.get('items'), payload.get('references')
+        if (not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id)
+                or not isinstance(items, list) or not 1 <= len(items) <= 32
+                or not isinstance(references, dict) or not 1 <= len(references) <= 16):
+            raise HTTPException(422, '일괄 생성 요청 형식이 올바르지 않습니다.')
+        decoded, indices, total_bytes = {}, set(), 0
+        try:
+            for key, data in references.items():
+                if not isinstance(data, str) or len(data) > 14 * 1024 * 1024:
+                    raise ValueError('참조 음성 크기 초과')
+                raw = base64.b64decode(data, validate=True)
+                total_bytes += len(raw)
+                if not raw or len(raw) > 10 * 1024 * 1024 or total_bytes > 32 * 1024 * 1024:
+                    raise ValueError('참조 음성 크기 초과')
+                decoded[key] = raw
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError('대사 형식 오류')
+                index = item.get('index')
+                if type(index) is not int or index <= 0 or index in indices:
+                    raise ValueError('대사 번호가 중복되거나 올바르지 않습니다.')
+                indices.add(index)
+                if item.get('reference') not in decoded:
+                    raise ValueError('참조 음성이 없습니다.')
+                if not isinstance(item.get('text'), str) or not 1 <= len(item['text']) <= 2000:
+                    raise ValueError('대사는 1~2,000자여야 합니다.')
+                if not isinstance(item.get('prompt_text'), str) or not 1 <= len(item['prompt_text']) <= 1000:
+                    raise ValueError('참조 대사를 입력해주세요.')
+                style = item.get('style_instruction', '')
+                if not isinstance(style, str) or len(style) > 800 or '<|' in style or '|>' in style:
+                    raise ValueError('스타일 지시문 형식 오류')
+                if not 0.5 <= float(item.get('speed', 1.0)) <= 2.0:
+                    raise ValueError('말하기 속도 범위 오류')
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not gate.acquire(blocking=False):
+            raise HTTPException(409, '다른 음성을 생성 중입니다. 완료하거나 멈춘 뒤 실행해주세요.')
+        cancel, disconnected = threading.Event(), threading.Event()
+        events = queue.Queue(maxsize=2)
+        with registry_lock:
+            active[job_id] = cancel
+
+        def put(header, body=b''):
+            blocked_at = time.monotonic()
+            while not disconnected.is_set():
+                try:
+                    events.put((header, body), timeout=0.2)
+                    return True
+                except queue.Full:
+                    # Also free the producer if a connection dies before its
+                    # response iterator gets a chance to run its finally block.
+                    if time.monotonic() - blocked_at > 90:
+                        disconnected.set()
+                        cancel.set()
+            return False
+
+        def produce():
+            count = 0
+            index = None
+            try:
+                for item in items:
+                    if cancel.is_set() or disconnected.is_set():
+                        break
+                    index = item['index']
+                    if not put({'type': 'started', 'index': index}):
+                        break
+                    if cancel.is_set() or disconnected.is_set():
+                        break
+                    started = time.monotonic()
+                    reference = UploadFile(filename='reference.wav', file=io.BytesIO(decoded[item['reference']]))
+                    response = synthesize(token, item['text'], item['prompt_text'], float(item.get('speed', 1.0)),
+                                          reference, item.get('style_instruction', ''), '', 'flac')
+                    if not put({'type': 'audio', 'index': index, 'headers': dict(response.headers),
+                                'server_seconds': time.monotonic() - started}, bytes(response.body)):
+                        break
+                    count += 1
+                put({'type': 'end', 'done': count, 'paused': cancel.is_set()})
+            except Exception as exc:
+                detail = getattr(exc, 'detail', str(exc))
+                if isinstance(detail, dict):
+                    detail = detail.get('message', str(detail))
+                put({'type': 'error', 'index': index, 'message': str(detail)[:1200],
+                     'status': getattr(exc, 'status_code', 500)})
+            finally:
+                with registry_lock:
+                    active.pop(job_id, None)
+                gate.release()
+
+        def frames():
+            try:
+                while True:
+                    try:
+                        header, body = events.get(timeout=1.0)
+                    except queue.Empty:
+                        header, body = {'type': 'heartbeat'}, b''
+                    header['size'] = len(body)
+                    metadata = json.dumps(header, ensure_ascii=False).encode('utf-8')
+                    yield struct.pack('!I', len(metadata)) + metadata
+                    if body:
+                        yield body
+                    if header['type'] in ('end', 'error'):
+                        return
+            finally:
+                disconnected.set()
+                cancel.set()
+
+        worker = threading.Thread(target=produce, name='cosy-batch-' + job_id[:8], daemon=True)
+        try:
+            worker.start()
+        except BaseException:
+            with registry_lock:
+                active.pop(job_id, None)
+            gate.release()
+            raise
+        return StreamingResponse(frames(), media_type='application/x-voice-studio-batch',
+                                 headers={'X-Batch-Protocol': '1', 'Cache-Control': 'no-store',
+                                          'X-Accel-Buffering': 'no'})
+
+
 def serve(port):
     import faulthandler
     # A live process is not proof of progress. Expose where startup is waiting.
@@ -638,9 +797,8 @@ def serve(port):
                 'gpu_name': gpu_name, 'acceleration': acceleration,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
-                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY]}
+                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY]}
 
-    @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile | None = File(None),
                    style_instruction: str = Form(''), reference_id: str = Form(''),
@@ -894,6 +1052,7 @@ def serve(port):
                 gpu_lock.close()
             model_lock.release()
 
+    install_batch_routes(app, synthesize, authorize)
     uvicorn.run(app, host='127.0.0.1', port=port, access_log=False)
 
 

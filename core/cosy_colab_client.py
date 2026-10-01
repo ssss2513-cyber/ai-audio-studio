@@ -215,37 +215,11 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             response.close()
     request_seconds = time.monotonic() - request_started
     decode_started = time.monotonic()
-    wire_format = "flac" if body.startswith(b"fLaC") else "wav"
-    wav_bytes = body
-    if wire_format == "flac":
-        import soundfile as sf
-        try:
-            with sf.SoundFile(io.BytesIO(body)) as source:
-                if (source.samplerate != 24000 or source.channels != 1 or source.subtype != "PCM_16"
-                        or source.frames <= 0 or source.frames * 2 > 64 * 1024 * 1024):
-                    raise ValueError("unexpected FLAC format")
-                pcm = source.read(dtype="int16")
-                if len(pcm) != source.frames:
-                    raise ValueError("truncated FLAC")
-            output = io.BytesIO()
-            sf.write(output, pcm, 24000, format="WAV", subtype="PCM_16")
-            wav_bytes = output.getvalue()
-        except (RuntimeError, ValueError) as exc:
-            transport.invalidate()
-            raise RuntimeError("코랩의 무손실 음성 전송을 읽지 못했습니다. 음성을 저장하지 않았습니다.") from exc
     try:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-            if wav.getnframes() <= 0 or wav.getframerate() <= 0:
-                raise ValueError("empty WAV")
-            if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 24000:
-                raise ValueError("unexpected CosyVoice 2 audio format")
-            expected_bytes = wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
-            audio_seconds = wav.getnframes() / wav.getframerate()
-            if len(wav.readframes(wav.getnframes())) != expected_bytes:
-                raise ValueError("truncated WAV")
-    except (wave.Error, EOFError, ValueError) as exc:
+        wav_bytes, audio_seconds, wire_format = decode_audio_bytes(body)
+    except RuntimeError:
         transport.invalidate()
-        raise RuntimeError("서버가 유효한 WAV 음성을 보내지 않았습니다. 코랩 오류를 확인해주세요.") from exc
+        raise
     saved_id = response.headers.get("X-Reference-ID", "")
     if supports_ids and len(saved_id) == 71 and saved_id.startswith("studio_") and all(c in "0123456789abcdef" for c in saved_id[7:]):
         transport.reference_ids[identity] = saved_id
@@ -309,3 +283,44 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         if isinstance(acceleration, dict):
             metrics["acceleration"] = str(acceleration.get("label", ""))[:200]
     return str(output_file)
+
+
+def decode_audio_bytes(body):
+    """Decode and validate the unchanged 24 kHz PCM16 output for both routes."""
+    wire_format = "flac" if body.startswith(b"fLaC") else "wav"
+    wav_bytes = body
+    if wire_format == "flac":
+        import soundfile as sf
+        try:
+            with sf.SoundFile(io.BytesIO(body)) as source:
+                if (source.samplerate != 24000 or source.channels != 1 or source.subtype != "PCM_16"
+                        or source.frames <= 0 or source.frames * 2 > 64 * 1024 * 1024):
+                    raise ValueError("unexpected FLAC format")
+                pcm = source.read(dtype="int16")
+                if len(pcm) != source.frames:
+                    raise ValueError("truncated FLAC")
+            output = io.BytesIO()
+            sf.write(output, pcm, 24000, format="WAV", subtype="PCM_16")
+            wav_bytes = output.getvalue()
+        except (RuntimeError, ValueError) as exc:
+            raise RuntimeError("코랩의 무손실 음성 전송을 읽지 못했습니다. 음성을 저장하지 않았습니다.") from exc
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            if wav.getnframes() <= 0 or wav.getframerate() <= 0:
+                raise ValueError("empty WAV")
+            if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 24000:
+                raise ValueError("unexpected CosyVoice 2 audio format")
+            expected_bytes = wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
+            audio_seconds = wav.getnframes() / wav.getframerate()
+            if len(wav.readframes(wav.getnframes())) != expected_bytes:
+                raise ValueError("truncated WAV")
+    except (wave.Error, EOFError, ValueError) as exc:
+        raise RuntimeError("서버가 유효한 WAV 음성을 보내지 않았습니다. 코랩 오류를 확인해주세요.") from exc
+    return wav_bytes, audio_seconds, wire_format
+
+
+def close_worker_connections():
+    connections = getattr(_CLIENTS, "connections", {})
+    for transport in connections.values():
+        transport.session.close()
+    connections.clear()

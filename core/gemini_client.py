@@ -1,5 +1,7 @@
 """One selected-model Gemini TTS request, with visible timing and no hidden retries."""
 from collections import OrderedDict
+from concurrent.futures import CancelledError
+import hashlib
 import io
 import math
 import os
@@ -13,6 +15,39 @@ import time
 import wave
 
 _CLIENTS = threading.local()
+_PACERS = {}
+_PACERS_LOCK = threading.Lock()
+
+
+class RequestPacer:
+    """Share request starts across workers; waiting for audio can overlap."""
+    def __init__(self, interval=4.2):
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.last_started = time.monotonic() - interval
+
+    def wait(self, cancel=None):
+        started = time.monotonic()
+        with self.lock:
+            while True:
+                if cancel and cancel():
+                    raise CancelledError()
+                remaining = self.interval - (time.monotonic() - self.last_started)
+                if remaining <= 0:
+                    self.last_started = time.monotonic()
+                    return time.monotonic() - started
+                time.sleep(min(remaining, 0.1))
+
+
+def _pacer(keys):
+    # A key set shares one pacing budget; adding keys does not raise that budget.
+    identity = hashlib.sha256(str(keys).encode()).hexdigest()
+    with _PACERS_LOCK:
+        now = time.monotonic()
+        for old, pacer in list(_PACERS.items()):
+            if now - pacer.last_started > 600 and not pacer.lock.locked():
+                _PACERS.pop(old, None)
+        return _PACERS.setdefault(identity, RequestPacer())
 
 
 def close_worker_clients():
@@ -72,7 +107,8 @@ def _request_error(exc):
                         + "). 중복 생성은 하지 않았습니다. 연결 상태를 확인한 뒤 이어서 생성해주세요.")
 
 
-def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, progress=None):
+def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, progress=None,
+               pacing_group=None, cancel=None):
     """Preserve model, voice, prompt and native PCM. Reuse one client per worker."""
     from google.genai import types
     started = time.monotonic()
@@ -83,15 +119,9 @@ def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, prog
         raise ValueError("출력 파일은 WAV 또는 MP3여야 합니다.")
     target.parent.mkdir(parents=True, exist_ok=True)
     transport = _transport(api_key)
-    # Count the previous API call's duration toward the interval; a 5-second
-    # successful request no longer incurs another 4.2-second sleep afterwards.
-    wait = max(0.0, 4.2 - (time.monotonic() - transport["last_started"]))
-    if wait:
-        if progress:
-            progress("요청 간격 조절", dict(metrics, pacing_seconds=wait))
-        pacing_started = time.monotonic()
-        time.sleep(wait)
-        metrics["pacing_seconds"] = time.monotonic() - pacing_started
+    if progress:
+        progress("요청 간격 조절", metrics)
+    metrics["pacing_seconds"] = _pacer(pacing_group or api_key).wait(cancel)
     metrics["attempts"] = 1
     if progress:
         progress("Gemini 응답 대기", metrics)

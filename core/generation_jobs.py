@@ -166,6 +166,10 @@ def start_job(work_dir, items, *, force_overwrite=False, pause_ms=500, include_s
         items = deepcopy(items)
         if not items:
             raise ValueError("생성할 대사가 없습니다.")
+        indices = [item.index for item in items]
+        if any(type(index) is not int or index <= 0 for index in indices) or len(set(indices)) != len(indices):
+            raise ValueError("대사 번호가 중복되거나 올바르지 않습니다.")
+        items.sort(key=lambda item: item.index)
         # On the shared Linux server, a source reload must not launch a second
         # worker over the first module's still-running thread.
         ownership = (Path(work_dir) / ".generation.lock").open("a+b")
@@ -223,7 +227,12 @@ def _record_performance(state, item, metrics):
     state["recent_seconds"] = (state["recent_seconds"] + [metrics["total_seconds"]])[-10:]
     average = sum(state["recent_seconds"]) / len(state["recent_seconds"])
     state["average_seconds"] = average
-    state["remaining_estimate_seconds"] = average * max(0, state["pending_total"] - state["generated"])
+    elapsed = max(0.0, time.time() - state["started"])
+    completions = (state.get("completion_times", [0.0]) + [elapsed])[-11:]
+    state["completion_times"] = completions
+    throughput = (completions[-1] - completions[0]) / max(1, len(completions) - 1)
+    state["throughput_seconds"] = throughput
+    state["remaining_estimate_seconds"] = throughput * max(0, state["pending_total"] - state["generated"])
     state["latest_metrics"] = dict(metrics, index=item.index, speaker=item.speaker)
     if item.config.engine == "cosyvoice":
         totals = state["performance"]
@@ -239,63 +248,12 @@ def _record_performance(state, item, metrics):
 def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_speaker, ownership):
     pause_path = Path(work_dir) / ".generation.pause"
     try:
-        for item in items:
-            if pause.is_set() or pause_path.exists():
-                state.update(status="paused", message="요청에 따라 생성을 멈췄습니다. 완료 파일은 보관됩니다.")
-                return
-            state.update(current_index=item.index, current_speaker=item.speaker,
-                         message=f"{item.index}번 대사 생성 중 · {item.speaker}",
-                         stage_started=time.time(), current_metrics={})
-            _save(work_dir, state)
-            # Keep CosyVoice/Gemini native PCM through generation and merge. Only the
-            # final download is MP3: no per-line encode or repeated lossy encode.
-            target = Path(item.file_path)
-            if item.config.engine in ("cosyvoice", "gemini"):
-                target = target.with_suffix(".wav")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            cached = cached_audio_path(item) if not force_overwrite else None
-            metrics = None
-            if cached:
-                target = Path(cached)
-                state["reused"] += 1
-            else:
-                # Every engine writes to a temporary audio file. A failure cannot
-                # destroy a previously completed output, even in overwrite mode.
-                temporary = target.with_name("." + target.stem + "." + state["id"] + ".part" + target.suffix)
-                generation_started = time.monotonic()
-                metrics = {"engine": item.config.engine}
-                try:
-                    if item.config.engine == "cosyvoice":
-                        TTSEngine.generate_cosyvoice_speech(item.text, str(temporary), item.config, metrics=metrics)
-                    elif item.config.engine == "gemini":
-                        def gemini_progress(phase, details):
-                            state.update(message=f"{item.index}번 대사 · {phase}",
-                                         current_metrics=dict(details, index=item.index, speaker=item.speaker),
-                                         stage_started=time.time())
-                            _save(work_dir, state)
-                        TTSEngine.generate_gemini_speech(item.text, str(temporary), item.config,
-                                                        metrics=metrics, progress=gemini_progress)
-                    else:
-                        TTSEngine.generate_speech(item.text, str(temporary), item.config)
-                    if not valid_audio(temporary):
-                        raise RuntimeError("저장된 음성 파일을 읽을 수 없습니다. 해당 대사에서 멈췄습니다.")
-                    os.replace(temporary, target)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                metrics["total_seconds"] = time.monotonic() - generation_started
-                _record_performance(state, item, metrics)
-            state["completed"].append({
-                "index": item.index, "speaker": item.speaker,
-                "text": item.text, "file_path": str(target),
-                "metrics": metrics,
-            })
-            state["done"] = len(state["completed"])
-            state["progress"] = 0.9 * state["done"] / state["total"]
-            state["message"] = f"대사 {state['done']}/{state['total']}개 저장 완료"
-            _save(work_dir, state)
+        from .generation_pipeline import run_generation
+        run_generation(work_dir, items, state, pause, force_overwrite, _save, _record_performance)
 
         if pause.is_set() or pause_path.exists():
-            state.update(status="paused", message="음성을 모두 저장했습니다. 이어서 생성하면 병합부터 진행합니다.")
+            state.update(status="paused", message=("음성을 모두 저장했습니다. 이어서 생성하면 병합부터 진행합니다."
+                         if state['done'] == state['total'] else "진행 중이던 대사까지 저장하고 멈췄습니다. 완료 파일은 유지됩니다."))
             return
         # Result files are separate from earlier successful bundles. Publishing
         # a result requires merging, subtitles and the final bundle to finish.

@@ -1,7 +1,36 @@
-AI Voice Studio — 개인 코랩 이용 안내
+AI Voice Studio — Chirp 3 HD / 개인 코랩 이용 안내 (v2.9.34)
 ====================================
-이 사이트는 이용자마다 본인 구글 코랩을 연결하는 방식입니다.
 이용자는 프로그램 ZIP이나 Python을 설치할 필요가 없습니다.
+
+Google Chirp 3 HD 사용하기 — 코랩 불필요
+1. https://voice-studio.streamlit.app/ 에 접속합니다.
+2. Google Cloud 프로젝트에 결제 계정을 연결하고 Cloud Text-to-Speech API를 사용 설정합니다.
+   https://console.cloud.google.com/apis/library/texttospeech.googleapis.com
+3. 같은 프로젝트의 사용자 인증 정보 → 사용자 인증 정보 만들기 → API 키에서 키를 발급합니다.
+   API 제한에는 Cloud Text-to-Speech API를 지정합니다.
+   서버가 요청하므로 웹사이트/HTTP 리퍼러 제한 키는 사용하지 않습니다.
+   https://console.cloud.google.com/apis/credentials
+4. 사이트 왼쪽 ‘Google Chirp 3 HD 설정’의 API 키 칸에 입력합니다.
+5. 대본을 넣고 화자를 분석합니다. 기존 대본은 ‘전체 화자를 Google Chirp 3 HD로 변경’을 누릅니다.
+6. 각 화자의 남성/여성, 보이스, 읽기 속도를 확인하고 전체 생성 버튼을 누릅니다.
+7. 최대 4개를 연속 생성하며, 모두 완료되면 대사 번호순으로 MP3 한 파일과 자막을 만듭니다.
+
+- Gemini API 키나 코랩 서버 주소를 등록할 필요가 없습니다.
+- 월 100만 자 무료 한도를 초과하면 Google Cloud에서 요금이 부과됩니다.
+- 미리듣기·재생성·다른 프로그램 사용량도 합산됩니다. 사이트는 Google 전체 월 사용량을 조회하지 않습니다.
+- API 키는 접속 세션에만 보관하며 다른 방문자에게 공유하거나 작업 파일에 저장하지 않습니다.
+- 생성 중 화면 조작으로 같은 대사를 자동 재요청하지 않습니다. 완료 파일을 재사용해 이어서 생성할 수 있습니다.
+- 큰 대사는 한국어 UTF-8 길이에 맞춰 나누고 WAV 원음을 순서대로 연결합니다.
+- Gemini의 감정·나이 스타일 지시문은 Chirp에 전달하지 않습니다. 선택한 보이스와 속도를 적용합니다.
+- API 사용 설정/키/결제 권한 오류는 해당 설정을 고친 뒤 이어서 생성하세요.
+- Chirp 연결은 v2.9.34에서 추가했습니다. 요청에 따라 실행 테스트와 실제 음성 생성은 수행하지 않았습니다.
+
+공식 안내
+https://cloud.google.com/text-to-speech/pricing
+https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd
+
+CosyVoice / GPT-SoVITS — 개인 코랩 이용 안내
+아래 목소리 복제 엔진은 이용자마다 본인 구글 코랩을 연결합니다.
 
 1. 공유 사이트에 접속합니다.
 2. 왼쪽에서 GPT-SoVITS v4, CosyVoice 2 중 사용할 엔진을 선택합니다.

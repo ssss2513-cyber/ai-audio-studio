@@ -129,6 +129,8 @@ def recommend_style(speaker, segments, profile=""):
 
 
 def style_note(engine, style, styles):
+    if engine == 'chirp':
+        return 'Chirp 3 HD는 선택한 목소리와 읽기 속도를 사용합니다. Gemini의 감정·연령 지시문은 보내지 않습니다.'
     if engine == 'gpt-sovits':
         return ('이 선택은 참조 음성을 고르는 가이드입니다. GPT-SoVITS는 스타일 이름으로 나이·감정을 바꾸지 않습니다. '
                 '시니어 역할은 해당 연령과 말투로 녹음된 참조 음성을 등록해주세요.')

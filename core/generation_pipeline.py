@@ -11,7 +11,7 @@ from .tts_engine import TTSEngine
 
 def _target(item):
     target = Path(item.file_path)
-    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'gemini') else target
+    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'gemini', 'chirp') else target
 
 
 def _generate_one(item, job_id, stopped, emit):
@@ -25,11 +25,13 @@ def _generate_one(item, job_id, stopped, emit):
     started = time.monotonic()
     metrics = {'engine': item.config.engine}
     try:
-        if item.config.engine == 'gemini':
+        if item.config.engine in ('gemini', 'chirp'):
             def progress(phase, details):
                 emit('phase', item, dict(details, phase=phase))
-            TTSEngine.generate_gemini_speech(item.text, str(temporary), item.config,
-                                            metrics=metrics, progress=progress, cancel=stopped)
+            generate = (TTSEngine.generate_chirp_speech if item.config.engine == 'chirp'
+                        else TTSEngine.generate_gemini_speech)
+            generate(item.text, str(temporary), item.config,
+                     metrics=metrics, progress=progress, cancel=stopped)
         elif item.config.engine == 'cosyvoice':
             TTSEngine.generate_cosyvoice_speech(item.text, str(temporary), item.config, metrics=metrics)
         else:
@@ -51,6 +53,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     from .cosy_batch_client import synthesize_batch, queue_limits
     from .cosy_colab_client import close_worker_connections
     from .gemini_client import close_worker_clients
+    from .chirp_client import MAX_WORKERS as CHIRP_WORKERS, close_worker_client as close_chirp_client
 
     events = queue.Queue()
     pause_path = Path(work_dir) / '.generation.pause'
@@ -139,18 +142,21 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     update_progress()
     save(work_dir, state)
     gemini = queue.Queue()
+    chirp = queue.Queue()
     serial = []
     for item in pending:
         if item.config.engine == 'gemini':
             gemini.put(item)
+        elif item.config.engine == 'chirp':
+            chirp.put(item)
         else:
             serial.append(item)
 
-    def gemini_lane():
-        cancel = lambda: engine_stopped('gemini')
+    def cloud_lane(engine, pending_queue):
+        cancel = lambda: engine_stopped(engine)
         while not cancel():
             try:
-                item = gemini.get_nowait()
+                item = pending_queue.get_nowait()
             except queue.Empty:
                 return
             try:
@@ -218,11 +224,14 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
         finally:
             try:
                 close_worker_clients()
+                close_chirp_client()
                 close_worker_connections()
             finally:
                 emit('worker_done', None, None)
 
-    lanes = [gemini_lane] * min(2, gemini.qsize()) + ([serial_lane] if serial else [])
+    lanes = ([lambda: cloud_lane('gemini', gemini)] * min(2, gemini.qsize())
+             + [lambda: cloud_lane('chirp', chirp)] * min(CHIRP_WORKERS, chirp.qsize())
+             + ([serial_lane] if serial else []))
     try:
         for number, lane in enumerate(lanes):
             thread = threading.Thread(target=worker, args=(lane,),

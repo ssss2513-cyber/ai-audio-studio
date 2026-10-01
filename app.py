@@ -30,6 +30,8 @@ from core.voice_recommendations import (
 from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
 from core.gemini_key_ui import render_key_inputs
 from core.gemini_recovery_ui import render_gemini_recovery
+from core.chirp_client import CHIRP_VOICES, validate_key as validate_chirp_key
+from core.chirp_ui import render_chirp_settings, render_chirp_voice
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -40,10 +42,10 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.33 · Cosy 최대 4개 연속 생성 · Gemini 7초"
+APP_VERSION = "v2.9.34 · Google Chirp 3 HD 추가 · 최대 4개 연속 생성"
 
 st.set_page_config(
-    page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
+    page_title=f"화자별 자동 TTS 생성기 (Chirp 3 HD · Gemini · AI 목소리 복제) - {APP_VERSION}",
     page_icon="🎙️",
     layout="wide"
 )
@@ -209,7 +211,8 @@ def gemini_preset(speaker, current=None):
     current = current or {}
     preset = GEMINI_CHARACTER_PRESETS.get(speaker, {})
     catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
-               "edge-tts": KOREAN_EDGE_VOICES}.get(current.get("engine"), {})
+               "edge-tts": KOREAN_EDGE_VOICES,
+               "chirp": {name: {"gender": gender} for name, gender in CHIRP_VOICES.items()}}.get(current.get("engine"), {})
     gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
               or speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", "")))
     voice = current.get("voice") if current.get("engine") == "gemini" else preset.get("voice")
@@ -217,6 +220,20 @@ def gemini_preset(speaker, current=None):
         voice = "Charon" if gender == "남성" else "Kore"
     return {"engine": "gemini", "voice": voice, "gender": GEMINI_VOICES[voice]["gender"],
             "style": current.get("style", preset.get("style", "🎤 기본")), "speed": 1.0}
+
+
+def chirp_preset(speaker, current=None):
+    current = current or {}
+    catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
+               "edge-tts": KOREAN_EDGE_VOICES}.get(current.get("engine"), {})
+    gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
+              or speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", "")))
+    voice = (current.get("voice") if current.get("engine") in ("gemini", "chirp")
+             else GEMINI_CHARACTER_PRESETS.get(speaker, {}).get("voice"))
+    if voice not in CHIRP_VOICES or (gender and CHIRP_VOICES[voice] != gender):
+        voice = "Charon" if gender == "남성" else "Kore"
+    return {"engine": "chirp", "voice": voice, "gender": CHIRP_VOICES[voice],
+            "style": "🎤 기본", "speed": current.get("speed", 1.0) if current.get("engine") == "chirp" else 1.0}
 
 
 def change_gemini_gender(speaker):
@@ -292,6 +309,8 @@ def apply_preset_to_speakers(speakers, engine_type):
                 new_settings[spk] = {"engine": "supertonic", "voice": SUPERTONIC_VOICE_KEYS[v_idx], "style": def_style, "speed": 1.0}
         elif engine_type == "gemini":
             new_settings[spk] = gemini_preset(spk, st.session_state.get("voice_settings", {}).get(spk))
+        elif engine_type == "chirp":
+            new_settings[spk] = chirp_preset(spk, st.session_state.get("voice_settings", {}).get(spk))
         elif engine_type == "cosyvoice":
             new_settings[spk] = {
                 "engine": "cosyvoice",
@@ -335,7 +354,7 @@ def apply_recommended_styles(speaker=None):
     speakers = [speaker] if speaker else st.session_state.get("speakers", [])
     for name in speakers:
         config = st.session_state.get("voice_settings", {}).get(name)
-        if config is None:
+        if config is None or config.get("engine") == "chirp":
             continue
         recommendation = recommend_style(name, st.session_state.get("parsed_segments", []),
                                          st.session_state.get(f"voice_profile_{name}", ""))
@@ -371,6 +390,10 @@ def set_speakers_preset(engine_type: str):
         elif eng == "gemini":
             set_state_safe(f"gemini_voice_{spk}", voice)
             set_state_safe(f"gemini_gender_{spk}", GEMINI_VOICES[voice]["gender"])
+        elif eng == "chirp":
+            set_state_safe(f"chirp_voice_{spk}", voice)
+            set_state_safe(f"chirp_gender_{spk}", CHIRP_VOICES[voice])
+            set_state_safe(f"chirp_speed_{spk}", sdata.get("speed", 1.0))
         elif eng == "edge-tts":
             set_state_safe(f"edge_voice_{spk}", voice)
         elif eng == "gpt-sovits":
@@ -397,8 +420,8 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
         if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920", "ordered_independent_v2921"):
-            st.caption("Gemini 최대 2개 · Cosy 현재 동시 수는 아래에 표시됩니다. 각 엔진은 빈자리에 다음 대사를 넣으며, 모든 대사가 완료되면 번호순으로 한 번 합칩니다.")
-            engine_names = {"gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
+            st.caption("Chirp 최대 4개 · Gemini 최대 2개 · Cosy 현재 동시 수는 아래에 표시됩니다. 각 엔진은 빈자리에 다음 대사를 넣으며, 모든 대사가 완료되면 번호순으로 한 번 합칩니다.")
+            engine_names = {"chirp": "Chirp 3 HD", "gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
             for engine, progress in (job.get("engine_progress") or {}).items():
                 label = engine_names.get(engine, engine)
                 status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단",
@@ -507,6 +530,11 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 else:
                     st.caption("재시도 상세 표시는 코랩 v2.9.7부터 지원됩니다.")
                 st.caption("개별 대사는 WAV 원음으로 저장하고, 마지막에 MP3 한 파일로 변환합니다.")
+        if latest.get("engine") == "chirp":
+            st.caption(f"최근 {latest['index']}번 Chirp: 전체 {latest.get('total_seconds', 0):.1f}초"
+                       f" · Google 생성·수신 {latest.get('request_seconds', 0):.1f}초"
+                       f" · 요청 간격·제한 대기 {latest.get('pacing_seconds', 0):.1f}초"
+                       f" · WAV 저장 {latest.get('postprocess_seconds', 0):.1f}초")
         if latest.get("engine") == "gemini":
             st.caption(f"최근 {latest['index']}번 Gemini: 전체 {latest.get('total_seconds', 0):.1f}초"
                        f" · Google 응답·수신 {latest.get('request_seconds', 0):.1f}초"
@@ -908,7 +936,7 @@ def main():
             생생한 멀티 보이스 낭독 오디오와 싱크 자막(SRT/VTT)을 원클릭으로 제작합니다.
         </p>
         <div class="tag-row">
-            <span class="tag-chip tag-chip-super">👑 Supertonic 3 (로컬 완전 무료)</span>
+            <span class="tag-chip tag-chip-super">☁️ Chirp 3 HD (월 100만 자 무료)</span>
             <span class="tag-chip tag-chip-gemini">⚡ Gemini 3.1 / 3.8 Flash 감정 연기</span>
             <span class="tag-chip tag-chip-sovits">🎙️ AI 제로샷 목소리 복제 (Colab 16GB GPU)</span>
             <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
@@ -956,7 +984,7 @@ def main():
             st.session_state.pop(setting, None)
 
     # Personal connections and optional API keys belong only to this browser session.
-    for setting in ("gemini_api_key", "gpt_sovits_url", "cosyvoice_url"):
+    for setting in ("gemini_api_key", "cloud_tts_api_key", "gpt_sovits_url", "cosyvoice_url"):
         if setting not in st.session_state:
             st.session_state[setting] = ""
 
@@ -972,7 +1000,7 @@ def main():
     if "voice_settings" not in st.session_state:
         st.session_state["voice_settings"] = {}
     if "active_engine_mode" not in st.session_state:
-        st.session_state["active_engine_mode"] = "gpt-sovits"
+        st.session_state["active_engine_mode"] = "chirp"
     if "generation_result" not in st.session_state:
         st.session_state["generation_result"] = None
     if "last_processed_file_id" not in st.session_state:
@@ -1059,7 +1087,8 @@ def main():
             "⚡ Gemini Flash TTS (감정 연기)",
             "🔥 CosyVoice 2 (코랩 목소리 복제)",
             "🎙️ GPT-SoVITS v4 (코랩 목소리 복제)",
-            "🔀 하이브리드 (인물별 선택)"
+            "🔀 하이브리드 (인물별 선택)",
+            "☁️ Google Chirp 3 HD (월 100만 자 무료)"
         ]
         curr_idx = 0
         if st.session_state["active_engine_mode"] == "gemini":
@@ -1070,6 +1099,8 @@ def main():
             curr_idx = 3
         elif st.session_state["active_engine_mode"] == "custom":
             curr_idx = 4
+        elif st.session_state["active_engine_mode"] == "chirp":
+            curr_idx = 5
 
         selected_mode_label = st.radio(
             "🎙️ TTS 기본 엔진 선택",
@@ -1087,6 +1118,8 @@ def main():
             new_mode = "gpt-sovits"
         elif "하이브리드" in selected_mode_label:
             new_mode = "custom"
+        elif "Chirp" in selected_mode_label:
+            new_mode = "chirp"
 
         # 기본 엔진 선택은 기존 화자 설정을 덮어쓰지 않는다.
         # 전체 화자 변경은 화자 설정 영역의 명시적인 일괄 적용 버튼에서만 수행한다.
@@ -1094,6 +1127,10 @@ def main():
             st.session_state["active_engine_mode"] = new_mode
             st.rerun()
         st.caption("기본 엔진을 바꿔도 현재 화자별 설정은 유지됩니다. 모두 바꾸려면 화자 설정 영역의 ‘전체 …’ 버튼을 눌러주세요.")
+
+        chirp_api_key = render_chirp_settings(
+            prominent=st.session_state["active_engine_mode"] in ("chirp", "custom")
+            or any(config.get("engine") == "chirp" for config in st.session_state["voice_settings"].values()))
 
         # 2. Supertonic 옵션 안내
         if st.session_state["active_engine_mode"] == "supertonic":
@@ -1172,6 +1209,7 @@ def main():
     # 메인 상단 엔진 상태 안내 바
     st.info(
         f"💡 **현재 기본 엔진: {selected_mode_label}**\n"
+        "- **Google Chirp 3 HD**: 코랩 없이 한국어 음성 생성 · 월 100만 자까지 무료, 초과분 과금\n"
         "- **Supertonic 3**: 하이브 수퍼톤 한국어 모델로 **완전 무료 + 인터넷/키 없이도 로컬에서 초고속 생성**\n"
         "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **스튜디오 성우급 감정 연기**\n"
         "- **AI 목소리 복제 (CosyVoice / GPT-SoVITS)**: 본인 구글 코랩을 연결하고 참조 음성과 실제 대사를 등록해 사용합니다."
@@ -1313,6 +1351,12 @@ def main():
                     + " · 이미 만든 음성은 다음 생성부터 수정됩니다.")
         
         # 일괄 변경 원클릭 버튼 바
+        if st.button("☁️ 전체 화자를 Google Chirp 3 HD로 변경", use_container_width=True,
+                     disabled=generation_active, key="chirp_cast_all",
+                     help="현재 성별과 호환되는 보이스 이름을 우선 유지합니다. Gemini API 호출 없이 바꾸며, 생성 버튼을 눌러야 음성을 만듭니다."):
+            set_speakers_preset("chirp")
+            st.toast("전체 화자를 Chirp 3 HD로 변경했습니다. 각 화자의 성별과 목소리를 확인해주세요.")
+            st.rerun()
         col_bar1, col_bar2, col_bar3 = st.columns(3)
         with col_bar1:
             if st.button("👑 전체 Supertonic 3 (로컬 무료)", use_container_width=True):
@@ -1418,7 +1462,7 @@ def main():
         st.caption(f"💡 총 **{len(st.session_state['speakers'])}명**의 화자 카드. 각 카드에서 엔진과 음성 스타일(감정/연령/톤)을 자유롭게 설정할 수 있습니다.")
 
         st.button("✨ 화자별 추천 스타일 한 번에 적용", on_click=apply_recommended_styles,
-                  help="대본과 입력한 인물 정보를 바탕으로 스타일만 바꿉니다. GPT-SoVITS에는 참조 음성 선택 가이드로 표시됩니다.")
+                  help="대본과 입력한 인물 정보를 바탕으로 스타일만 바꿉니다. Chirp의 목소리·속도는 유지하며, GPT-SoVITS에는 참조 음성 선택 가이드로 표시됩니다.")
         st.caption("추천은 화자 이름·인물 정보·해당 화자의 대사를 바탕으로 합니다. 나이나 성격이 불분명하면 인물 정보를 직접 적어주세요.")
 
         # 34종 음성 스타일 프리셋 갤러리 (접이식 안내)
@@ -1467,7 +1511,7 @@ def main():
                         </div>""", 
                         unsafe_allow_html=True
                     )
-                    engine_choices = ["supertonic", "gemini", "cosyvoice", "gpt-sovits"]
+                    engine_choices = ["supertonic", "gemini", "cosyvoice", "gpt-sovits", "chirp"]
                     chosen_engine = st.selectbox(
                         "음성 엔진 선택",
                         options=engine_choices,
@@ -1475,6 +1519,7 @@ def main():
                         format_func=lambda e: {
                             "supertonic": "👑 Supertonic 3 (로컬 무료)",
                             "gemini": "⚡ Gemini Flash",
+                            "chirp": "☁️ Google Chirp 3 HD",
                             "cosyvoice": "🔥 CosyVoice 2 (코랩 GPU 복제)",
                             "gpt-sovits": "🎙️ GPT-SoVITS (복제)",
                         }[e],
@@ -1519,6 +1564,11 @@ def main():
                             current_cfg = gemini_preset(spk, current_cfg)
                             set_state_safe(f"gemini_voice_{spk}", current_cfg["voice"])
                             set_state_safe(f"gemini_gender_{spk}", current_cfg["gender"])
+                        elif chosen_engine == "chirp":
+                            current_cfg = chirp_preset(spk, current_cfg)
+                            set_state_safe(f"chirp_voice_{spk}", current_cfg["voice"])
+                            set_state_safe(f"chirp_gender_{spk}", current_cfg["gender"])
+                            set_state_safe(f"chirp_speed_{spk}", current_cfg["speed"])
                         elif chosen_engine == "gpt-sovits":
                             candidate_ref = os.path.join(work_dir, "ref_audios", "나레이션_참고 TTS.wav") if ("나레이션" in spk or "해설" in spk) else ""
                             candidate_prompt = ""
@@ -1569,11 +1619,12 @@ def main():
                         if cast_info["gender_quote"]:
                             st.caption(f"성별 근거: {cast_info['gender_quote']}")
                     recommendation_label = style_display_label(resolve_style(recommendation.style, VOICE_STYLES))
-                    st.markdown(f"**💡 추천: {recommendation_label}**")
-                    st.caption(recommendation.reason)
-                    st.button("추천 참조 스타일 선택" if spk_engine == "gpt-sovits" else "추천 스타일 적용",
-                              key=f"recommend_style_{spk}", on_click=apply_recommended_styles,
-                              args=(spk,), use_container_width=True)
+                    if spk_engine != "chirp":
+                        st.markdown(f"**💡 추천: {recommendation_label}**")
+                        st.caption(recommendation.reason)
+                        st.button("추천 참조 스타일 선택" if spk_engine == "gpt-sovits" else "추천 스타일 적용",
+                                  key=f"recommend_style_{spk}", on_click=apply_recommended_styles,
+                                  args=(spk,), use_container_width=True)
 
                     # 1. Supertonic 3 설정 폼 (로컬 무료)
                     if spk_engine == "supertonic":
@@ -1688,6 +1739,11 @@ def main():
                                             st.caption(f'💬 샘플: "{sample_text}" [{selected_style}]')
                                     except Exception as e:
                                         st.error(f"음성 생성 실패: {str(e)}")
+
+                    elif spk_engine == "chirp":
+                        render_chirp_voice(spk, current_cfg, work_dir=work_dir,
+                                           segments=st.session_state["parsed_segments"],
+                                           api_key=chirp_api_key, busy=generation_active)
 
                     # 2.6. CosyVoice 2 설정 폼 (구글 코랩 16GB GPU 복제)
                     elif spk_engine == "cosyvoice":
@@ -2193,6 +2249,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
+        st.caption("Chirp는 코랩 없이 최대 4개를 연속 생성합니다. 한 대사가 끝나면 다음 대사를 바로 요청하고, 전부 완료되면 번호순으로 MP3 하나로 합칩니다.")
         st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.15는 최대 4개를 생성하고, 하나가 끝날 때마다 다음 대사를 바로 넣습니다. 2개가 끝나면 다음 2개를 채우며 나머지를 기다리지 않습니다. 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 첫 대사 준비와 메모리 부족 시에는 동시 수가 줄어들 수 있습니다.")
         st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
         
@@ -2260,6 +2317,11 @@ def main():
         selected_segments = st.session_state["parsed_segments"][seg_range[0] - 1 : seg_range[1]]
         has_gemini = any(st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "gemini"
                         for seg in selected_segments)
+        chirp_characters = sum(len(clean_spoken_text(seg.text)) for seg in selected_segments
+                               if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "chirp")
+        if chirp_characters:
+            st.caption(f"선택 범위의 Chirp 대사: {chirp_characters:,}자 · 저장된 음성 재사용분은 다시 요청하지 않습니다.")
+            st.caption("월 100만 자 무료 한도는 Google Cloud 사용량 기준입니다. 다른 작업·미리듣기·재생성도 합산되며 초과분은 과금됩니다.")
         if has_gemini:
             st.caption(f"다음 생성에 사용할 Gemini 키: 서로 다른 {len(keys_for_start)}개 · 모델: {gemini_model}")
             if key_input_error:
@@ -2292,7 +2354,8 @@ def main():
                 # 설정을 조금이라도 변경하면 이전 캐시를 재탕하지 않고 자동으로 새로 생성하도록 보장
                 import hashlib
                 generation_revision = {"cosyvoice": "v7_cosy_generation",
-                                       "gemini": "v8_gemini_voice_identity"}.get(seg_engine, "v6_style_directions")
+                                       "gemini": "v8_gemini_voice_identity",
+                                       "chirp": "v1_chirp_native_wav"}.get(seg_engine, "v6_style_directions")
                 cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_{generation_revision}"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
@@ -2327,6 +2390,10 @@ def main():
                         model=safe_gemini_model,
                         api_key=gemini_api_key
                     )
+                elif seg_engine == "chirp":
+                    cfg = VoiceConfig(engine="chirp", voice=spk_cfg_data.get("voice", "Kore"),
+                                      speed=float(spk_cfg_data.get("speed", 1.0)),
+                                      cloud_tts_api_key=chirp_api_key)
                 elif seg_engine == "gpt-sovits":
                     actual_spk_ref = spk_cfg_data.get("ref_audio_path") or st.session_state.get(f"sovits_saved_path_{seg.speaker}", "")
                     actual_spk_prompt = spk_cfg_data.get("prompt_text") or st.session_state.get(f"sovits_prompt_{seg.speaker}", "")
@@ -2363,6 +2430,12 @@ def main():
                 if cfg.engine == "gemini" and not keys_for_start:
                     st.error(key_input_error or "Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
                     return
+                if cfg.engine == "chirp":
+                    try:
+                        validate_chirp_key(cfg.cloud_tts_api_key)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        return
                 if cfg.engine in ("cosyvoice", "gpt-sovits"):
                     if not cfg.prompt_text.strip():
                         st.error(f"화자 '{item.speaker}'의 참조 음성에서 실제로 말한 대사를 입력해주세요.")

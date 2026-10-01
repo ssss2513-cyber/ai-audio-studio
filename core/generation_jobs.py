@@ -130,7 +130,7 @@ def valid_audio(path):
 def cached_audio_path(item):
     """Prefer a completed lossless CosyVoice clip; accept previous MP3 caches."""
     target = Path(item.file_path)
-    candidates = [target.with_suffix(".wav"), target] if item.config.engine in ("cosyvoice", "gemini") else [target]
+    candidates = [target.with_suffix(".wav"), target] if item.config.engine in ("cosyvoice", "gemini", "chirp") else [target]
     return next((str(path) for path in candidates if valid_audio(path)), None)
 
 
@@ -216,6 +216,9 @@ def _error_message(exc, items):
         for secret in (config.gpt_sovits_url, config.cosyvoice_url):
             if secret:
                 message = message.replace(secret, "[내 코랩 주소]")
+        cloud_key = getattr(config, "cloud_tts_api_key", "")
+        if cloud_key:
+            message = message.replace(cloud_key, "[Cloud API 키]")
         from .gemini_keys import GeminiKeyInputError, parse_gemini_keys
         secrets = re.split(r"[,;\s]+", config.api_key or "")
         try:

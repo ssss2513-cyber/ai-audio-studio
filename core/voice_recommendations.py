@@ -129,6 +129,8 @@ def recommend_style(speaker, segments, profile=""):
 
 
 def style_note(engine, style, styles):
+    if engine == 'qwen-bank':
+        return '선택한 기본 목소리의 고정 말투를 사용합니다. 처음 준비한 기준 음성을 모든 대사에서 재사용합니다.'
     if engine == 'qwen':
         return 'Qwen 1.7B CustomVoice에 감정·말투 지시를 별도로 전달합니다. 선택한 성우·성별을 유지하며, 결과는 보이스와 대사에 따라 달라집니다.'
     if engine == 'chirp':

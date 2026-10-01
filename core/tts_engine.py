@@ -586,6 +586,12 @@ class TTSEngine:
         pass
 
     @staticmethod
+    def generate_qwen_bank_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None, prepared=False):
+        from .qwen_voicebank_client import synthesize
+        return synthesize(clean_spoken_text(text), output_file, config, metrics=metrics,
+                          progress=progress, cancel=cancel, prepared=prepared)
+
+    @staticmethod
     def generate_qwen_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None):
         from .qwen_client import synthesize
         return synthesize(clean_spoken_text(text), output_file, config,
@@ -980,6 +986,8 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
+        if voice_config and voice_config.engine == "qwen-bank":
+            return cls.generate_qwen_bank_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "qwen":
             return cls.generate_qwen_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "chirp":

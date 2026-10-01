@@ -11,7 +11,7 @@ from .tts_engine import TTSEngine
 
 def _target(item):
     target = Path(item.file_path)
-    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'gemini', 'chirp', 'qwen') else target
+    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'gemini', 'chirp', 'qwen', 'qwen-bank') else target
 
 
 def _generate_one(item, job_id, stopped, emit):
@@ -25,7 +25,11 @@ def _generate_one(item, job_id, stopped, emit):
     started = time.monotonic()
     metrics = {'engine': item.config.engine}
     try:
-        if item.config.engine in ('gemini', 'chirp', 'qwen'):
+        if item.config.engine == 'qwen-bank':
+            TTSEngine.generate_qwen_bank_speech(item.text, str(temporary), item.config,
+                metrics=metrics, progress=lambda phase, details: emit('phase', item, dict(details, phase=phase)),
+                cancel=stopped, prepared=True)
+        elif item.config.engine in ('gemini', 'chirp', 'qwen'):
             def progress(phase, details):
                 emit('phase', item, dict(details, phase=phase))
             generate = {'chirp': TTSEngine.generate_chirp_speech,
@@ -56,6 +60,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     from .gemini_client import close_worker_clients
     from .chirp_client import MAX_WORKERS as CHIRP_WORKERS, close_worker_client as close_chirp_client
     from .qwen_client import MAX_WORKERS as QWEN_WORKERS, close_worker_client as close_qwen_client
+    from .qwen_voicebank_client import prepare_voices, close_worker_client as close_qwen_bank_client
 
     events = queue.Queue()
     pause_path = Path(work_dir) / '.generation.pause'
@@ -68,7 +73,8 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     by_index = {item.index: item for item in items}
     engine_stops = {item.config.engine: threading.Event() for item in items}
     state.update(execution_mode='ordered_independent_v2921', active_indices=[], execution_notes=[],
-                 cosy_parallel={}, engine_progress={}, engine_errors={}, retrying_lines={}, gemini_key_usage={})
+                 cosy_parallel={}, engine_progress={}, engine_errors={}, retrying_lines={}, gemini_key_usage={},
+                 voice_preparation={})
     for item in items:
         progress = state['engine_progress'].setdefault(item.config.engine, dict(total=0, done=0, active=0))
         progress['total'] += 1
@@ -146,6 +152,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     gemini = queue.Queue()
     chirp = queue.Queue()
     qwen = queue.Queue()
+    qwen_bank = queue.Queue()
     serial = []
     for item in pending:
         if item.config.engine == 'gemini':
@@ -154,8 +161,40 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             chirp.put(item)
         elif item.config.engine == 'qwen':
             qwen.put(item)
+        elif item.config.engine == 'qwen-bank':
+            qwen_bank.put(item)
         else:
             serial.append(item)
+
+    bank_items = [item for item in pending if item.config.engine == 'qwen-bank']
+    bank_prepare_lock = threading.Lock()
+    bank_prepared = threading.Event()
+
+    def bank_lane():
+        cancel = lambda: engine_stopped('qwen-bank')
+        # One worker prepares every selected voice; the other HTTP workers wait.
+        # This prevents reloading VoiceDesign for each successive dialogue slot.
+        with bank_prepare_lock:
+            if cancel():
+                return
+            if not bank_prepared.is_set():
+                first = bank_items[0]
+                try:
+                    emit('notice', first, '선택한 기본 목소리를 먼저 준비합니다. 첫 사용은 모델 다운로드·목소리 생성 시간이 추가되며, 준비된 목소리는 재사용합니다.')
+                    grouped = {}
+                    for item in bank_items:
+                        grouped.setdefault(item.config.qwen_url, set()).add(item.config.voice)
+                    for url, voices in grouped.items():
+                        prepare_voices(url, voices, cancel=cancel,
+                            progress=lambda phase, details: emit('voice_preparation', first, dict(details, phase=phase)))
+                    bank_prepared.set()
+                    emit('voice_preparation', first, {})
+                except CancelledError:
+                    return
+                except Exception as exc:
+                    fail_engine(first, exc)
+                    return
+        cloud_lane('qwen-bank', qwen_bank)
 
     def cloud_lane(engine, pending_queue):
         cancel = lambda: engine_stopped(engine)
@@ -231,6 +270,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                 close_worker_clients()
                 close_chirp_client()
                 close_qwen_client()
+                close_qwen_bank_client()
                 close_worker_connections()
             finally:
                 emit('worker_done', None, None)
@@ -238,6 +278,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     lanes = ([lambda: cloud_lane('gemini', gemini)] * min(2, gemini.qsize())
              + [lambda: cloud_lane('chirp', chirp)] * min(CHIRP_WORKERS, chirp.qsize())
              + [lambda: cloud_lane('qwen', qwen)] * min(QWEN_WORKERS, qwen.qsize())
+             + [bank_lane] * min(QWEN_WORKERS, qwen_bank.qsize())
              + ([serial_lane] if serial else []))
     try:
         for number, lane in enumerate(lanes):
@@ -286,6 +327,8 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             elif kind == 'notice':
                 if details not in state['execution_notes']:
                     state['execution_notes'].append(details)
+            elif kind == 'voice_preparation':
+                state['voice_preparation'] = details
             elif kind == 'capacity':
                 state['cosy_parallel'] = details
             elif kind == 'completed':

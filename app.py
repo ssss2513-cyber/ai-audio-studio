@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.16 · Gemini 중복 대기 제거 · CosyVoice 무손실 전송"
+APP_VERSION = "v2.9.17 · 기본 엔진 변경 시 화자별 설정 유지"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -951,7 +951,7 @@ def main():
             "🎙️ TTS 기본 엔진 선택",
             options=engine_mode_options,
             index=curr_idx,
-            help="목소리 복제는 본인 코랩을 연결해서 사용합니다. 코랩 GPU 할당과 사용 시간은 계정 상태에 따라 달라집니다."
+            help="새 대본 분석에 사용할 기본 엔진과 왼쪽 설정 화면을 선택합니다. 현재 화자의 엔진·성우·스타일·참조 음성은 바뀌지 않습니다. 목소리 복제는 본인 코랩을 연결해서 사용합니다."
         )
 
         new_mode = "supertonic"
@@ -964,13 +964,12 @@ def main():
         elif "하이브리드" in selected_mode_label:
             new_mode = "custom"
 
-        # 엔진 모드가 변경되었으면 화자 설정 일괄 업데이트 및 위젯 상태 동기화
+        # 기본 엔진 선택은 기존 화자 설정을 덮어쓰지 않는다.
+        # 전체 화자 변경은 화자 설정 영역의 명시적인 일괄 적용 버튼에서만 수행한다.
         if new_mode != st.session_state["active_engine_mode"]:
-            if new_mode != "custom":
-                set_speakers_preset(new_mode)
-            else:
-                st.session_state["active_engine_mode"] = "custom"
+            st.session_state["active_engine_mode"] = new_mode
             st.rerun()
+        st.caption("기본 엔진을 바꿔도 현재 화자별 설정은 유지됩니다. 모두 바꾸려면 화자 설정 영역의 ‘전체 …’ 버튼을 눌러주세요.")
 
         # 2. Supertonic 옵션 안내
         if st.session_state["active_engine_mode"] == "supertonic":

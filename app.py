@@ -23,6 +23,9 @@ from core.tts_engine import (
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
 from core.voice_recommendations import recommend_style, preview_text, style_note, speaker_gender
+from core.gemini_casting import (
+    CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
+)
 from core.generation_jobs import (
     GenerationItem, start_job, get_job, is_running, request_pause, clear_job, start_partial_merge, valid_audio, cached_audio_path,
 )
@@ -30,7 +33,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.21 · Gemini·Cosy 독립 연속 생성 · 번호순 합치기"
+APP_VERSION = "v2.9.22 · 대본 맞춤 Gemini 보이스·스타일 자동 배정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -203,6 +206,26 @@ def change_gemini_gender(speaker):
                  else "Charon" if gender == "남성" else "Kore")
     config.update(voice=voice, gender=gender)
     st.session_state[f"gemini_voice_{speaker}"] = voice
+    report = current_casting_report().get(speaker)
+    if report:
+        report.update(voice=voice, gender=gender, detected_gender=gender,
+                      needs_review=False, gender_note="사용자가 성별 직접 선택", gender_quote="")
+
+
+def casting_source_text():
+    current = st.session_state.get("script_editor", "")
+    if current == st.session_state.get("casting_formatted_text"):
+        return st.session_state.get("casting_source_text", current)
+    return current
+
+
+def current_casting_report():
+    speakers = st.session_state.get("speakers", [])
+    profiles = {s: st.session_state.get(f"voice_profile_{s}", "") for s in speakers}
+    report = st.session_state.get("gemini_casting_report", {})
+    if report.get("fingerprint") == casting_fingerprint(casting_source_text(), speakers, profiles):
+        return report.get("speakers", {})
+    return {}
 
 
 def correct_legacy_gemini_voices():
@@ -293,8 +316,9 @@ def apply_recommended_styles(speaker=None):
             continue
         recommendation = recommend_style(name, st.session_state.get("parsed_segments", []),
                                          st.session_state.get(f"voice_profile_{name}", ""))
-        config["style"] = recommendation.style
-        st.session_state[f"style_select_{name}"] = recommendation.style
+        style = current_casting_report().get(name, {}).get("style", recommendation.style)
+        config["style"] = style
+        st.session_state[f"style_select_{name}"] = style
 
 
 def set_speakers_preset(engine_type: str):
@@ -934,6 +958,11 @@ def main():
 
         # 2. '화자: 대사' 텍스트로 표준화
         formatted_script = "\n".join([f"{s[0]}: {s[1]}" for s in segs])
+        # Retain character descriptions/stage directions for later casting even
+        # when the speaking script is normalized or stage directions are removed.
+        if raw_text != st.session_state.get("casting_formatted_text"):
+            st.session_state["casting_source_text"] = raw_text
+        st.session_state["casting_formatted_text"] = formatted_script
         if update_editor:
             try:
                 st.session_state["script_editor"] = formatted_script
@@ -1245,15 +1274,56 @@ def main():
                 st.toast("모든 화자가 Supertonic 3 로컬 무료 모델로 일괄 변경되었습니다!")
                 st.rerun()
         with col_bar2:
-            if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True):
-                set_speakers_preset("gemini")
-                st.toast("모든 화자가 Gemini Flash TTS로 일괄 변경되었습니다!")
-                st.rerun()
+            if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True,
+                         key="gemini_cast_all", disabled=generation_active,
+                         help="현재 대본과 인물 정보를 분석해 성별·나이·역할에 맞는 보이스와 스타일을 함께 설정합니다. Gemini API 키가 필요합니다."):
+                try:
+                    if not gemini_api_key.strip():
+                        raise CastingError("왼쪽 ‘Gemini API 키 등록’에 키를 입력한 뒤 다시 눌러주세요. 기존 설정은 유지됩니다.")
+                    # Parse current editor contents, including edits since the
+                    # last analysis, without changing anything until AI succeeds.
+                    pairs = parse_story_precisely(st.session_state.get("script_editor", ""),
+                                                 custom_characters=custom_chars_list)
+                    parser = ScriptParser()
+                    cast_segments = parser.parse("\n".join(f"{s}: {t}" for s, t in pairs),
+                                                 remove_stage_directions=remove_stage)
+                    cast_speakers = parser.extract_speakers(cast_segments)
+                    profiles = {s: st.session_state.get(f"voice_profile_{s}", "") for s in cast_speakers}
+                    existing = {s: gemini_preset(s, st.session_state["voice_settings"].get(s))
+                                for s in cast_speakers}
+                    source_text = casting_source_text()
+                    with st.spinner("대본 전체에서 화자의 성별·나이·관계·말투를 분석하고 보이스와 스타일을 고르는 중..."):
+                        cast = analyze_gemini_casting(
+                            script=source_text, speakers=cast_speakers, profiles=profiles,
+                            existing=existing, voices=GEMINI_VOICES, styles=VOICE_STYLES,
+                            api_key=gemini_api_key)
+                    apply_casting_to_state(st.session_state, result=cast, speakers=cast_speakers,
+                                           segments=cast_segments, script=source_text, profiles=profiles)
+                    st.toast(f"{len(cast_speakers)}명 보이스·스타일 자동 설정 완료")
+                    st.rerun()
+                except CastingError as exc:
+                    st.error(str(exc))
         with col_bar3:
             if st.button("🎙️ 전체 AI 목소리 복제 (Colab GPU)", use_container_width=True):
                 set_speakers_preset("gpt-sovits")
                 st.toast("모든 화자가 AI 목소리 복제로 일괄 변경되었습니다!")
                 st.rerun()
+
+        st.caption("⚡ 전체 Gemini Flash를 누르면 대본을 분석해 화자별 보이스·성별·스타일까지 함께 설정합니다.")
+        active_casting = current_casting_report()
+        if active_casting:
+            st.success(f"대본 맞춤 보이스·스타일 설정 완료 · {len(active_casting)}명")
+            uncertain = [s for s, row in active_casting.items() if row["needs_review"]]
+            if uncertain:
+                st.warning("성별 단서가 부족한 화자: " + ", ".join(uncertain)
+                           + " · 기존 성우 성별을 임시 유지했습니다. 아래 카드에서 성우 성별을 선택하거나 인물 정보를 적고 다시 분석해주세요.")
+            with st.expander("📋 화자별 분석 결과와 추천 보이스 보기", expanded=True):
+                st.dataframe([{
+                    "화자": s, "성별": row["detected_gender"] if row["detected_gender"] != "불명" else row["gender_note"],
+                    "나이": row["age"], "역할·말투": f"{row['role']} · {row['personality']}",
+                    "추천 보이스": row["voice"], "추천 스타일": row["style"], "추천 이유": row["reason"],
+                } for s, row in active_casting.items()], hide_index=True, use_container_width=True)
+                st.caption("표는 분석 결과입니다. 이후 직접 바꾼 보이스와 스타일은 각 화자 카드의 현재 설정이 적용됩니다.")
 
         # 화자별 대사 개수 통계 뱃지
         spk_counts = {}
@@ -1444,6 +1514,14 @@ def main():
                                       placeholder="예: 70대 할머니, 다정하고 차분함")
                     recommendation = recommend_style(spk, st.session_state["parsed_segments"],
                                                      st.session_state.get(f"voice_profile_{spk}", ""))
+                    cast_info = active_casting.get(spk)
+                    if cast_info:
+                        recommendation = SimpleNamespace(style=cast_info["style"], reason=cast_info["reason"])
+                        if cast_info["needs_review"]:
+                            st.warning("성별 확인 필요 · 아래 성우 성별을 확인해주세요.")
+                        st.caption(f"대본 분석: {cast_info['age']} · {cast_info['role']} · {cast_info['personality']}")
+                        if cast_info["gender_quote"]:
+                            st.caption(f"성별 근거: {cast_info['gender_quote']}")
                     recommendation_label = recommendation.style
                     if spk_engine == "gemini":
                         voice_gender = GEMINI_VOICES.get(current_cfg.get("voice"), {}).get("gender")

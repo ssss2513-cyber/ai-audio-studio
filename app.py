@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.17 · 기본 엔진 변경 시 화자별 설정 유지"
+APP_VERSION = "v2.9.18 · 대사 순서 보존 · 생성과 전송 겹치기"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -348,8 +348,13 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.progress(float(job.get("progress", 0)))
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
+        if job.get("execution_mode") == "ordered_parallel_v2918":
+            st.caption("Gemini 최대 2개 동시 처리 · Cosy v2.9.10 연속 생성 · 완료 순서와 관계없이 대사 번호순으로 합칩니다.")
+            for note in job.get("execution_notes", []):
+                st.caption(note)
         if job.get("generated", 0):
-            estimate = f"최근 새 대사 평균 {job.get('average_seconds', 0):.1f}초"
+            estimate = (f"최근 완료 속도: 대사당 {job['throughput_seconds']:.1f}초"
+                        if "throughput_seconds" in job else f"최근 새 대사 평균 {job.get('average_seconds', 0):.1f}초")
             if active and job.get("stage") == "voice" and job["generated"] >= 3:
                 remaining = max(0, round(job.get("remaining_estimate_seconds", 0)))
                 estimate += f" · 남은 생성 약 {remaining // 60}분 {remaining % 60}초"
@@ -371,7 +376,12 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                     if field in latest:
                         parts.append(f"{label} {latest[field]:.1f}초")
                 st.write(" · ".join(parts) or "이전 코랩은 세부 시간을 보내지 않습니다.")
-                if "download_seconds" in latest:
+                if latest.get("batch_stream"):
+                    st.caption(f"연속 생성: 코랩 처리 {latest.get('server_seconds', 0):.1f}초"
+                               f" · 파일 수신 {latest.get('download_seconds', 0):.1f}초"
+                               f" · 원음 복원 {latest.get('decode_seconds', 0):.1f}초")
+                    st.caption("이 대사의 전송·저장과 다음 대사의 계산을 겹칩니다. 전체 진행 속도는 위의 ‘최근 완료 속도’를 확인해주세요.")
+                elif "download_seconds" in latest:
                     st.caption(f"통신 상세: 서버 계산 외 응답 대기 {latest.get('response_wait_seconds', 0):.1f}초"
                                f" · 파일 다운로드 {latest['download_seconds']:.1f}초"
                                f" · 연결 확인·요청 준비 {latest.get('client_preparation_seconds', 0):.1f}초"
@@ -410,7 +420,7 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 elapsed = max(0, int(time.time() - job["stage_started"]))
                 st.caption(f"현재 단계 경과: {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다.")
             if job.get("stage") != "partial_merge":
-                if st.button("현재 대사 저장 후 멈추기", key="pause_generation_job"):
+                if st.button("진행 중인 대사 저장 후 멈추기", key="pause_generation_job"):
                     request_pause(work_dir)
                     st.session_state["_pause_requested_job"] = job["id"]
                 if st.session_state.get("_pause_requested_job") == job["id"]:
@@ -2059,6 +2069,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
+        st.caption("Gemini는 최대 2개 요청의 응답 대기를 겹칩니다. Cosy v2.9.10은 전송 중 다음 대사를 계산합니다. 완료한 음성은 원래 대사 번호순으로 합칩니다.")
         
         total_segs = len(st.session_state["parsed_segments"])
         

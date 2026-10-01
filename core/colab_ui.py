@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
 NOTEBOOK_RELEASE_REVISION = "fc0a7215efad6e00b76cce55489efec7b9516e91"
-COSY_NOTEBOOK_RELEASE_REVISION = "2a890b75c9372dd9b766220304ec096721077a97"
+COSY_NOTEBOOK_RELEASE_REVISION = "3ffc96c14e1e20b6832865cce0bc23109c2a049d"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
@@ -45,15 +45,15 @@ def render_connections(mode):
                 st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.10 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.10.ipynb"))
-        st.caption("v2.9.10은 완성된 음성을 전송하는 동안 다음 대사를 계산합니다. 목소리·음질 설정을 유지하며, 완료한 음성은 대사 번호순으로 합칩니다.")
-        recovery = ROOT / "CosyVoice_Recovery_v2.9.10.py"
+        notebooks.append(("CosyVoice 코랩 v2.9.11 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.11.ipynb"))
+        st.caption("v2.9.11은 GPU 메모리에 맞춰 여러 대사를 동시에 계산합니다. 목소리·FP32 설정을 유지하며, 완료한 음성은 번호순으로 합칩니다.")
+        recovery = ROOT / "CosyVoice_Recovery_v2.9.11.py"
         if recovery.is_file():
-            with st.expander("CosyVoice v2.9.10 속도 개선 · 기존 코랩에서 실행"):
+            with st.expander("CosyVoice v2.9.11 동시 생성 업데이트 · 기존 코랩에서 실행"):
                 st.write("음성 생성이 멈췄거나 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
                 st.caption("실행 중인 기존 설치·모델을 재사용합니다. 마지막에 나온 새 연결 주소를 아래 칸에 넣어주세요.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
-        st.caption("연속 생성은 코랩 v2.9.10 업데이트 후 적용됩니다. 이전 서버는 기존 방식으로 동작합니다. 한 GPU에서 음성 계산은 순서대로 진행하며 전송과 겹칩니다.")
+        st.caption("동시 생성은 코랩 v2.9.11 업데이트 후 적용됩니다. 첫 대사의 메모리를 측정해 동시 수를 자동으로 정합니다. 메모리가 부족하면 개수를 줄이며, 이전 서버는 기존 방식으로 동작합니다.")
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")
     for label, filename, download_name in notebooks:
         revision = COSY_NOTEBOOK_RELEASE_REVISION if filename == "CosyVoice_Colab_API.ipynb" else NOTEBOOK_RELEASE_REVISION

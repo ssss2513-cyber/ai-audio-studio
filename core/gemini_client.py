@@ -25,11 +25,15 @@ _PACERS_LOCK = threading.Lock()
 _SERVER_RETRIES = 2
 _SERVER_RETRY_CODES = {500, 502, 503, 504}
 _MAX_RETRY_WAIT = 10.0
+# One registered key pool shares this request budget, including previews and
+# retries. Ten starts per minute with a small timing margin; a provider's
+# stricter quota/cooldown can only increase the interval.
+GEMINI_REQUEST_INTERVAL = 6.2
 
 
 class RequestPacer:
     """Share request starts across workers; waiting for audio can overlap."""
-    def __init__(self, interval=4.2):
+    def __init__(self, interval=GEMINI_REQUEST_INTERVAL):
         self.interval = interval
         self.lock = threading.Lock()
         self.last_started = time.monotonic() - interval
@@ -73,7 +77,10 @@ def _pacer(keys):
         for old, pacer in list(_PACERS.items()):
             if now - max(pacer.last_started, pacer.not_before) > 600 and not pacer.lock.locked():
                 _PACERS.pop(old, None)
-        return _PACERS.setdefault(identity, RequestPacer())
+        pacer = _PACERS.setdefault(identity, RequestPacer())
+        with pacer.lock:
+            pacer.interval = max(pacer.interval, GEMINI_REQUEST_INTERVAL)
+        return pacer
 
 
 def close_worker_clients():

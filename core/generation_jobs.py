@@ -250,6 +250,7 @@ def _record_performance(state, item, metrics):
         totals["cosy_lines"] = totals.get("cosy_lines", 0) + 1
         for name in ("total_seconds", "audio_seconds", "reference_seconds", "synthesis_seconds",
                      "transport_seconds", "save_seconds", "postprocess_seconds", "llm_seconds", "sampling_seconds",
+                     "acoustic_seconds", "acoustic_wait_seconds",
                      "retries", "retry_seconds", "response_wait_seconds", "download_seconds",
                      "decode_seconds", "client_preparation_seconds", "wire_bytes", "wav_bytes"):
             if name in metrics:

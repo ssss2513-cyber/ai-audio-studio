@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
 NOTEBOOK_RELEASE_REVISION = "a732065587eb4c8620bc4726062819469977cd45"
-COSY_NOTEBOOK_RELEASE_REVISION = "a732065587eb4c8620bc4726062819469977cd45"
+COSY_NOTEBOOK_RELEASE_REVISION = "d98b41b86e27290997ff1690e306dd3ab53d4177"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),
@@ -23,7 +23,7 @@ def render_connections(mode):
     selected = list(ENGINES) if mode == "custom" else [mode]
     selected = [engine for engine in selected if engine in ENGINES]
     st.markdown("#### ☁️ 내 구글 코랩 연결")
-    st.caption("코랩 연결 화면 v2.9.41 · 서버 감독 적용")
+    st.caption("코랩 연결 화면 v2.9.43 · CosyVoice 2 음성 끊김 수정")
     st.info("이용자마다 본인 구글 계정으로 코랩을 실행합니다. 내 코랩 주소를 아래에 넣어주세요.")
     with st.expander("처음 이용할 때 · 연결 순서", expanded=not any(st.session_state.get(ENGINES[e][1]) for e in selected)):
         st.markdown(
@@ -47,13 +47,16 @@ def render_connections(mode):
                 st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
                 st.code(recovery.read_text(encoding="utf-8") + "\n" + session_patch_code('gpt-sovits'), language="python")
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.17 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.17.ipynb"))
-        st.caption("Cosy 코랩 v2.9.17은 4번 서버 감독을 추가했습니다. 음성 서버 v2.9.16의 동시 1~4개 조절·모델·FP32·샘플링 설정은 유지합니다.")
-        recovery = ROOT / "CosyVoice_Recovery_v2.9.16.py"
+        if st.session_state.get('_cosy_quality_ui_version') != '2.9.18':
+            st.session_state.pop('checked_cosyvoice_url', None)
+            st.session_state['_cosy_quality_ui_version'] = '2.9.18'
+        notebooks.append(("CosyVoice 코랩 v2.9.18 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.18.ipynb"))
+        st.caption("CosyVoice 2 v2.9.18은 문장 중간 분할을 줄이고, 병렬 요청의 공유 음향 계산을 보호합니다. 길이 제한 종료·발음 반복 결과는 완료 음성으로 저장하지 않습니다. 목소리·FP32·샘플링 설정은 유지합니다.")
+        recovery = ROOT / "CosyVoice_Recovery_v2.9.18.py"
         if recovery.is_file():
-            with st.expander("CosyVoice v2.9.16 계산 속도 업데이트 · 기존 코랩에서 실행"):
+            with st.expander("CosyVoice 2 음성 끊김 수정 v2.9.18 · 기존 코랩에서 실행", expanded=True):
                 st.write("음성 생성이 멈췄거나 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
-                st.caption("실행 중인 기존 설치·모델을 재사용합니다. 마지막에 나온 새 연결 주소를 아래 칸에 넣어주세요.")
+                st.caption("홈페이지 새로고침만으로는 코랩 서버가 업데이트되지 않습니다. 아래 코드는 기존 설치·모델을 재사용해 서버를 교체합니다. 마지막에 나온 새 주소를 아래 칸에 넣어주세요.")
                 st.code(recovery.read_text(encoding="utf-8") + "\n" + session_patch_code('cosyvoice'), language="python")
         st.caption("첫 대사로 메모리를 확인한 뒤 동시 2개부터 시작합니다. 현재 대본의 완료 속도를 비교해 동시 수를 조절하며, 비교에 쓰인 대사도 모두 결과로 저장합니다. 빈자리가 나면 다음 대사를 바로 시작하고 최종 음성은 번호순으로 합칩니다.")
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")

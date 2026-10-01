@@ -19,6 +19,7 @@ ENGINES = {
     "cosyvoice": ("ai-voice-studio-cosyvoice", "CosyVoice 2"),
 }
 GENERATION_CAPABILITY = "validated_generation_v293"
+QUALITY_CAPABILITY = "sentence_completion_guard_v2918"
 REFERENCE_CACHE_CAPABILITY = "reference_cache_v294"
 REFERENCE_TRANSPORT_CAPABILITY = "reference_transport_v295"
 LOSSLESS_TRANSPORT_CAPABILITY = "lossless_transport_v299"
@@ -83,16 +84,18 @@ def check_connection(url, engine="cosyvoice", *, use_cached=False):
         if status.get("ready") is not True:
             transport.invalidate()
             return False, "코랩에서 모델을 준비 중입니다. '준비 완료'가 나온 뒤 연결해주세요.", None
-        if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY}.issubset(status.get("capabilities", [])):
+        if not {GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY, QUALITY_CAPABILITY}.issubset(status.get("capabilities", [])):
             transport.invalidate()
             return False, (
-                "이전 CosyVoice 서버가 실행 중입니다. 사이트의 'CosyVoice 코랩 v2.9.16 바로 열기'로 "
-                "수정본을 열고 1번 준비 완료 → 4번 순서로 실행한 뒤 새 연결 주소를 넣어주세요."
+                "현재 코랩에는 기계음·대사 끊김 수정이 아직 적용되지 않았습니다. "
+                "왼쪽 'CosyVoice 2 음성 끊김 수정 v2.9.18' 코드를 기존 코랩에서 실행하거나, "
+                "새 v2.9.18 코랩의 1번 → 4번을 실행하고 새 주소를 넣어주세요. 홈페이지 새로고침만으로는 서버가 바뀌지 않습니다."
             ), status
         if transport.status is not status:
             transport.status = status
             transport.checked_at = time.monotonic()
         message = f"✅ {label} v{status.get('server_version', '')} 모델 준비 완료 · 프로그램 연결 성공"
+        message += " · 문장 분할·생성 완료 검사 적용"
         if REFERENCE_TRANSPORT_CAPABILITY in status.get("capabilities", []):
             message += " · 참고 음성 반복 전송 생략"
         if status.get("gpu_name"):
@@ -268,6 +271,7 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             "postprocess_seconds": "X-Postprocess-Seconds",
             "llm_seconds": "X-LLM-Seconds",
             "acoustic_seconds": "X-Acoustic-Seconds",
+            "acoustic_wait_seconds": "X-Acoustic-Wait-Seconds",
             "native_audio_seconds": "X-Native-Audio-Duration",
             "sampling_seconds": "X-Sampling-Seconds",
             "retry_seconds": "X-Retry-Seconds",

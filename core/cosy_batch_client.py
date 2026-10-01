@@ -61,7 +61,7 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
     if (PARALLEL_CAPABILITY in status.get('capabilities', [])
             and not {FIXED_FOUR_CAPABILITY, ADAPTIVE_FOUR_CAPABILITY}.intersection(status.get('capabilities', []))):
         raise RuntimeError('현재 코랩에는 최대 4개 설정이 아직 적용되지 않았습니다. '
-                           '사이트 왼쪽의 CosyVoice v2.9.16 업데이트 코드를 기존 코랩에서 실행하고, '
+                           '사이트 왼쪽의 CosyVoice v2.9.18 업데이트 코드를 기존 코랩에서 실행하고, '
                            '새 연결 주소를 입력한 뒤 이어서 생성해주세요. 완료 파일은 유지됩니다.')
     continuous = CONTINUOUS_CAPABILITY in status.get('capabilities', [])
     if not continuous and len(entries) > 32:
@@ -193,6 +193,7 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
             for name, key in (('reference_seconds', 'X-Reference-Seconds'), ('synthesis_seconds', 'X-Synthesis-Seconds'),
                               ('postprocess_seconds', 'X-Postprocess-Seconds'), ('llm_seconds', 'X-LLM-Seconds'),
                               ('acoustic_seconds', 'X-Acoustic-Seconds'), ('native_audio_seconds', 'X-Native-Audio-Duration'),
+                              ('acoustic_wait_seconds', 'X-Acoustic-Wait-Seconds'),
                               ('sampling_seconds', 'X-Sampling-Seconds'), ('retries', 'X-Generation-Retries'),
                               ('retry_seconds', 'X-Retry-Seconds'), ('chunks', 'X-Text-Chunks')):
                 try:

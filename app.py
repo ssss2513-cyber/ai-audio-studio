@@ -50,7 +50,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.42 · CosyVoice 2·3 별도 서버 · 목소리 20종"
+APP_VERSION = "v2.9.43 · CosyVoice 2 문장 끊김·병렬 음향 처리 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -615,6 +615,8 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 if "sampling_seconds" in latest:
                     st.caption(f"발음 순서 계산에 포함된 후보 선택·GPU 대기 {latest['sampling_seconds']:.1f}초"
                                " · 앞선 GPU 계산이 끝나기를 기다린 시간도 포함합니다.")
+                if "acoustic_wait_seconds" in latest:
+                    st.caption(f"공유 음향 계산 대기 {latest['acoustic_wait_seconds']:.1f}초 · 발음 계산은 최대 4개 요청으로 진행하고 음향·파형 계산은 충돌 없이 차례로 처리합니다.")
                 if "retries" in latest:
                     totals = job.get("performance", {})
                     st.caption(f"최근 대사 재시도 {latest['retries']}회 · 추가 처리 {latest.get('retry_seconds', 0):.1f}초"
@@ -2418,7 +2420,8 @@ def main():
         st.caption("CosyVoice 3는 버전 2와 별도 서버·대기열로 생성합니다. 목소리 20종은 처음 사용할 때 참고 녹음만 내려받아 재사용하며, 실제 음성은 생성 버튼을 눌렀을 때 만듭니다.")
         st.caption("새 기본 목소리 20종은 선택한 목소리를 처음 한 번 준비합니다. 전체 생성에서는 사용할 목소리를 먼저 한꺼번에 준비한 뒤 대사를 연속 생성하고, 번호순으로 MP3 하나로 합칩니다.")
         st.caption("Chirp는 코랩 없이 최대 4개를 연속 생성합니다. 한 대사가 끝나면 다음 대사를 바로 요청하고, 전부 완료되면 번호순으로 MP3 하나로 합칩니다.")
-        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.16은 첫 대사를 저장한 뒤 실제 처리 속도에 맞춰 동시 1~4개 중 선택합니다. 빈자리가 나면 다음 대사를 바로 넣고, 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 동시 수를 줄일 때도 진행 중인 대사는 끝까지 저장합니다.")
+        st.caption("CosyVoice 2 코랩 v2.9.18: 문장 경계를 우선해 생성하고, 길이 제한 종료·비정상 반복을 검사합니다. 요청은 최대 4개로 연속 처리하되 공유 음향·파형 계산은 차례로 진행합니다. Gemini 작업은 별도로 진행되며 완료 음성은 번호순으로 MP3 하나로 합칩니다.")
+        st.caption("이미 만들어진 파일은 그대로 보관합니다. 기존 음성의 문제 대사를 다시 만들려면 아래에서 해당 구간을 선택하고 ‘완료 파일도 새로 만들기’를 켜세요. 기존 MP3 자체가 자동 복구되는 것은 아닙니다.")
         st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
         
         total_segs = len(st.session_state["parsed_segments"])

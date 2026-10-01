@@ -47,7 +47,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.36 · 기본 목소리 20종 추가 · 남성 10명·여성 10명"
+APP_VERSION = "v2.9.37 · Qwen 코랩 진행 로그·연결 주소 표시 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Qwen3 · Chirp · Gemini) - {APP_VERSION}",

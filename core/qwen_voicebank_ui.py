@@ -11,7 +11,7 @@ from .tts_engine import VoiceConfig
 from .voice_recommendations import preview_text
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTEBOOK_REVISION = '4d907d90a68536cc75f77562a7aab13e6f343deb'  # Complete voice-bank Colab v1.0.0.
+NOTEBOOK_REVISION = '567ce736edefed7edfa037cbe1a2ebbea8aef69c'  # Voice-bank Colab v1.0.1: visible output.
 
 
 def preset(speaker, current, gender, used=()):
@@ -33,14 +33,15 @@ def render_connection(prominent=False):
         st.markdown('1. 아래 코랩을 열고 **런타임 → 런타임 유형 변경 → T4 GPU**를 선택합니다.\n'
                     '2. **1번 설치 → 2번 서버 준비 → 4번 사이트 연결**을 실행합니다.\n'
                     '3. 나온 **프로그램 연결 주소 전체**를 아래에 넣습니다.')
-        st.link_button('기본 목소리 20종 코랩 v1.0.0 열기 ↗',
+        st.link_button('기본 목소리 20종 코랩 v1.0.1 열기 ↗',
             'https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/'
             + NOTEBOOK_REVISION + '/Qwen3_TTS_VoiceBank_Colab_API.ipynb', use_container_width=True)
         notebook = ROOT / 'Qwen3_TTS_VoiceBank_Colab_API.ipynb'
         if notebook.is_file():
-            st.download_button('⬇️ 기본 목소리 20종 코랩 받기', notebook.read_bytes(),
-                file_name='Qwen3_TTS_기본목소리20종_Colab_v1.0.0.ipynb',
+            st.download_button('⬇️ 기본 목소리 20종 코랩 v1.0.1 받기', notebook.read_bytes(),
+                file_name='Qwen3_TTS_기본목소리20종_Colab_v1.0.1.ipynb',
                 mime='application/x-ipynb+json', use_container_width=True)
+        st.caption('v1.0.1은 진행 로그와 연결 주소를 셀에 직접 표시합니다. 이미 열어둔 이전 코랩에는 자동 적용되지 않으므로 위 수정본을 열어주세요.')
         st.caption('기존 Qwen 9종 코랩과 별도의 새 코랩입니다. 같은 GPU에 두 코랩 모델을 함께 실행하지 마세요.')
         st.caption('첫 사용은 모델 다운로드와 선택한 목소리 준비 때문에 추가 시간이 걸립니다. 준비가 끝나면 대사마다 목소리를 다시 만들지 않습니다.')
         st.caption('무료 코랩 안에서 직접 생성하려면 사이트에서 ‘기본 목소리 20종 코랩 대본 받기’를 눌러 파일을 받고, 코랩 1 → 2 → 3번을 실행하세요. '

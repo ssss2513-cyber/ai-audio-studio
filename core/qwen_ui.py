@@ -10,7 +10,7 @@ from .tts_engine import TTSEngine, VoiceConfig, VOICE_STYLES
 from .voice_recommendations import preview_text, resolve_style, style_display_label, style_description
 
 ROOT = Path(__file__).resolve().parent.parent
-QWEN_NOTEBOOK_REVISION = "44e59047ac0dbfdebf114ac29a359c2ba51aa9a7"  # Pin the complete Colab v1.0.0 release.
+QWEN_NOTEBOOK_REVISION = "567ce736edefed7edfa037cbe1a2ebbea8aef69c"  # Colab v1.0.1: visible progress and connection URL.
 
 
 def render_qwen_connection(prominent=False):
@@ -20,14 +20,15 @@ def render_qwen_connection(prominent=False):
                     "1. 아래 코랩을 열고 **런타임 → 런타임 유형 변경 → T4 GPU**를 선택합니다.\n"
                     "2. **1번 설치**, **2번 모델 준비**를 차례로 실행하고 준비 완료를 기다립니다.\n"
                     "3. **4번 사이트 연결**을 실행하고 나온 **프로그램 연결 주소 전체**를 아래에 넣습니다.")
-        st.link_button("Qwen3-TTS 코랩 v1.0.0 열기 ↗",
+        st.link_button("Qwen3-TTS 코랩 v1.0.1 열기 ↗",
                        "https://colab.research.google.com/github/ssss2513-cyber/ai-audio-studio/blob/"
                        + QWEN_NOTEBOOK_REVISION + "/Qwen3_TTS_Colab_API.ipynb", use_container_width=True)
         notebook = ROOT / "Qwen3_TTS_Colab_API.ipynb"
         if notebook.is_file():
-            st.download_button("⬇️ Qwen 코랩 v1.0.0 받기", notebook.read_bytes(),
-                               file_name="Qwen3_TTS_CustomVoice_Colab_v1.0.0.ipynb",
+            st.download_button("⬇️ Qwen 코랩 v1.0.1 받기", notebook.read_bytes(),
+                               file_name="Qwen3_TTS_CustomVoice_Colab_v1.0.1.ipynb",
                                mime="application/x-ipynb+json", use_container_width=True)
+        st.caption("v1.0.1은 진행 로그와 연결 주소를 셀에 직접 표시합니다. 이미 열어둔 이전 코랩에는 자동 적용되지 않으므로 위 수정본을 열어주세요.")
         st.caption("Qwen은 전용 코랩에서 실행하세요. 같은 GPU에 Cosy/GPT 모델도 올리면 메모리가 부족할 수 있습니다.")
         st.caption("무료 코랩은 외부 웹 화면 위주 사용이 제한됩니다. 무료로 코랩 안에서 사용하려면 "
                    "사이트의 ‘Qwen 코랩 직접 생성용 대본 받기’로 파일을 받고, 4번 대신 3번 셀에 올리세요. "

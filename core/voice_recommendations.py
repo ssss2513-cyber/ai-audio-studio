@@ -129,6 +129,8 @@ def recommend_style(speaker, segments, profile=""):
 
 
 def style_note(engine, style, styles):
+    if engine == 'cosyvoice3':
+        return 'CosyVoice 3에 감정·말투 지시를 전달합니다. 음색과 연령감은 기준 목소리의 영향을 받으며, 스타일을 바꿔도 선택한 화자는 유지합니다.'
     if engine == 'qwen-bank':
         return '선택한 기본 목소리의 고정 말투를 사용합니다. 처음 준비한 기준 음성을 모든 대사에서 재사용합니다.'
     if engine == 'qwen':

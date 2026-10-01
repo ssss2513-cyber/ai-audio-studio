@@ -11,7 +11,7 @@ from .tts_engine import TTSEngine
 
 def _target(item):
     target = Path(item.file_path)
-    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'gemini', 'chirp', 'qwen', 'qwen-bank') else target
+    return target.with_suffix('.wav') if item.config.engine in ('cosyvoice', 'cosyvoice3', 'gemini', 'chirp', 'qwen', 'qwen-bank') else target
 
 
 def _generate_one(item, job_id, stopped, emit):
@@ -25,7 +25,11 @@ def _generate_one(item, job_id, stopped, emit):
     started = time.monotonic()
     metrics = {'engine': item.config.engine}
     try:
-        if item.config.engine == 'qwen-bank':
+        if item.config.engine == 'cosyvoice3':
+            TTSEngine.generate_cosy3_speech(item.text, str(temporary), item.config,
+                metrics=metrics, progress=lambda phase, details: emit('phase', item, dict(details, phase=phase)),
+                cancel=stopped)
+        elif item.config.engine == 'qwen-bank':
             TTSEngine.generate_qwen_bank_speech(item.text, str(temporary), item.config,
                 metrics=metrics, progress=lambda phase, details: emit('phase', item, dict(details, phase=phase)),
                 cancel=stopped, prepared=True)
@@ -61,6 +65,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     from .chirp_client import MAX_WORKERS as CHIRP_WORKERS, close_worker_client as close_chirp_client
     from .qwen_client import MAX_WORKERS as QWEN_WORKERS, close_worker_client as close_qwen_client
     from .qwen_voicebank_client import prepare_voices, close_worker_client as close_qwen_bank_client
+    from .cosy3_client import MAX_WORKERS as COSY3_WORKERS, close_worker_client as close_cosy3_client
 
     events = queue.Queue()
     pause_path = Path(work_dir) / '.generation.pause'
@@ -153,6 +158,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     chirp = queue.Queue()
     qwen = queue.Queue()
     qwen_bank = queue.Queue()
+    cosy3 = queue.Queue()
     serial = []
     for item in pending:
         if item.config.engine == 'gemini':
@@ -163,6 +169,8 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             qwen.put(item)
         elif item.config.engine == 'qwen-bank':
             qwen_bank.put(item)
+        elif item.config.engine == 'cosyvoice3':
+            cosy3.put(item)
         else:
             serial.append(item)
 
@@ -271,6 +279,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                 close_chirp_client()
                 close_qwen_client()
                 close_qwen_bank_client()
+                close_cosy3_client()
                 close_worker_connections()
             finally:
                 emit('worker_done', None, None)
@@ -279,6 +288,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
              + [lambda: cloud_lane('chirp', chirp)] * min(CHIRP_WORKERS, chirp.qsize())
              + [lambda: cloud_lane('qwen', qwen)] * min(QWEN_WORKERS, qwen.qsize())
              + [bank_lane] * min(QWEN_WORKERS, qwen_bank.qsize())
+             + [lambda: cloud_lane('cosyvoice3', cosy3)] * min(COSY3_WORKERS, cosy3.qsize())
              + ([serial_lane] if serial else []))
     try:
         for number, lane in enumerate(lanes):

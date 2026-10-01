@@ -76,6 +76,7 @@ class VoiceConfig:
     fragment_interval: float = 0.3       # GPT-SoVITS 문장 사이 간격
     nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
     cosyvoice_url: str = ""              # CosyVoice Colab/WebUI API 주소
+    cosyvoice3_url: str = field(default="", repr=False)  # Independent version 3 server
     cloud_tts_api_key: str = field(default="", repr=False)
     qwen_url: str = field(default="", repr=False)
     qwen_instruction: str = ""
@@ -586,6 +587,12 @@ class TTSEngine:
         pass
 
     @staticmethod
+    def generate_cosy3_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None):
+        from .cosy3_client import synthesize
+        return synthesize(clean_spoken_text(text), output_file, config,
+                          metrics=metrics, progress=progress, cancel=cancel)
+
+    @staticmethod
     def generate_qwen_bank_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None, prepared=False):
         from .qwen_voicebank_client import synthesize
         return synthesize(clean_spoken_text(text), output_file, config, metrics=metrics,
@@ -962,6 +969,9 @@ class TTSEngine:
         elif voice_config.engine == "f5-tts":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_f5_tts_speech(text, output_file, voice_config))
+        elif voice_config.engine == "cosyvoice3":
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: cls.generate_cosy3_speech(text, output_file, voice_config))
         elif voice_config.engine == "cosyvoice":
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: cls.generate_cosyvoice_speech(text, output_file, voice_config))
@@ -986,6 +996,8 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
+        if voice_config and voice_config.engine == "cosyvoice3":
+            return cls.generate_cosy3_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "qwen-bank":
             return cls.generate_qwen_bank_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "qwen":

@@ -130,7 +130,7 @@ def valid_audio(path):
 def cached_audio_path(item):
     """Prefer a completed lossless CosyVoice clip; accept previous MP3 caches."""
     target = Path(item.file_path)
-    candidates = [target.with_suffix(".wav"), target] if item.config.engine in ("cosyvoice", "gemini", "chirp", "qwen", "qwen-bank") else [target]
+    candidates = [target.with_suffix(".wav"), target] if item.config.engine in ("cosyvoice", "cosyvoice3", "gemini", "chirp", "qwen", "qwen-bank") else [target]
     return next((str(path) for path in candidates if valid_audio(path)), None)
 
 
@@ -140,7 +140,9 @@ def _freeze_references(work_dir, items, force_overwrite):
     for item in items:
         if not force_overwrite and cached_audio_path(item):
             continue
-        if item.config.engine not in ("gpt-sovits", "cosyvoice"):
+        if item.config.engine not in ("gpt-sovits", "cosyvoice", "cosyvoice3"):
+            continue
+        if item.config.engine == "cosyvoice3" and item.config.voice != "custom":
             continue
         source = Path(item.config.ref_audio_path)
         if str(source) not in copies:
@@ -213,7 +215,7 @@ def _error_message(exc, items):
     message = str(exc)
     for item in items:
         config = item.config
-        for secret in (config.gpt_sovits_url, config.cosyvoice_url, getattr(config, "qwen_url", "")):
+        for secret in (config.gpt_sovits_url, config.cosyvoice_url, getattr(config, "qwen_url", ""), getattr(config, "cosyvoice3_url", "")):
             if secret:
                 message = message.replace(secret, "[내 코랩 주소]")
         cloud_key = getattr(config, "cloud_tts_api_key", "")
@@ -288,6 +290,9 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
             bundle.write(full_audio, "full_audio.mp3", compress_type=zipfile.ZIP_STORED)
             bundle.write(srt, "subtitles.srt")
             bundle.write(vtt, "subtitles.vtt")
+            if any(item.config.engine == "cosyvoice3" and item.config.voice != "custom" for item in items):
+                from cosy3_voicebank_catalog import ATTRIBUTION
+                bundle.writestr("VOICE_ATTRIBUTION.txt", ATTRIBUTION)
         state.update(status="complete", progress=1.0, message="모든 음성과 자막을 저장했습니다.", result={
             "full_audio": full_audio, "srt": srt, "vtt": vtt,
             "main_zip": main_zip,

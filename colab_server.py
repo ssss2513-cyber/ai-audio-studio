@@ -45,11 +45,12 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.14'
+SERVER_VERSION = '2.9.15'
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
-AUTOTUNE_CAPABILITY = 'measured_concurrency_v2914'
+FIXED_FOUR_CAPABILITY = 'fixed_four_continuous_v2915'
+MAX_CONCURRENT = 4
 MAX_QUEUE_ITEMS = 4096
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
@@ -466,44 +467,29 @@ def install_generation_timer(model):
 
 
 class AutoConcurrency:
-    """Choose observed throughput, with memory as a safety ceiling.
+    """Keep four real requests running, subject to GPU memory safety.
 
-    Every sample is requested speech that is saved normally. Ignore warm-up,
-    mixed-concurrency transitions, queue tails and failed/retried requests.
-    Probe a higher count only after a useful measured improvement. This is an
-    online estimate for the current workload, not a GPU benchmark guarantee.
+    Save the first requested clip while estimating temporary memory, then fill
+    up to four slots. Never raise the cap or run separate tuning generations.
     """
     GIB = 1024 ** 3
-    CANDIDATES = (1, 2, 4, 6, 8, 10)
-    MIN_WINDOW_SECONDS = 12.0
-    MIN_GAIN = 1.08
 
     def __init__(self, snapshot, reset_peak, recover=lambda: None, enabled=True):
         self.snapshot, self.reset_peak, self.recover = snapshot, reset_peak, recover
         self.calibrated = False
         self.limit = 1
-        self.target_limit = 10 if enabled else 1
+        self.target_limit = MAX_CONCURRENT if enabled else 1
         self.ceiling = self.target_limit
         self.per_request = self.GIB // 2
         self.reserve = self.GIB
         self.baseline = 0
         self.memory_retries = 0
         self.enabled = enabled
-        self.epoch = 0
-        self.samples = []
-        self.measurements = {}
-        self.best_limit, self.best_rate = 1, 0.0
-        self.searching, self.slow_windows = enabled, 0
-        self.reason = '첫 대사 준비 후 실제 생성 속도를 비교합니다.' if enabled else '현재 모델 조합은 순차 처리로 실행합니다.'
-
-    def _switch(self, limit):
-        self.limit = max(1, min(limit, self.ceiling))
-        self.epoch += 1
-        self.samples.clear()
+        self.reason = ('첫 대사를 저장한 뒤 최대 4개까지 빈자리를 채웁니다.' if enabled
+                       else '현재 모델 조합은 순차 처리로 실행합니다.')
 
     def begin(self):
-        # A gap between jobs is not generation time.
-        self._switch(self.limit)
+        self.limit = min(self.target_limit, self.ceiling) if self.calibrated else 1
         if not self.calibrated:
             self.baseline = self.snapshot()['allocated']
             self.reset_peak()
@@ -511,14 +497,13 @@ class AutoConcurrency:
     def calibrated_after_success(self):
         if not self.calibrated:
             info = self.snapshot()
-            # References retained after the clip are shared, not ten copies of
-            # per-request workspace. Leave extra room for longer later clips.
+            # Shared reference caches are not per-request temporary memory.
             observed = max(0, info['peak'] - max(self.baseline, info['allocated']))
             self.per_request = max(self.per_request, int(observed * 1.25))
             self.calibrated = True
-            self._switch(1)
+            self.limit = min(self.target_limit, self.ceiling)
             if self.enabled:
-                self.reason = '동시 1개 기준 속도를 측정합니다. 생성된 대사는 모두 저장합니다.'
+                self.reason = '최대 4개 연속 생성 · 하나가 끝날 때마다 다음 대사를 바로 시작합니다.'
         self.refresh()
 
     def available(self):
@@ -527,59 +512,14 @@ class AutoConcurrency:
         return info['free'] + max(0, info['reserved'] - info['allocated'])
 
     def refresh(self):
-        """Recheck idle capacity; keep the OOM ceiling and discard stale choices."""
+        """Keep the four-slot cap and reduce it if GPU memory is insufficient."""
         if self.calibrated:
             usable = self.available() - self.reserve
             limit = max(1, min(self.limit, self.ceiling, int(usable // self.per_request)))
             if limit != self.limit:
-                self._switch(limit)
-                self.best_limit, self.best_rate = limit, 0.0
-                self.searching, self.slow_windows = self.enabled, 0
-                self.measurements.clear()
+                self.limit = limit
                 self.reason = '메모리 여유에 맞춰 동시 수를 줄였습니다.'
         return self.limit
-
-    def observe_completion(self, *, epoch, started, finished, audio_seconds, active_before, has_backlog):
-        if (not self.enabled or not self.calibrated or epoch != self.epoch
-                or active_before < self.limit or not has_backlog):
-            return
-        if not all(math.isfinite(value) for value in (started, finished, audio_seconds)):
-            return
-        if finished <= started or audio_seconds <= 0:
-            return
-        self.samples.append((started, finished, audio_seconds))
-        elapsed = max(row[1] for row in self.samples) - min(row[0] for row in self.samples)
-        if len(self.samples) < max(3, self.limit * 2) or elapsed < self.MIN_WINDOW_SECONDS:
-            return
-        # Audio seconds per wall second avoids treating a long spoken line as
-        # slower simply because it contains more speech. No sum of concurrent
-        # request durations is mistaken for the job's elapsed time.
-        rate = sum(row[2] for row in self.samples) / elapsed
-        self.measurements[self.limit] = dict(limit=self.limit, audio_per_second=round(rate, 3),
-                                             samples=len(self.samples))
-        self.samples.clear()
-        if not self.searching:
-            self.slow_windows = self.slow_windows + 1 if rate < self.best_rate * 0.75 else 0
-            if self.slow_windows >= 2 and self.limit > 1:
-                self.best_limit, self.best_rate = 1, 0.0
-                self.searching, self.slow_windows = True, 0
-                self.measurements.clear()
-                self._switch(1)
-                self.reason = '처리 속도 저하가 이어져 적은 동시 수부터 다시 비교합니다.'
-            return
-        if self.best_rate and rate < self.best_rate * self.MIN_GAIN:
-            self.searching = False
-            self._switch(self.best_limit)
-            self.reason = f'동시 수를 늘려도 빨라지지 않아 관측상 빠른 {self.limit}개를 사용합니다.'
-            return
-        self.best_limit, self.best_rate = self.limit, rate
-        candidate = next((value for value in self.CANDIDATES if self.limit < value <= self.ceiling), None)
-        if candidate is not None and self.available() >= self.reserve + (candidate + 1) * self.per_request:
-            self._switch(candidate)
-            self.reason = f'동시 {self.best_limit}개 속도를 기록했고 {candidate}개와 비교 중입니다.'
-        else:
-            self.searching = False
-            self.reason = f'현재 관측과 메모리 여유에 맞는 동시 {self.limit}개를 사용합니다.'
 
     def can_add(self, active):
         if active >= self.limit:
@@ -590,16 +530,13 @@ class AutoConcurrency:
 
     def memory_failure(self, active_count):
         self.ceiling = max(1, min(self.ceiling, active_count // 2))
-        self._switch(min(self.limit, self.ceiling))
-        self.best_limit = min(self.best_limit, self.limit)
-        self.searching = False
+        self.limit = min(self.limit, self.ceiling)
         self.reason = '메모리 부족이 발생해 동시 수를 줄였습니다. 음질 설정은 유지합니다.'
 
     def status(self):
         return dict(mode='auto' if self.enabled else 'sequential', limit=self.limit, calibrated=self.calibrated,
-                    target_limit=self.target_limit, hard_limit=10,
-                    tuning=self.searching, selection='measured_throughput' if self.enabled else 'sequential', best_limit=self.best_limit,
-                    measurements=list(self.measurements.values()),
+                    target_limit=self.target_limit, hard_limit=MAX_CONCURRENT,
+                    tuning=False, selection='fixed_four' if self.enabled else 'sequential',
                     estimated_request_gib=round(self.per_request / self.GIB, 2),
                     reserve_gib=round(self.reserve / self.GIB, 2),
                     memory_retries=self.memory_retries, reason=self.reason)
@@ -857,7 +794,7 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
         cancel, disconnected = threading.Event(), threading.Event()
         notify_calculated = payload.get('notify_calculated') is True
         # Bound audio buffering, while start notices never block CUDA dispatch
-        # behind a slow audio download. In-flight requests remain capped at ten.
+        # behind a slow audio download. In-flight requests remain capped at four.
         events = queue.Queue()
         audio_slots = threading.BoundedSemaphore(2)
         with registry_lock:
@@ -885,7 +822,7 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
             def runtime():
                 return concurrency.status() if concurrency else {'limit': 1, 'calibrated': True}
 
-            def generate(item, tuning_epoch=None):
+            def generate(item):
                 index = item['index']
                 if cancel.is_set() or disconnected.is_set():
                     return None
@@ -900,7 +837,6 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                                           reference, item.get('style_instruction', ''), '', 'flac')
                     return ({'type': 'audio', 'index': index, 'headers': dict(response.headers),
                              'server_seconds': time.monotonic() - started, 'parallel': runtime(),
-                             '_tuning': (tuning_epoch, started, time.monotonic()),
                              'memory_retries': retry_count}, bytes(response.body))
                 finally:
                     reference.file.close()
@@ -910,7 +846,6 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
             def save_result(result):
                 nonlocal count
                 if result is not None:
-                    result[0].pop('_tuning', None)
                     result[0]['parallel'] = runtime()
                 if result is not None and put(*result):
                     count += 1
@@ -939,7 +874,7 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                     if concurrency:
                         concurrency.begin()
                         concurrency.refresh()
-                    with ThreadPoolExecutor(max_workers=10 if concurrency else 1,
+                    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT if concurrency else 1,
                                             thread_name_prefix='cosy-inference') as pool:
                         def refill():
                             nonlocal position
@@ -948,7 +883,7 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                                    and len(pending) < (concurrency.limit if concurrency else 1)
                                    and (not concurrency or concurrency.can_add(len(pending)))):
                                 item = items[position]
-                                pending[pool.submit(generate, item, concurrency.epoch if concurrency else None)] = item
+                                pending[pool.submit(generate, item)] = item
                                 position += 1
 
                         while position < len(items) or pending or memory_failed:
@@ -957,8 +892,6 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                             # running successes must reach the client before error.
                             refill()
                             if pending:
-                                active_before = len(pending)
-                                was_calibrated = concurrency and concurrency.calibrated
                                 ready, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
                                 results = []
                                 for future in ready:
@@ -972,18 +905,6 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                                 if results and concurrency and not failures and not memory_failed:
                                     if not pending:
                                         concurrency.calibrated_after_success()
-                                    if was_calibrated:
-                                        for header, body in results:
-                                            epoch, started, finished = header['_tuning']
-                                            try:
-                                                duration = float(header['headers'].get('x-audio-duration', 0))
-                                                if int(header['headers'].get('x-generation-retries', 0)):
-                                                    duration = 0.0
-                                            except (ValueError, TypeError):
-                                                duration = 0.0
-                                            concurrency.observe_completion(epoch=epoch, started=started, finished=finished,
-                                                audio_seconds=duration, active_before=active_before,
-                                                has_backlog=position < len(items))
                                 # Fill freed slots before audio transmission can
                                 # block. A slow earlier clip never forms a wave
                                 # barrier, including the former 32-clip boundary.
@@ -1136,7 +1057,7 @@ def serve(port):
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
                                  THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY,
-                                 PARALLEL_CAPABILITY, CONTINUOUS_CAPABILITY, AUTOTUNE_CAPABILITY]}
+                                 PARALLEL_CAPABILITY, CONTINUOUS_CAPABILITY, FIXED_FOUR_CAPABILITY]}
 
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile | None = File(None),

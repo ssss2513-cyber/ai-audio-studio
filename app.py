@@ -39,7 +39,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.28 · Cosy 속도 자동 조절·Gemini 다중 키 확인"
+APP_VERSION = "v2.9.29 · Gemini 한도 판정 수정·요청 모델 확인"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -913,6 +913,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
+    st.caption("현재 적용 버전: " + APP_VERSION)
+
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)
     generation_active = is_running(work_dir)
@@ -1132,7 +1134,7 @@ def main():
                 st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
             if parsed_keys:
-                st.caption("일시적인 요청 제한은 서버가 안내한 시간 후 재시도합니다. 일일 한도·권한 오류는 키 번호와 함께 표시하며 완료 음성은 보관합니다.")
+                st.caption("일시적인 요청 제한은 서버가 안내한 시간 후 재시도합니다. 오류에는 사용한 키 번호·모델·해당 대사 요청 횟수와 Google 제한 항목을 표시하며 완료 음성은 보관합니다.")
             elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
                 st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")

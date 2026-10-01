@@ -680,7 +680,9 @@ class TTSEngine:
                               model=(voice_config.model or "gemini-3.1-flash-tts-preview").strip(),
                               voice=voice_config.voice, metrics=metrics, progress=progress)
         except RuntimeError as exc:
-            raise RuntimeError(f"Gemini 키 {key_index}/{len(keys)} · {exc}") from None
+            model = (voice_config.model or "gemini-3.1-flash-tts-preview").strip()
+            attempts = metrics.get("attempts", 0)
+            raise RuntimeError(f"Gemini 키 {key_index}/{len(keys)} · 요청 모델 {model} · 이 대사 요청 {attempts}회\n{exc}") from None
 
     @classmethod
     async def generate_gemini_speech_async(cls, text, output_file, voice_config, retries=1):

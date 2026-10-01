@@ -12,7 +12,7 @@ from google.genai.errors import ClientError
 import pytest
 
 from core import gemini_client as client
-from core.gemini_quota import quota_recovery
+from core.gemini_quota import quota_recovery, quota_error_message
 
 
 def quota_error(quota_id="GenerateRequestsPerMinutePerProjectPerModel", value="15", delay="51s",
@@ -149,6 +149,83 @@ def test_daily_violation_takes_priority_over_minute_violation():
     error.details["error"]["details"][0]["violations"].append({
         "quotaId": "GenerateRequestsPerDayPerProject", "quotaValue": "100"})
     assert quota_recovery(error).kind == "daily"
+
+
+def test_explicit_minute_violation_beats_daily_word_in_general_help(tmp_path, virtual):
+    error = quota_error(message='Quota exceeded. See daily limits and requests per minute limits for details.')
+    virtual.install([error, audio_response()])
+    assert quota_recovery(error).kind == 'temporary'
+    synthesize(tmp_path / '31.wav')
+    assert len(virtual.calls) == 2 and virtual.times[1] - virtual.times[0] >= 51
+
+
+@pytest.mark.parametrize('message', [
+    'Quota exceeded. For daily limits see the usage page.',
+    'Too many requests. Daily limits are also documented in the help page.',
+])
+def test_help_mentions_do_not_prove_daily_exhaustion(message):
+    assert quota_recovery(quota_error(quota_id=None, message=message)).kind == 'temporary'
+
+
+def test_daily_without_retry_is_not_guessed_from_help_word():
+    error = quota_error(quota_id=None, delay=None, message='Quota exceeded. For daily limits see the usage page.')
+    assert quota_recovery(error).kind == 'unknown'
+
+
+@pytest.mark.parametrize('message', ['Daily quota exceeded', 'You exceeded your daily request limit'])
+def test_explicit_period_exhaustion_without_structured_fields_still_stops(message):
+    assert quota_recovery(quota_error(quota_id=None, message=message)).kind == 'daily'
+
+
+def test_report_retains_exact_limit_id_and_value_without_provider_prose():
+    error = quota_error('GenerateRequestsPerDayPerProject', '100')
+    error.details['error']['details'][0]['violations'][0].update(
+        subject='projects/private-project', description='private-test-key')
+    report = quota_error_message(quota_recovery(error))
+    assert 'GenerateRequestsPerDayPerProject' in report and '허용값 100' in report
+    assert '남은 사용량이 아닙니다' in report
+    assert 'private-test-key' not in report and 'private-project' not in report
+
+
+def test_error_info_minute_limit_uses_exact_value_instead_of_help_text():
+    error = quota_error(quota_id=None, message='Quota exceeded. See daily quota guidance.')
+    error.details['error']['details'].append({
+        '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+        'reason': 'RATE_LIMIT_EXCEEDED', 'metadata': {
+            'quota_limit': 'GenerateRequestsPerMinutePerProject', 'quota_limit_value': '2'}})
+    recovery = quota_recovery(error)
+    assert recovery.kind == 'temporary' and recovery.interval >= 30
+    assert recovery.evidence == (('GenerateRequestsPerMinutePerProject', 2.0),)
+
+
+def test_successful_job_calls_once_per_line_and_resume_reuses_all_saved_audio(tmp_path, monkeypatch):
+    from collections import Counter
+    from core import generation_jobs as jobs, generation_pipeline as pipeline
+    from core.tts_engine import VoiceConfig
+    calls, lock = [], threading.Lock()
+    def transport(key):
+        def generate(**kwargs):
+            with lock:
+                calls.append((key, kwargs['model'], kwargs['contents']))
+            return audio_response()
+        return {'client': SimpleNamespace(models=SimpleNamespace(generate_content=generate))}
+    monkeypatch.setattr(client, '_transport', transport)
+    monkeypatch.setattr(client, '_pacer', lambda *args: SimpleNamespace(wait=lambda *args, **kwargs: 0.0))
+    config = VoiceConfig(engine='gemini', voice='Charon', api_key='key-one,key-two,key-three',
+                         model='gemini-3.1-flash-tts-preview')
+    items = [jobs.GenerationItem(i, '귀례', f'{i}번 대사', str(tmp_path / f'{i}.mp3'), config) for i in range(1, 7)]
+    def state():
+        return dict(id='quota-count', total=6, done=0, reused=0, completed=[], generated=0,
+                    recent_seconds=[], pending_total=6, performance={}, started=time.time())
+    first = state()
+    pipeline.run_generation(str(tmp_path), items, first, threading.Event(), False, lambda *args: None, jobs._record_performance)
+    assert len(calls) == 6 and len({prompt for _, _, prompt in calls}) == 6
+    assert Counter(key for key, _, _ in calls) == dict.fromkeys(('key-one', 'key-two', 'key-three'), 2)
+    assert all(model == config.model for _, model, _ in calls)
+    assert first['done'] == 6 and all(row['requests'] == 2 for row in first['gemini_key_usage'].values())
+    resumed = state()
+    pipeline.run_generation(str(tmp_path), items, resumed, threading.Event(), False, lambda *args: None, jobs._record_performance)
+    assert len(calls) == 6 and resumed['reused'] == 6 and resumed['generated'] == 0
 
 
 def test_zero_limit_in_provider_message_stops_despite_retry_hint():

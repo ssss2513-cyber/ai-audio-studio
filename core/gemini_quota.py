@@ -14,6 +14,8 @@ class QuotaRecovery:
     kind: str
     delay: float | None = None
     interval: float | None = None
+    evidence: tuple = ()
+    basis: str = "unavailable"
 
 
 def _number(value):
@@ -33,6 +35,26 @@ def _duration(value):
     return None
 
 
+def _identifier(value):
+    return re.sub(r"[^a-z]", "", str(value).lower())
+
+
+def _evidence_id(value):
+    """Keep quota identifiers, never provider prose, project IDs or credentials."""
+    value = str(value or "")
+    if re.fullmatch(r"(?:Generate|Input|Output|Requests|Tokens|Audio|Concurrent|Spend|Model|Total)[A-Za-z0-9_-]{1,150}", value):
+        return value
+    return ""
+
+
+def _explicit_period_exhaustion(text):
+    # A help sentence such as "see daily limits" is not a daily violation.
+    period = r"(?:daily|monthly|per[\s_-]*day|per[\s_-]*month)"
+    exhausted = r"(?:exceeded|exhausted|reached)"
+    return bool(re.search(rf"\b{period}\b[^.;:\n]{{0,60}}\b{exhausted}\b|"
+                          rf"\b{exhausted}\b[^.;:\n]{{0,60}}\b{period}\b", text, re.I))
+
+
 def quota_recovery(exc):
     # google-genai stores the entire JSON response in APIError.details.
     payload = getattr(exc, "details", {})
@@ -44,7 +66,7 @@ def quota_recovery(exc):
         error, details = {}, payload if isinstance(payload, list) else []
     details = details if isinstance(details, list) else []
     message = str(error.get("message") or getattr(exc, "message", "") or "")
-    texts, delays, intervals = [message], [], []
+    structured, descriptions, delays, intervals, evidence = [], [], [], [], []
     invalid_delay, zero_quota = False, False
     for detail in details:
         if not isinstance(detail, dict):
@@ -57,37 +79,50 @@ def quota_recovery(exc):
             else:
                 delays.append(delay)
         if kind.endswith("google.rpc.ErrorInfo"):
-            texts.append(str(detail.get("reason", "")))
+            structured.append(str(detail.get("reason", "")))
             metadata = detail.get("metadata") or {}
             if isinstance(metadata, dict):
-                texts.extend(str(metadata.get(key, "")) for key in ("quota_limit", "quota_limit_name", "quota_metric"))
-                if "quota_limit_value" in metadata and _number(metadata["quota_limit_value"]) == 0:
-                    zero_quota = True
+                structured.extend(str(metadata.get(key, "")) for key in ("quota_limit", "quota_limit_name", "quota_metric"))
+                value = _number(metadata.get("quota_limit_value"))
+                zero_quota |= value == 0
+                quota_id = _evidence_id(metadata.get("quota_limit") or metadata.get("quota_limit_name"))
+                if quota_id:
+                    evidence.append((quota_id, value))
+                    if value and "requestsperminute" in _identifier(quota_id):
+                        intervals.append(60.0 / value + 0.1)
         if kind.endswith("google.rpc.QuotaFailure"):
             violations = detail.get("violations") or []
             for violation in violations if isinstance(violations, list) else []:
                 if not isinstance(violation, dict):
                     continue
                 quota_id = str(violation.get("quotaId", violation.get("quota_id", "")))
-                texts.extend([quota_id, str(violation.get("quotaMetric", violation.get("quota_metric", ""))),
-                              str(violation.get("description", ""))])
+                structured.extend([quota_id, str(violation.get("quotaMetric", violation.get("quota_metric", "")))])
+                descriptions.append(str(violation.get("description", "")))
                 value = _number(violation.get("quotaValue", violation.get("quota_value")))
-                if value == 0:
-                    zero_quota = True
-                identifier = re.sub(r"[^a-z]", "", quota_id.lower())
+                zero_quota |= value == 0
+                if _evidence_id(quota_id):
+                    evidence.append((quota_id, value))
+                identifier = _identifier(quota_id)
                 if value and "requestsperminute" in identifier:
                     intervals.append(60.0 / value + 0.1)
 
-    combined = " ".join(texts)
-    normalized = re.sub(r"[^a-z]", "", combined.lower())
+    normalized = _identifier(" ".join(structured))
+    periods = ("perday", "daily", "permonth", "monthly")
+    billing = ("spendlimit", "spendbased", "billingdisabled", "creditsexhausted", "balancedepleted")
+    windows = periods + billing + ("perminute", "persecond")
+    specific = zero_quota or any(term in normalized for term in windows)
+    fallback_text = " ".join(descriptions + [message])
+    basis = "structured" if specific else "message" if fallback_text else "unavailable"
+    def result(kind, delay=None, interval=None):
+        return QuotaRecovery(kind, delay, interval, tuple(dict.fromkeys(evidence))[:4], basis)
     # A short RetryInfo may accompany daily/zero quota errors. It is not proof
     # of a per-minute limit and must never override these non-retryable cases.
     if zero_quota or re.search(r"\blimit\s*:\s*0(?:\.0+)?\s*(?:[,;\n]|$)", message, re.I):
-        return QuotaRecovery("zero")
-    if any(term in normalized for term in ("perday", "daily", "permonth", "monthly")):
-        return QuotaRecovery("daily")
-    if any(term in normalized for term in ("spendlimit", "spendbased", "billingdisabled", "creditsexhausted", "balancedepleted")):
-        return QuotaRecovery("billing")
+        return result("zero")
+    if any(term in normalized for term in periods) or (not specific and _explicit_period_exhaustion(fallback_text)):
+        return result("daily")
+    if any(term in normalized for term in billing) or (not specific and any(term in _identifier(fallback_text) for term in billing)):
+        return result("billing")
 
     headers = getattr(getattr(exc, "response", None), "headers", None) or {}
     header = next((value for key, value in headers.items() if str(key).lower() == "retry-after"), None)
@@ -107,17 +142,18 @@ def quota_recovery(exc):
         matches = re.findall(r"(?:retryDelay[\"'\s:]+|retry in\s+)(\d+(?:\.\d+)?)s", message, re.I)
         delays.extend(float(value) for value in matches)
     if invalid_delay:
-        return QuotaRecovery("unknown")
+        return result("unknown")
     if not delays:
-        if any(term in normalized for term in ("perminute", "persecond", "ratelimitexceeded", "toomanyrequests")):
+        rate_text = normalized if specific else normalized + _identifier(fallback_text)
+        if any(term in rate_text for term in ("perminute", "persecond", "ratelimitexceeded", "toomanyrequests")):
             delays.append(60.0)
         else:
-            return QuotaRecovery("unknown")
+            return result("unknown")
     requested = max(delays)
     if not math.isfinite(requested) or requested > MAX_QUOTA_WAIT - 1:
-        return QuotaRecovery("long_wait")
-    return QuotaRecovery("temporary", max(1.0, math.ceil(requested) + 1.0),
-                         max(intervals) if intervals else None)
+        return result("long_wait")
+    return result("temporary", max(1.0, math.ceil(requested) + 1.0),
+                  max(intervals) if intervals else None)
 
 
 def quota_error_message(recovery):
@@ -129,4 +165,11 @@ def quota_error_message(recovery):
         "long_wait": "Gemini가 긴 한도 대기를 요청했습니다(429). AI Studio에서 한도와 초기화 시점을 확인한 뒤 이어서 생성해주세요.",
         "unknown": "Gemini 사용 한도 오류(429)입니다. 서버가 복구 가능한 대기 시간을 알려주지 않아 멈췄습니다. AI Studio에서 프로젝트 한도를 확인해주세요.",
     }[recovery.kind]
-    return reason + " 완료된 음성은 유지됩니다. 같은 프로젝트의 API 키를 추가해도 한도는 늘어나지 않습니다."
+    if recovery.evidence:
+        fields = [name + (f" (허용값 {value:g})" if value is not None else "")
+                  for name, value in recovery.evidence]
+        reason += "\nGoogle 제한 항목: " + "; ".join(fields)
+        reason += ". 허용값은 남은 사용량이 아닙니다."
+    elif recovery.kind in ("daily", "zero", "billing"):
+        reason += "\n제한 종류는 응답 문구로 판정했습니다. Google이 구체적인 제한 이름을 제공하지 않았습니다."
+    return reason + " 완료된 음성은 유지됩니다."

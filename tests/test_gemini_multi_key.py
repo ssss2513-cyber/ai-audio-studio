@@ -57,9 +57,11 @@ def test_failure_identifies_key_without_switching_to_another_key(monkeypatch):
         raise RuntimeError('일일 한도(429)')
     monkeypatch.setattr(gemini_client, 'synthesize', synthesize)
     config = VoiceConfig(engine='gemini', voice='Kore', api_key='one-key,two-key,three-key')
-    with pytest.raises(RuntimeError, match='키 1/3.*429'):
+    with pytest.raises(RuntimeError, match='키 1/3') as failure:
         TTSEngine.generate_gemini_speech('원래 대사', 'unused.wav', config)
     assert calls == ['one-key']
+    assert '429' in str(failure.value)
+    assert '요청 모델 gemini-3.1-flash-tts-preview' in str(failure.value)
 
 
 def test_job_reports_each_key_and_retries_count_once(tmp_path, monkeypatch):

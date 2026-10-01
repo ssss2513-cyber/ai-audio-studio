@@ -39,7 +39,8 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.8'
+SERVER_VERSION = '2.9.9'
+LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
@@ -637,13 +638,16 @@ def serve(port):
                 'gpu_name': gpu_name, 'acceleration': acceleration,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
-                                 THROUGHPUT_CAPABILITY]}
+                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY]}
 
     @app.post('/v1/{token}/synthesize')
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile | None = File(None),
-                   style_instruction: str = Form(''), reference_id: str = Form('')):
+                   style_instruction: str = Form(''), reference_id: str = Form(''),
+                   audio_format: str = Form('wav')):
         authorize(token)
+        if audio_format not in ('wav', 'flac'):
+            raise HTTPException(422, '지원하는 전송 형식은 WAV 또는 FLAC입니다.')
         try:
             text = normalize_speech_text(text, '생성할 대사')
             prompt_text = normalize_speech_text(prompt_text, '참조 오디오 실제 대사')
@@ -842,13 +846,25 @@ def serve(port):
                         speech = speech * (0.98 / peak)
                 output = io.BytesIO()
                 sf.write(output, speech, sample_rate, format='WAV', subtype='PCM_16')
+                wav_bytes = output.getvalue()
+                wire_bytes = wav_bytes
+                if audio_format == 'flac':
+                    # Quantize exactly once through the existing WAV writer.
+                    # FLAC transports those same integer samples losslessly.
+                    pcm, _ = sf.read(io.BytesIO(wav_bytes), dtype='int16')
+                    compressed = io.BytesIO()
+                    sf.write(compressed, pcm, sample_rate, format='FLAC', subtype='PCM_16')
+                    wire_bytes = compressed.getvalue()
                 postprocess_seconds = time.monotonic() - postprocess_started
                 print(f'생성 완료 · 참고 분석 {preparation_seconds:.1f}초 · 음성 계산 {synthesis_seconds:.1f}초 '
                       f'(발음 순서 계산 {generation_timer["llm_seconds"]:.1f}초, 그중 후보 선택 {generation_timer["sampling_seconds"]:.1f}초) · 후처리 {postprocess_seconds:.1f}초 '
                       f'· 재시도 {recovery_count}회 / 추가 {recovery_seconds:.1f}초', flush=True)
-                return Response(output.getvalue(), media_type='audio/wav', headers={
+                return Response(wire_bytes, media_type='audio/flac' if audio_format == 'flac' else 'audio/wav', headers={
                     'X-CosyVoice-Version': SERVER_VERSION, 'X-Request-ID': request_id,
                     'X-Audio-Duration': f'{len(speech) / sample_rate:.3f}',
+                    'X-Audio-Format': audio_format,
+                    'X-Audio-Bytes': str(len(wire_bytes)),
+                    'X-WAV-Bytes': str(len(wav_bytes)),
                     'X-Text-Chunks': str(len(chunks)),
                     'X-Reference-Cache': 'hit' if reference_hit else 'miss',
                     'X-Reference-ID': reference_id,

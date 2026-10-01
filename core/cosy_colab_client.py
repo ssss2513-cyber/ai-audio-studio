@@ -21,6 +21,7 @@ ENGINES = {
 GENERATION_CAPABILITY = "validated_generation_v293"
 REFERENCE_CACHE_CAPABILITY = "reference_cache_v294"
 REFERENCE_TRANSPORT_CAPABILITY = "reference_transport_v295"
+LOSSLESS_TRANSPORT_CAPABILITY = "lossless_transport_v299"
 _CLIENTS = threading.local()
 
 
@@ -152,6 +153,8 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
     if reference_id:
         transport.reference_ids.move_to_end(identity)
     data = {"text": text, "prompt_text": prompt_text, "speed": speed, "style_instruction": style_instruction}
+    if LOSSLESS_TRANSPORT_CAPABILITY in (status or {}).get("capabilities", []):
+        data["audio_format"] = "flac"
 
     def post(with_reference):
         fields = dict(data)
@@ -161,9 +164,10 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             fields["reference_id"] = reference_id
             files = None
         return transport.session.post(base + "/synthesize", data=fields, files=files,
-                                      timeout=(15, 600), allow_redirects=False)
+                                      timeout=(15, 600), allow_redirects=False, stream=True)
 
     request_started = time.monotonic()
+    response = None
     try:
         response = post(with_reference=not bool(reference_id))
         # A 428 is issued only BEFORE inference, when an LRU reference was
@@ -191,15 +195,46 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                           "사이트 왼쪽의 CosyVoice v2.9.8 속도 개선 코드를 실행한 뒤 새 주소로 연결해주세요. "
                           + str(detail))
             raise RuntimeError(f"{label} 생성 실패 (HTTP {response.status_code}): {str(detail)[:800]}")
+        headers_seconds = time.monotonic() - request_started
+        download_started = time.monotonic()
+        received = bytearray()
+        for part in response.iter_content(chunk_size=64 * 1024):
+            received.extend(part)
+            if len(received) > 64 * 1024 * 1024:
+                raise RuntimeError("코랩 음성 응답이 허용 크기를 초과했습니다.")
+        body = bytes(received)
+        download_seconds = time.monotonic() - download_started
     except requests.Timeout as exc:
         transport.invalidate()
         raise RuntimeError("응답 시간이 초과되었습니다. 음성 요청은 자동 반복하지 않았습니다. 코랩 마지막 오류를 확인해주세요.") from exc
     except requests.RequestException as exc:
         transport.invalidate()
         raise RuntimeError("코랩 연결이 끊겼습니다. 코랩 실행 상태와 연결 주소를 확인해주세요.") from exc
+    finally:
+        if response is not None:
+            response.close()
     request_seconds = time.monotonic() - request_started
+    decode_started = time.monotonic()
+    wire_format = "flac" if body.startswith(b"fLaC") else "wav"
+    wav_bytes = body
+    if wire_format == "flac":
+        import soundfile as sf
+        try:
+            with sf.SoundFile(io.BytesIO(body)) as source:
+                if (source.samplerate != 24000 or source.channels != 1 or source.subtype != "PCM_16"
+                        or source.frames <= 0 or source.frames * 2 > 64 * 1024 * 1024):
+                    raise ValueError("unexpected FLAC format")
+                pcm = source.read(dtype="int16")
+                if len(pcm) != source.frames:
+                    raise ValueError("truncated FLAC")
+            output = io.BytesIO()
+            sf.write(output, pcm, 24000, format="WAV", subtype="PCM_16")
+            wav_bytes = output.getvalue()
+        except (RuntimeError, ValueError) as exc:
+            transport.invalidate()
+            raise RuntimeError("코랩의 무손실 음성 전송을 읽지 못했습니다. 음성을 저장하지 않았습니다.") from exc
     try:
-        with wave.open(io.BytesIO(response.content), "rb") as wav:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
             if wav.getnframes() <= 0 or wav.getframerate() <= 0:
                 raise ValueError("empty WAV")
             if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 24000:
@@ -218,11 +253,12 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
         while len(transport.reference_ids) > 16:
             transport.reference_ids.popitem(last=False)
     target.parent.mkdir(parents=True, exist_ok=True)
+    decode_seconds = time.monotonic() - decode_started
     save_started = time.monotonic()
     # A failed conversion must not replace a previous successful output.
     with tempfile.TemporaryDirectory(prefix="cosy_", dir=target.parent) as folder:
         wav_path = Path(folder) / "speech.wav"
-        wav_path.write_bytes(response.content)
+        wav_path.write_bytes(wav_bytes)
         if target.suffix.lower() == ".mp3":
             completed = Path(folder) / "speech.mp3"
             result = subprocess.run(
@@ -239,6 +275,10 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
                        total_seconds=time.monotonic() - started,
                        save_seconds=time.monotonic() - save_started,
                        audio_seconds=audio_seconds,
+                       client_preparation_seconds=request_started - started,
+                       response_headers_seconds=headers_seconds,
+                       download_seconds=download_seconds, decode_seconds=decode_seconds,
+                       wire_format=wire_format, wire_bytes=len(body), wav_bytes=len(wav_bytes),
                        server_version=response.headers.get("X-CosyVoice-Version", "")[:24],
                        gpu_name=str((status or {}).get("gpu_name", ""))[:80],
                        reference_cached=response.headers.get("X-Reference-Cache") == "hit")
@@ -262,8 +302,10 @@ def synthesize(url, text, ref_path, prompt_text, speed, output_file, engine="cos
             metrics["transport_seconds"] = max(0.0, request_seconds - metrics["reference_seconds"]
                                                 - metrics["synthesis_seconds"]
                                                 - metrics.get("postprocess_seconds", 0.0))
+            metrics["response_wait_seconds"] = max(0.0, headers_seconds - metrics["reference_seconds"]
+                                                    - metrics["synthesis_seconds"]
+                                                    - metrics.get("postprocess_seconds", 0.0))
         acceleration = (status or {}).get("acceleration", {})
         if isinstance(acceleration, dict):
             metrics["acceleration"] = str(acceleration.get("label", ""))[:200]
-    response.close()
     return str(output_file)

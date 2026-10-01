@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.15 · CosyVoice 계산 대기 단축 · GPU 상태 표시"
+APP_VERSION = "v2.9.16 · Gemini 중복 대기 제거 · CosyVoice 무손실 전송"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -361,16 +361,25 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
             runtime = [latest.get("gpu_name"), latest.get("acceleration")]
             st.caption(f"코랩 v{latest.get('server_version') or '확인 필요'} · "
                        + " · ".join(value for value in runtime if value))
-            if latest.get("server_version") != "2.9.8":
-                st.caption("추가 속도 개선은 코랩 v2.9.8부터 적용됩니다. 사이트 왼쪽의 업데이트 코드를 실행한 뒤 새 주소로 연결해주세요.")
+            if latest.get("wire_format") != "flac":
+                st.caption("무손실 압축 전송은 코랩 v2.9.9부터 적용됩니다. 기존 WAV 전송도 계속 사용할 수 있습니다.")
             with st.expander("CosyVoice 처리 시간 자세히"):
                 parts = []
                 for field, label in (("reference_seconds", "참고 분석"), ("synthesis_seconds", "음성 계산"),
-                                     ("postprocess_seconds", "코랩 후처리"), ("transport_seconds", "전송 등"),
+                                     ("postprocess_seconds", "코랩 후처리"), ("transport_seconds", "통신·미측정 대기"),
                                      ("save_seconds", "원음 저장")):
                     if field in latest:
                         parts.append(f"{label} {latest[field]:.1f}초")
                 st.write(" · ".join(parts) or "이전 코랩은 세부 시간을 보내지 않습니다.")
+                if "download_seconds" in latest:
+                    st.caption(f"통신 상세: 서버 계산 외 응답 대기 {latest.get('response_wait_seconds', 0):.1f}초"
+                               f" · 파일 다운로드 {latest['download_seconds']:.1f}초"
+                               f" · 연결 확인·요청 준비 {latest.get('client_preparation_seconds', 0):.1f}초"
+                               f" · 음성 복원·검사 {latest.get('decode_seconds', 0):.1f}초")
+                    st.caption("응답 대기에는 연결·요청 업로드·중계 서버·코랩의 미측정 처리가 포함됩니다. 순수 다운로드 시간과는 다릅니다.")
+                    if latest.get("wire_format") == "flac":
+                        st.caption(f"무손실 전송: WAV {latest.get('wav_bytes', 0) / 1024:.0f}KB"
+                                   f" → 전송 {latest.get('wire_bytes', 0) / 1024:.0f}KB · 동일 PCM 원음으로 복원")
                 if "llm_seconds" in latest:
                     st.caption(f"음성 계산 중 발음 순서 계산 {latest['llm_seconds']:.1f}초"
                                f" · 나머지 처리 약 {max(0, latest.get('synthesis_seconds', 0) - latest['llm_seconds']):.1f}초")
@@ -384,6 +393,15 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 else:
                     st.caption("재시도 상세 표시는 코랩 v2.9.7부터 지원됩니다.")
                 st.caption("개별 대사는 WAV 원음으로 저장하고, 마지막에 MP3 한 파일로 변환합니다.")
+        if latest.get("engine") == "gemini":
+            st.caption(f"최근 {latest['index']}번 Gemini: 전체 {latest.get('total_seconds', 0):.1f}초"
+                       f" · Google 응답·수신 {latest.get('request_seconds', 0):.1f}초"
+                       f" · 요청 간격 대기 {latest.get('pacing_seconds', 0):.1f}초"
+                       f" · 원음 저장 {latest.get('postprocess_seconds', 0):.1f}초")
+            st.caption(f"사용 모델: {latest.get('model', '확인 필요')} · 요청 {latest.get('attempts', 1)}회")
+        current = job.get("current_metrics") or {}
+        if active and current.get("engine") == "gemini":
+            st.caption(f"현재 Gemini 모델: {current.get('model', '')} · 대기 단계는 아래에 표시됩니다.")
         if job.get("merge_seconds") is not None:
             st.caption(f"전체 MP3 합치기: {job['merge_seconds']:.1f}초")
         if active:
@@ -982,7 +1000,7 @@ def main():
                 value=saved_key,
                 type="password",
                 placeholder="AIzaSy... (여러 개 입력 시 쉼표로 구분: key1, key2)",
-                help="Google AI Studio 무료 API 키를 입력하세요. 쉼표(,)로 여러 개 입력 시 15 RPM 한도 없이 자동 분산(로드밸런싱)됩니다.",
+                help="Google AI Studio API 키를 입력하세요. 한도는 프로젝트·모델별로 적용되며 같은 프로젝트의 키를 추가해도 늘어나지 않습니다.",
                 key="input_gemini_api_key"
             )
             st.session_state["gemini_api_key"] = g_key
@@ -1009,10 +1027,10 @@ def main():
 
             parsed_keys = [k.strip() for k in re.split(r'[,;\s\n]+', g_key) if k.strip()]
             if len(parsed_keys) > 1:
-                st.success(f"✅ Gemini API Key {len(parsed_keys)}개 멀티 등록 완료 (최대 {len(parsed_keys)*15} RPM 자동 분산)")
+                st.success(f"✅ Gemini API Key {len(parsed_keys)}개 등록 완료")
             elif len(parsed_keys) == 1:
-                st.success("✅ Gemini API Key 준비 완료 (15 RPM 지원)")
-                st.caption("💡 꿀팁: AI Studio에서 무료 키를 1개 더 받아 쉼표(,)로 넣으시면(예: 키1, 키2) 15 RPM 한도 없이 2배 빠르게 생성됩니다.")
+                st.success("✅ Gemini API Key 준비 완료")
+                st.caption("한도 초과 시 완료 파일을 유지하고 멈춥니다. 선택한 모델·성우를 유지하며, 35초씩 자동 대기하거나 다른 모델로 바꾸지 않습니다.")
             elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
                 st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")

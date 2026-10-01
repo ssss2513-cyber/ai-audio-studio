@@ -26,9 +26,9 @@ _SERVER_RETRIES = 2
 _SERVER_RETRY_CODES = {500, 502, 503, 504}
 _MAX_RETRY_WAIT = 10.0
 # One registered key pool shares this request budget, including previews and
-# retries. Ten starts per minute with a small timing margin; a provider's
+# retries. Seven seconds between starts gives margin below 10 RPM; a provider's
 # stricter quota/cooldown can only increase the interval.
-GEMINI_REQUEST_INTERVAL = 6.2
+GEMINI_REQUEST_INTERVAL = 7.0
 
 
 class RequestPacer:

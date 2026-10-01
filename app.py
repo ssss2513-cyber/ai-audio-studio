@@ -40,7 +40,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.31 · Gemini 10 RPM 요청 간격 조절"
+APP_VERSION = "v2.9.32 · Gemini 요청 간격 7초"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1135,7 +1135,7 @@ def main():
                 st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
             if parsed_keys:
-                st.caption("새로 시작하는 Gemini 생성은 등록한 키 전체를 합쳐 요청 시작 간격을 최소 6.2초로 조절합니다(10 RPM 이내 목표). Google이 더 긴 대기를 요구하면 그 시간을 따릅니다.")
+                st.caption("새로 시작하는 Gemini 생성은 등록한 키 전체를 합쳐 요청 시작 간격을 최소 7초로 조절합니다(평균 분당 약 8.6회 이내). Google이 더 긴 대기를 요구하면 그 시간을 따릅니다.")
                 st.caption("일시적인 요청 제한은 서버가 안내한 시간 후 재시도합니다. 오류에는 사용한 키 번호·모델·해당 대사 요청 횟수와 Google 제한 항목을 표시하며 완료 음성은 보관합니다.")
             elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
@@ -2189,7 +2189,7 @@ def main():
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
         st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. 하나가 끝나면 다음 대사를 바로 시작하고, 모든 대사가 완료되면 번호순으로 MP3 하나로 합칩니다. Gemini는 최대 2개이며, Cosy v2.9.14는 실제 생성 속도를 비교해 최대 10개 안에서 동시 수를 선택합니다.")
-        st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 6.2초입니다. 등록한 모든 키와 재시도를 합쳐 10 RPM 이내를 목표로 하며, 완료된 음성은 계속 재사용합니다.")
+        st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
         
         total_segs = len(st.session_state["parsed_segments"])
         

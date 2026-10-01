@@ -37,7 +37,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.25 · 음성 스타일 선택 오류 복구"
+APP_VERSION = "v2.9.26 · 스타일 오류·Gemini 서버 재시도 복구"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -401,6 +401,9 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                 status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단"}.get(progress.get("status"), "대기")
                 receiving = f" · 수신 {progress['receiving']}개" if progress.get('receiving') else ""
                 st.caption(f"{label}: 저장 {progress['done']}/{progress['total']}개 · 진행 {progress.get('active', 0)}개{receiving} · {status}")
+                for index, retry in (job.get("retrying_lines") or {}).items():
+                    if retry.get("engine") == engine:
+                        st.info(f"{index}번({retry['speaker']}): {retry['phase']}")
                 error = (job.get("engine_errors") or {}).get(engine)
                 if error and active:
                     suffix = "다른 엔진은 계속 생성합니다." if len(job["engine_progress"]) > 1 else "진행 중인 결과를 저장합니다."
@@ -480,6 +483,8 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                        f" · Google 응답·수신 {latest.get('request_seconds', 0):.1f}초"
                        f" · 요청 간격 대기 {latest.get('pacing_seconds', 0):.1f}초"
                        f" · 원음 저장 {latest.get('postprocess_seconds', 0):.1f}초")
+            if latest.get("retries"):
+                st.caption(f"서버 오류 자동 복구 {latest['retries']}회 · 추가 대기 {latest.get('retry_seconds', 0):.1f}초")
             st.caption(f"사용 모델: {latest.get('model', '확인 필요')} · 요청 {latest.get('attempts', 1)}회")
         current = job.get("current_metrics") or {}
         if active and current.get("engine") == "gemini":

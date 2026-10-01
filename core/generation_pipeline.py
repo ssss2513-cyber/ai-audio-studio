@@ -62,7 +62,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     by_index = {item.index: item for item in items}
     engine_stops = {item.config.engine: threading.Event() for item in items}
     state.update(execution_mode='ordered_independent_v2921', active_indices=[], execution_notes=[],
-                 cosy_parallel={}, engine_progress={}, engine_errors={})
+                 cosy_parallel={}, engine_progress={}, engine_errors={}, retrying_lines={})
     for item in items:
         progress = state['engine_progress'].setdefault(item.config.engine, dict(total=0, done=0, active=0))
         progress['total'] += 1
@@ -95,6 +95,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                                   'paused' if pause.is_set() else 'running')
 
     def complete(item, path, metrics, reused=False):
+        state['retrying_lines'].pop(item.index, None)
         if item.index in completed:
             raise RuntimeError(f'대사 {item.index}번이 중복 완료되어 병합하지 않았습니다.')
         completed[item.index] = dict(index=item.index, speaker=item.speaker, text=item.text,
@@ -223,6 +224,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             if kind == 'error':
                 failures.append((item, details))
                 if item:
+                    state['retrying_lines'].pop(item.index, None)
                     active.discard(item.index)
                     state['engine_errors'].setdefault(item.config.engine, dict(
                         index=item.index, speaker=item.speaker, message=_error_message(details, items)))
@@ -235,6 +237,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                 else:
                     pause.set()  # Unattributed worker failure: stop safely.
             elif kind == 'cancelled':
+                state['retrying_lines'].pop(item.index, None)
                 active.discard(item.index)
                 calculating.discard(item.index)
             elif kind == 'calculated':
@@ -247,6 +250,11 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             elif kind == 'completed':
                 complete(item, *details)
             elif kind in ('started', 'phase'):
+                if details.get('retrying'):
+                    state['retrying_lines'][item.index] = dict(
+                        engine=item.config.engine, speaker=item.speaker, phase=details.get('phase', '자동 재시도 중'))
+                else:
+                    state['retrying_lines'].pop(item.index, None)
                 active.add(item.index)
                 state.update(current_index=item.index, current_speaker=item.speaker,
                              current_metrics=dict(details, index=item.index, engine=item.config.engine))
@@ -272,6 +280,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             thread.join()
         active.clear()
         calculating.clear()
+        state['retrying_lines'].clear()
         update_progress()
     if failures:
         item, exc = failures[0]

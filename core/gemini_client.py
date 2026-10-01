@@ -1,12 +1,15 @@
-"""One selected-model Gemini TTS request, with visible timing and no hidden retries."""
+"""Selected-model Gemini TTS with bounded, visible transient server recovery."""
 from collections import OrderedDict
 from concurrent.futures import CancelledError
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import io
 import math
 import os
 from pathlib import Path
 import re
+import random
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +20,9 @@ import wave
 _CLIENTS = threading.local()
 _PACERS = {}
 _PACERS_LOCK = threading.Lock()
+_SERVER_RETRIES = 2
+_SERVER_RETRY_CODES = {500, 502, 503, 504}
+_MAX_RETRY_WAIT = 10.0
 
 
 class RequestPacer:
@@ -79,12 +85,49 @@ def _transport(key):
     return clients[key]
 
 
-def _request_error(exc):
+def _status_code(exc):
     code = getattr(exc, "code", None)
     try:
-        code = int(code)
+        return int(code)
     except (TypeError, ValueError):
-        code = None
+        return None
+
+
+def _server_retry_delay(exc, retry_number):
+    """Respect Retry-After; never turn a long provider delay into an early retry."""
+    delay = 2.0 * (2 ** retry_number) + random.uniform(0.0, 0.5)
+    response = getattr(exc, "response", None)
+    header = (getattr(response, "headers", None) or {}).get("Retry-After")
+    if header is not None:
+        try:
+            requested = float(header)
+        except (TypeError, ValueError):
+            try:
+                date = parsedate_to_datetime(header)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                requested = (date - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if not math.isfinite(requested) or requested > _MAX_RETRY_WAIT:
+            return None
+        delay = max(delay, requested)
+    return delay
+
+
+def _wait_retry(delay, cancel):
+    started = time.monotonic()
+    while True:
+        if cancel and cancel():
+            raise CancelledError()
+        remaining = delay - (time.monotonic() - started)
+        if remaining <= 0:
+            return time.monotonic() - started
+        time.sleep(min(remaining, 0.1))
+
+
+def _request_error(exc):
+    code = _status_code(exc)
     if code == 429:
         # Do not rotate keys/models to get around a project quota. A delayed
         # duplicate request may consume quota without producing a usable file.
@@ -113,32 +156,55 @@ def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, prog
     from google.genai import types
     started = time.monotonic()
     metrics = metrics if metrics is not None else {}
-    metrics.update(engine="gemini", model=model, attempts=0, pacing_seconds=0.0)
+    metrics.update(engine="gemini", model=model, attempts=0, pacing_seconds=0.0,
+                   request_seconds=0.0, retries=0, retry_seconds=0.0, retrying=False)
     target = Path(output_file).absolute()
     if target.suffix.lower() not in (".wav", ".mp3"):
         raise ValueError("출력 파일은 WAV 또는 MP3여야 합니다.")
     target.parent.mkdir(parents=True, exist_ok=True)
     transport = _transport(api_key)
-    if progress:
-        progress("요청 간격 조절", metrics)
-    metrics["pacing_seconds"] = _pacer(pacing_group or api_key).wait(cancel)
-    metrics["attempts"] = 1
-    if progress:
-        progress("Gemini 응답 대기", metrics)
-    request_started = time.monotonic()
-    transport["last_started"] = request_started
-    metrics["attempts"] = 1
-    try:
-        response = transport["client"].models.generate_content(
-            model=model, contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)))))
-    except Exception as exc:
-        raise _request_error(exc) from exc
-    finally:
-        metrics["request_seconds"] = time.monotonic() - request_started
+    config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))))
+    pacer = _pacer(pacing_group or api_key)
+    for attempt in range(_SERVER_RETRIES + 1):
+        if progress:
+            progress("요청 간격 조절" if attempt == 0 else f"Gemini 재시도 {attempt}/{_SERVER_RETRIES} · 요청 간격 조절", metrics)
+        metrics["pacing_seconds"] += pacer.wait(cancel)
+        metrics["attempts"] = attempt + 1
+        metrics["retries"] = attempt
+        if progress:
+            progress("Gemini 응답 대기" if attempt == 0 else f"Gemini 재시도 {attempt}/{_SERVER_RETRIES} · 응답 대기", metrics)
+        request_started = time.monotonic()
+        transport["last_started"] = request_started
+        failure = None
+        try:
+            response = transport["client"].models.generate_content(
+                model=model, contents=prompt, config=config)
+        except CancelledError:
+            raise
+        except Exception as exc:
+            failure = exc
+        finally:
+            metrics["request_seconds"] += time.monotonic() - request_started
+        if failure is None:
+            break
+        code = _status_code(failure)
+        if code not in _SERVER_RETRY_CODES or attempt == _SERVER_RETRIES:
+            error = _request_error(failure)
+            if attempt:
+                error = RuntimeError(f"자동 재시도 {attempt}회 후에도 실패했습니다. {error}")
+            raise error from None
+        delay = _server_retry_delay(failure, attempt)
+        if delay is None:
+            raise RuntimeError(str(_request_error(failure))
+                               + " 서버가 지정한 대기 시간을 지키기 위해 자동 재시도를 멈췄습니다.") from None
+        metrics["retrying"] = True
+        if progress:
+            progress(f"Gemini 서버 오류({code}) · 약 {math.ceil(delay)}초 후 자동 재시도 {attempt + 1}/{_SERVER_RETRIES}", metrics)
+        metrics["retry_seconds"] += _wait_retry(delay, cancel)
+    metrics["retrying"] = False
     conversion_started = time.monotonic()
     if progress:
         progress("Gemini 원음 저장", metrics)

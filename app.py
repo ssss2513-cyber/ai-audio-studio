@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.19 · Cosy 자동 동시 생성 · 대사 순서 보존"
+APP_VERSION = "v2.9.20 · Cosy 동시 생성 상한 10개 · 대사 순서 보존"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -348,16 +348,19 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.progress(float(job.get("progress", 0)))
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
-        if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919"):
-            st.caption("Gemini 최대 2개 · Cosy v2.9.11 자동 동시 생성 · 완료한 음성은 대사 번호순으로 합칩니다.")
+        if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920"):
+            st.caption("Gemini 최대 2개 · Cosy v2.9.12는 메모리 여유에 따라 10개까지 · 완료한 음성은 대사 번호순으로 합칩니다.")
             parallel = job.get("cosy_parallel") or {}
             if parallel:
                 if parallel.get("enabled") is False:
                     st.caption("Cosy 순차 생성 · 동시 생성에는 코랩 업데이트가 필요합니다.")
                 elif parallel.get("calibrated"):
-                    st.caption(f"Cosy 자동 동시 생성: 최대 {parallel.get('limit', 1)}개 · 현재 진행 {len(job.get('active_cosy_indices', []))}개")
+                    if parallel.get("target_limit"):
+                        st.caption(f"Cosy 동시 생성: 설정 상한 {parallel['target_limit']}개 · 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개")
+                    else:
+                        st.caption(f"Cosy 동시 생성: 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개 · 10개까지 늘리려면 코랩 v2.9.12로 업데이트해주세요.")
                 else:
-                    st.caption("Cosy 첫 대사 생성 중 · 이 결과를 저장하고 메모리 사용량으로 동시 수를 정합니다.")
+                    st.caption("Cosy 첫 대사 생성 중 · 결과를 저장한 뒤 메모리 여유를 보며 동시 수를 단계적으로 늘립니다.")
                 if parallel.get("reason"):
                     st.caption(parallel["reason"])
                 if parallel.get("memory_retries"):
@@ -2081,7 +2084,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
-        st.caption("Gemini는 최대 2개, Cosy v2.9.11은 GPU 메모리에 맞춰 여러 대사를 동시에 계산합니다. 첫 대사는 메모리를 측정하며 저장하고, 전체 완료 후 번호순으로 합칩니다.")
+        st.caption("Gemini는 최대 2개, Cosy v2.9.12는 메모리 여유에 따라 동시 생성을 10개까지 늘립니다. 첫 대사도 저장하며, 전체 완료 후 번호순으로 합칩니다.")
         
         total_segs = len(st.session_state["parsed_segments"])
         

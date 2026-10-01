@@ -33,7 +33,8 @@ from core.gemini_recovery_ui import render_gemini_recovery
 from core.chirp_client import CHIRP_VOICES, validate_key as validate_chirp_key
 from core.chirp_ui import render_chirp_settings, render_chirp_voice
 from cosy3_voicebank_catalog import VOICEBANK as COSY3_VOICES, BANK_REVISION as COSY3_BANK_REVISION
-from core.cosy3_ui import (render_connection as render_cosy3_connection, render_voice as render_cosy3_voice,
+from core.cosy3_connection_ui import render_connection as render_cosy3_connection
+from core.cosy3_ui import (render_voice as render_cosy3_voice,
                           preset as cosy3_preset, sync_widgets as sync_cosy3_widgets)
 from core.cosy3_client import check_connection as cosy3_status, export_plan as export_cosy3_plan
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES

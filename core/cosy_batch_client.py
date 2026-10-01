@@ -15,7 +15,25 @@ from .cosy_colab_client import _transport, check_connection, decode_audio_bytes,
 
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
+CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
+MAX_QUEUE_ITEMS = 4096
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
+
+
+class BatchGenerationError(RuntimeError):
+    def __init__(self, index, message):
+        self.index = index
+        super().__init__(f'대사 {index}번: {message}')
+
+
+def queue_limits(url):
+    """Use the full script queue on updated servers; keep old servers usable."""
+    ok, message, status = check_connection(normalize_url(url), use_cached=True)
+    if not ok:
+        raise RuntimeError(message)
+    if CONTINUOUS_CAPABILITY in status.get('capabilities', []):
+        return MAX_QUEUE_ITEMS, 64
+    return 32, 16
 
 
 def _read_exact(raw, size):
@@ -28,32 +46,38 @@ def _read_exact(raw, size):
     return bytes(data)
 
 
-def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=None):
+def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=None, on_calculated=None):
     """Return False only before any synthesis, when an older server lacks support."""
-    if not entries or len(entries) > 32:
-        raise ValueError('연속 생성은 한 요청에 1~32개 대사를 사용합니다.')
+    if not entries or len(entries) > MAX_QUEUE_ITEMS:
+        raise ValueError(f'연속 생성은 한 대기열에 1~{MAX_QUEUE_ITEMS}개 대사를 사용합니다.')
     base = normalize_url(entries[0]['url'])
     ok, message, status = check_connection(base, use_cached=True)
     if not ok:
         raise RuntimeError(message)
     if BATCH_CAPABILITY not in status.get('capabilities', []):
         return False
+    continuous = CONTINUOUS_CAPABILITY in status.get('capabilities', [])
+    if not continuous and len(entries) > 32:
+        raise ValueError('이전 코랩은 32개 묶음까지만 지원합니다. v2.9.13 연속 생성 업데이트를 실행해주세요.')
     if PARALLEL_CAPABILITY not in status.get('capabilities', []) and on_status is not None:
         on_status(dict(enabled=False, limit=1, calibrated=True,
-                       reason='현재 코랩은 순차 생성입니다. v2.9.12 동시 생성 업데이트를 실행해주세요.'))
-    references, items, by_index = {}, [], {}
+                       reason='현재 코랩은 순차 생성입니다. v2.9.13 연속 생성 업데이트를 실행해주세요.'))
+    references, reference_keys, items, by_index = {}, {}, [], {}
     for entry in entries:
         if normalize_url(entry['url']) != base or entry['index'] in by_index:
             raise ValueError('코랩 주소 또는 대사 번호가 올바르지 않습니다.')
         by_index[entry['index']] = entry
         path = Path(entry['ref_path'])
-        with path.open('rb') as handle:
-            data = handle.read(10 * 1024 * 1024 + 1)
-        if not data or len(data) > 10 * 1024 * 1024:
-            raise ValueError('참조 음성은 10MB 이하로 등록해주세요.')
-        key = hashlib.sha256(data).hexdigest()
-        if key not in references:
-            references[key] = base64.b64encode(data).decode('ascii')
+        if path not in reference_keys:
+            with path.open('rb') as handle:
+                data = handle.read(10 * 1024 * 1024 + 1)
+            if not data or len(data) > 10 * 1024 * 1024:
+                raise ValueError('참조 음성은 10MB 이하로 등록해주세요.')
+            key = hashlib.sha256(data).hexdigest()
+            reference_keys[path] = key
+            if key not in references:
+                references[key] = base64.b64encode(data).decode('ascii')
+        key = reference_keys[path]
         items.append(dict(index=entry['index'], text=entry['text'], prompt_text=entry['prompt_text'],
                           speed=entry['speed'], style_instruction=entry['style_instruction'], reference=key))
     if cancel():
@@ -62,9 +86,10 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
     transport = _transport(base)
     response = None
     stop_sent = False
+    last_parallel = None
     try:
         response = transport.session.post(base + '/synthesize_batch',
-            json=dict(job_id=job_id, items=items, references=references),
+            json=dict(job_id=job_id, items=items, references=references, notify_calculated=True),
             headers={'Accept-Encoding': 'identity'}, stream=True, timeout=(15, 90), allow_redirects=False)
         if not response.ok:
             raise RuntimeError(f'코랩 연속 생성 요청 실패 (HTTP {response.status_code}). 완료 파일은 유지됩니다.')
@@ -92,8 +117,11 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
             parallel = header.get('parallel')
             if isinstance(parallel, dict) and type(parallel.get('limit')) is int and 1 <= parallel['limit'] <= 32:
                 if on_status is not None:
-                    on_status(dict({key: parallel[key] for key in ('limit', 'target_limit', 'calibrated', 'memory_retries', 'reason')
-                                    if key in parallel}, enabled=parallel.get('mode') == 'auto'))
+                    details = dict({key: parallel[key] for key in ('limit', 'target_limit', 'calibrated', 'memory_retries', 'reason')
+                                    if key in parallel}, enabled=parallel.get('mode') == 'auto', continuous_queue=continuous)
+                    if details != last_parallel:
+                        on_status(details)
+                        last_parallel = details.copy()
             if kind != 'audio' and body_size:
                 raise RuntimeError('코랩 제어 정보에 잘못된 음성 데이터가 있습니다.')
             if kind == 'heartbeat':
@@ -103,8 +131,14 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
                     raise RuntimeError('생성 중인 대사 번호가 요청과 다릅니다.')
                 on_started(index)
                 continue
+            if kind == 'calculated':
+                if index not in by_index or index in seen:
+                    raise RuntimeError('계산 완료된 대사 번호가 요청과 다릅니다.')
+                if on_calculated is not None:
+                    on_calculated(index)
+                continue
             if kind == 'error':
-                raise RuntimeError(f"대사 {index}번: {str(header.get('message', '코랩 생성 실패'))[:1200]}")
+                raise BatchGenerationError(index, str(header.get('message', '코랩 생성 실패'))[:1200])
             if kind == 'end':
                 if header.get('done') != len(seen):
                     raise RuntimeError('코랩 저장 완료 개수가 전송된 음성과 다릅니다.')

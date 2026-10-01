@@ -289,7 +289,7 @@ def _run_job(work_dir, items, state, pause, force_overwrite, pause_ms, include_s
         location = (f"대사 {state['current_index']}번 ({state['current_speaker']})"
                     if state["stage"] == "voice" else state["message"])
         state.update(status="failed", error=location + ": " + _error_message(exc, items),
-                     message="생성을 멈췄습니다. 완료된 음성은 보관됩니다.")
+                     message="일부 대사를 생성하지 못했습니다. 다른 엔진에서 완료한 음성도 보관됩니다. 미완료 대사를 이어서 생성해주세요.")
     finally:
         from .gemini_client import close_worker_clients
         close_worker_clients()

@@ -173,7 +173,7 @@ def test_shared_pacer_spaces_starts_without_serializing_responses():
 def local_cosy():
     app = FastAPI()
     gib = 1024 ** 3
-    control = SimpleNamespace(calls=[], fail=None, capability=True, second=threading.Event(), hook=None)
+    control = SimpleNamespace(calls=[], fail=None, capability=True, continuous=True, second=threading.Event(), hook=None)
     control.parallel = colab_server.AutoConcurrency(
         lambda: dict(free=12*gib, total=16*gib, allocated=4*gib, reserved=4*gib, peak=5*gib),
         lambda: None, enabled=False)
@@ -185,8 +185,9 @@ def local_cosy():
         authorize(token)
         return dict(service='ai-voice-studio-cosyvoice', api_version=1, ready=True,
                     capabilities=['validated_generation_v293', 'reference_cache_v294']
-                    + ([batch.BATCH_CAPABILITY] if control.capability else []), instance_id='local-test',
-                    server_version='2.9.10', gpu_name='fake-model', acceleration={})
+                    + ([batch.BATCH_CAPABILITY, batch.PARALLEL_CAPABILITY] if control.capability else [])
+                    + ([batch.CONTINUOUS_CAPABILITY] if control.capability and control.continuous else []),
+                    instance_id='local-test', server_version='2.9.13', gpu_name='fake-model', acceleration={})
     def synthesize(token, text, prompt, speed, reference, style, reference_id, audio_format):
         authorize(token)
         control.calls.append((text, prompt, speed, style, reference.file.read()))
@@ -199,7 +200,7 @@ def local_cosy():
             control.hook(int(text))
         time.sleep(0.015)
         return Response(audio_bytes(int(text)), media_type='audio/wav',
-                        headers={'X-CosyVoice-Version': '2.9.10', 'X-Synthesis-Seconds': '0.015'})
+                        headers={'X-CosyVoice-Version': '2.9.13', 'X-Synthesis-Seconds': '0.015'})
     colab_server.install_batch_routes(app, synthesize, authorize, control.parallel)
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
@@ -493,3 +494,154 @@ def test_whole_batch_gpu_lease_blocks_other_engines_and_updates(tmp_path, monkey
         assert blocked.value.status_code == 409
     with colab_server.exclusive_gpu_lease():
         pass
+
+
+def mixed_items_at(folder, server, count=8):
+    reference = folder / 'reference.wav'
+    reference.write_bytes(audio_bytes(42))
+    items = items_at(folder, count)
+    for item in items:
+        if item.index % 2 == 0:
+            item.config = VoiceConfig(engine='cosyvoice', cosyvoice_url=server.url,
+                                      ref_audio_path=str(reference), prompt_text='참고 대사')
+    return items
+
+
+def test_gemini_refills_one_slot_while_the_first_request_is_still_running(tmp_path, monkeypatch):
+    third_started = threading.Event()
+    def generate(text, output, config, **kwargs):
+        if text == '1':
+            assert third_started.wait(3), 'waited for a whole Gemini wave'
+        if text == '3':
+            third_started.set()
+        Path(output).write_bytes(audio_bytes(int(text)))
+    monkeypatch.setattr(pipeline.TTSEngine, 'generate_gemini_speech', generate)
+    items = items_at(tmp_path, 6)
+    state = state_for(items)
+    pipeline.run_generation(str(tmp_path), items, state, threading.Event(), False,
+                            lambda *args: None, jobs._record_performance)
+    assert state['done'] == 6
+
+
+@pytest.mark.parametrize('failed_engine', ['gemini', 'cosyvoice'])
+def test_engine_failure_does_not_stop_the_other_engine(tmp_path, monkeypatch, failed_engine):
+    cosy_started, gemini_started, failure_sent = threading.Event(), threading.Event(), threading.Event()
+    monkeypatch.setattr(batch, 'queue_limits', lambda _: (4096, 64))
+    def generate(text, output, config, **kwargs):
+        gemini_started.set()
+        assert cosy_started.wait(3)
+        if failed_engine == 'gemini' and text == '1':
+            failure_sent.set()
+            raise RuntimeError('simulated 429 test-key')
+        assert failure_sent.wait(3)
+        time.sleep(0.02)
+        Path(output).write_bytes(audio_bytes(int(text)))
+    def cosy(entries, *, cancel, on_started, on_completed, on_calculated, on_status):
+        cosy_started.set()
+        assert gemini_started.wait(3)
+        if failed_engine == 'cosyvoice':
+            failure_sent.set()
+            raise batch.BatchGenerationError(entries[0]['index'], 'simulated Cosy failure')
+        assert failure_sent.wait(3)
+        for entry in entries:
+            assert not cancel(), 'Gemini error stopped the independent Cosy queue'
+            index, path = entry['index'], entry['output_file']
+            on_started(index)
+            time.sleep(0.02)
+            Path(path).write_bytes(audio_bytes(index))
+            on_calculated(index)
+            on_completed(index, path, dict(engine='cosyvoice', total_seconds=0.02))
+        return True
+    monkeypatch.setattr(pipeline.TTSEngine, 'generate_gemini_speech', generate)
+    monkeypatch.setattr(batch, 'synthesize_batch', cosy)
+    items = mixed_items_at(tmp_path, SimpleNamespace(url='http://localhost/v1/test-token'))
+    state, pause = state_for(items), threading.Event()
+    with pytest.raises(RuntimeError, match='simulated'):
+        pipeline.run_generation(str(tmp_path), items, state, pause, False,
+                                lambda *args: None, jobs._record_performance)
+    assert not pause.is_set()
+    healthy = 'cosyvoice' if failed_engine == 'gemini' else 'gemini'
+    assert state['engine_progress'][healthy] == dict(total=4, done=4, active=0, receiving=0, status='complete')
+    assert state['engine_progress'][failed_engine]['status'] == 'failed'
+    assert 'test-key' not in repr(state)
+    assert not state['active_indices'] and not state['active_cosy_indices']
+
+
+def test_continuous_cosy_queue_crosses_32_without_waiting_for_earlier_clip(tmp_path, local_cosy, monkeypatch):
+    enable_parallel(local_cosy)
+    local_cosy.parallel.calibrated = True
+    local_cosy.parallel.limit = local_cosy.parallel.ceiling = 2
+    reached_33 = threading.Event()
+    calculating, peak, done = set(), 0, []
+    def hook(index):
+        if index == 1:
+            assert reached_33.wait(4), '32-clip batch barrier blocked later work'
+        if index == 33:
+            reached_33.set()
+    def started(index):
+        nonlocal peak
+        calculating.add(index)
+        peak = max(peak, len(calculating))
+    local_cosy.hook = hook
+    entries = entries_at(tmp_path, local_cosy, 65)
+    reference_reads = []
+    original_open = Path.open
+    def tracked_open(path, *args, **kwargs):
+        if path == tmp_path / 'reference.wav' and args and args[0] == 'rb':
+            reference_reads.append(path)
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', tracked_open)
+    assert batch.synthesize_batch(entries, cancel=lambda: False, on_started=started,
+                                  on_calculated=calculating.discard,
+                                  on_completed=lambda index, *args: done.append(index))
+    assert reached_33.is_set() and done.index(1) > done.index(32)
+    assert sorted(done) == list(range(1, 66))
+    assert peak == 2 and not calculating
+    assert len(reference_reads) == 1
+
+
+def test_mixed_job_merges_once_only_after_both_engines_complete(tmp_path, monkeypatch, local_cosy):
+    merged, gemini_calls = [], []
+    original_merge = jobs.AudioProcessor.merge_segments
+    cosy_first = threading.Event()
+    local_cosy.hook = lambda index: cosy_first.set()
+    def generate(text, output, config, **kwargs):
+        assert cosy_first.wait(3), 'Gemini blocked Cosy from starting'
+        time.sleep(0.025 if text == '1' else 0.003)
+        Path(output).write_bytes(audio_bytes(int(text)))
+        gemini_calls.append(int(text))
+    def merge(self, segments, output_file, **kwargs):
+        assert sorted(gemini_calls) == [1, 3, 5, 7]
+        assert sorted(int(call[0]) for call in local_cosy.calls) == [2, 4, 6, 8]
+        merged.append([part['index'] for part in segments])
+        return original_merge(self, segments, output_file, **kwargs)
+    monkeypatch.setattr(pipeline.TTSEngine, 'generate_gemini_speech', generate)
+    monkeypatch.setattr(jobs.AudioProcessor, 'merge_segments', merge)
+    jobs.start_job(str(tmp_path), mixed_items_at(tmp_path, local_cosy), pause_ms=100)
+    deadline = time.monotonic() + 8
+    while jobs.is_running(str(tmp_path)) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    state = jobs.get_job(str(tmp_path))
+    assert state['status'] == 'complete', state.get('error')
+    assert merged == [list(range(1, 9))]
+    assert jobs.valid_audio(state['result']['full_audio'])
+    assert all(p['status'] == 'complete' for p in state['engine_progress'].values())
+    assert [p['segment_index'] for p in state['result']['timings']] == list(range(1, 9))
+
+
+def test_legacy_cosy_keeps_32_clip_groups_and_ordered_results(tmp_path, monkeypatch, local_cosy):
+    local_cosy.continuous = False
+    sizes = []
+    original_batch = batch.synthesize_batch
+    def counted(entries, **kwargs):
+        sizes.append(len(entries))
+        return original_batch(entries, **kwargs)
+    monkeypatch.setattr(batch, 'synthesize_batch', counted)
+    items = mixed_items_at(tmp_path, local_cosy, 65)
+    for item in items:
+        item.config = items[1].config
+    state = state_for(items)
+    pipeline.run_generation(str(tmp_path), items, state, threading.Event(), False,
+                            lambda *args: None, jobs._record_performance)
+    assert sizes == [32, 32, 1]
+    assert state['done'] == 65 and state['cosy_parallel']['continuous_queue'] is False

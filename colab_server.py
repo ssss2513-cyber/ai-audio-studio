@@ -44,9 +44,11 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.12'
+SERVER_VERSION = '2.9.13'
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
+CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
+MAX_QUEUE_ITEMS = 4096
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
@@ -752,8 +754,8 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
         job_id = payload.get('job_id', '')
         items, references = payload.get('items'), payload.get('references')
         if (not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id)
-                or not isinstance(items, list) or not 1 <= len(items) <= 32
-                or not isinstance(references, dict) or not 1 <= len(references) <= 16):
+                or not isinstance(items, list) or not 1 <= len(items) <= MAX_QUEUE_ITEMS
+                or not isinstance(references, dict) or not 1 <= len(references) <= 64):
             raise HTTPException(422, '일괄 생성 요청 형식이 올바르지 않습니다.')
         decoded, indices, total_bytes = {}, set(), 0
         try:
@@ -788,22 +790,25 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
         if not gate.acquire(blocking=False):
             raise HTTPException(409, '다른 음성을 생성 중입니다. 완료하거나 멈춘 뒤 실행해주세요.')
         cancel, disconnected = threading.Event(), threading.Event()
-        events = queue.Queue(maxsize=2)
+        notify_calculated = payload.get('notify_calculated') is True
+        # Bound audio buffering, while start notices never block CUDA dispatch
+        # behind a slow audio download. In-flight requests remain capped at ten.
+        events = queue.Queue()
+        audio_slots = threading.BoundedSemaphore(2)
         with registry_lock:
             active[job_id] = cancel
 
         def put(header, body=b''):
             blocked_at = time.monotonic()
             while not disconnected.is_set():
-                try:
-                    events.put((header, body), timeout=0.2)
+                if not body or audio_slots.acquire(timeout=0.2):
+                    events.put((header, body))
                     return True
-                except queue.Full:
-                    # Also free the producer if a connection dies before its
-                    # response iterator gets a chance to run its finally block.
-                    if time.monotonic() - blocked_at > 90:
-                        disconnected.set()
-                        cancel.set()
+                # Also free the producer if a connection dies before its
+                # response iterator gets a chance to run its finally block.
+                if time.monotonic() - blocked_at > 90:
+                    disconnected.set()
+                    cancel.set()
             return False
 
         def produce():
@@ -833,6 +838,8 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                              'memory_retries': retry_count}, bytes(response.body))
                 finally:
                     reference.file.close()
+                    if notify_calculated:
+                        put({'type': 'calculated', 'index': index})
 
             def save_result(result):
                 nonlocal count
@@ -865,32 +872,45 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                         concurrency.refresh()
                     with ThreadPoolExecutor(max_workers=10 if concurrency else 1,
                                             thread_name_prefix='cosy-inference') as pool:
-                        while position < len(items) or pending or memory_failed:
-                            stopped = cancel.is_set() or disconnected.is_set()
-                            # Do not dispatch new work after any failure. Already
-                            # running successes must reach the client before error.
-                            while (position < len(items) and not stopped and not failures and not memory_failed
+                        def refill():
+                            nonlocal position
+                            while (position < len(items) and not cancel.is_set() and not disconnected.is_set()
+                                   and not failures and not memory_failed
                                    and len(pending) < (concurrency.limit if concurrency else 1)
                                    and (not concurrency or concurrency.can_add(len(pending)))):
                                 item = items[position]
                                 pending[pool.submit(generate, item)] = item
                                 position += 1
+
+                        while position < len(items) or pending or memory_failed:
+                            stopped = cancel.is_set() or disconnected.is_set()
+                            # Do not dispatch new work after any failure. Already
+                            # running successes must reach the client before error.
+                            refill()
                             if pending:
                                 active_before = len(pending)
                                 was_calibrated = concurrency and concurrency.calibrated
                                 ready, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
-                                successes = 0
+                                results = []
                                 for future in ready:
                                     item = pending.pop(future)
                                     try:
-                                        successes += bool(save_result(future.result()))
+                                        result = future.result()
+                                        if result is not None:
+                                            results.append(result)
                                     except Exception as exc:
                                         record_failure(item, exc)
-                                if successes and concurrency and not failures and not memory_failed:
+                                if results and concurrency and not failures and not memory_failed:
                                     if not pending:
                                         concurrency.calibrated_after_success()
                                     if was_calibrated:
                                         concurrency.completed_wave(active_before)
+                                # Fill freed slots before audio transmission can
+                                # block. A slow earlier clip never forms a wave
+                                # barrier, including the former 32-clip boundary.
+                                refill()
+                                for result in results:
+                                    save_result(result)
                                 continue
                             if stopped or failures:
                                 break
@@ -942,11 +962,19 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                         header, body = events.get(timeout=1.0)
                     except queue.Empty:
                         header, body = {'type': 'heartbeat'}, b''
+                    if concurrency:
+                        # Report the current dispatch limit, not the stale
+                        # limit captured before this result waited for transfer.
+                        header['parallel'] = concurrency.status()
                     header['size'] = len(body)
                     metadata = json.dumps(header, ensure_ascii=False).encode('utf-8')
-                    yield struct.pack('!I', len(metadata)) + metadata
-                    if body:
-                        yield body
+                    try:
+                        yield struct.pack('!I', len(metadata)) + metadata
+                        if body:
+                            yield body
+                    finally:
+                        if body:
+                            audio_slots.release()
                     if header['type'] in ('end', 'error'):
                         return
             finally:
@@ -1028,7 +1056,8 @@ def serve(port):
                 'gpu_name': gpu_name, 'acceleration': acceleration, 'concurrency': concurrency.status(),
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
-                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY, PARALLEL_CAPABILITY]}
+                                 THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY,
+                                 PARALLEL_CAPABILITY, CONTINUOUS_CAPABILITY]}
 
     def synthesize(token: str, text: str = Form(...), prompt_text: str = Form(''),
                    speed: float = Form(1.0), reference: UploadFile | None = File(None),

@@ -45,15 +45,15 @@ def render_connections(mode):
                 st.caption("기존 서버와 설치 파일을 먼저 이어 쓰고, 설치가 없는 경우에만 GPU 확인 후 준비합니다.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
     if "cosyvoice" in selected:
-        notebooks.append(("CosyVoice 코랩 v2.9.8 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.8.ipynb"))
-        st.caption("v2.9.8은 반복되는 발음 후보 전송과 GPU 메모리 재할당을 줄입니다. FP32 계산 정밀도·모델·목소리·생성 설정은 유지합니다.")
-        recovery = ROOT / "CosyVoice_Recovery_v2.9.8.py"
+        notebooks.append(("CosyVoice 코랩 v2.9.9 받기", "CosyVoice_Colab_API.ipynb", "CosyVoice_Colab_v2.9.9.ipynb"))
+        st.caption("v2.9.9는 완성된 음성을 FLAC으로 무손실 압축해 전송합니다. 원음·모델 계산·목소리 설정은 유지하며 응답 대기와 다운로드 시간을 따로 표시합니다.")
+        recovery = ROOT / "CosyVoice_Recovery_v2.9.9.py"
         if recovery.is_file():
-            with st.expander("CosyVoice v2.9.8 속도 개선 · 기존 코랩에서 실행"):
+            with st.expander("CosyVoice v2.9.9 속도 개선 · 기존 코랩에서 실행"):
                 st.write("음성 생성이 멈췄거나 끝난 뒤, 지금 쓰는 코랩의 ＋코드에 아래 코드를 붙여 넣고 실행하세요.")
                 st.caption("실행 중인 기존 설치·모델을 재사용합니다. 마지막에 나온 새 연결 주소를 아래 칸에 넣어주세요.")
                 st.code(recovery.read_text(encoding="utf-8"), language="python")
-        st.caption("기존 서버도 연결할 수 있지만 이번 속도 개선은 코랩 v2.9.8 업데이트 후 적용됩니다. 생성 화면에서 실제 코랩 버전과 GPU를 확인할 수 있습니다.")
+        st.caption("사이트의 시간 분리는 기존 서버에서도 적용됩니다. 무손실 압축 전송은 코랩 v2.9.9로 업데이트한 뒤 적용됩니다. 계산 시간이 5초가 된다는 보장은 아닙니다.")
     st.caption("이전에 열어둔 코랩이나 Drive 복사본은 자동 업데이트되지 않습니다. 처음 이용할 때는 아래 버전이 표시된 버튼으로 열어주세요.")
     for label, filename, download_name in notebooks:
         revision = COSY_NOTEBOOK_RELEASE_REVISION if filename == "CosyVoice_Colab_API.ipynb" else NOTEBOOK_RELEASE_REVISION

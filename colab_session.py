@@ -18,6 +18,7 @@ VERSION = '1.0.0'
 ENGINES = {
     'qwen-bank': ('/content/voice_studio_qwen_bank_v1', 'voice-studio-qwen-voicebank', 'Qwen 20종'),
     'cosyvoice': ('/content/ai_voice_dual_v1/cosyvoice', 'ai-voice-studio-cosyvoice', 'CosyVoice'),
+    'cosyvoice3': ('/content/voice_studio_cosy3_v1', 'voice-studio-cosyvoice3', 'CosyVoice 3'),
     'gpt-sovits': ('/content/ai_voice_sovits_v4_1', 'ai-voice-studio-gpt-sovits', 'GPT-SoVITS'),
 }
 

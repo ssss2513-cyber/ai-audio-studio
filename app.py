@@ -23,6 +23,7 @@ from core.tts_engine import (
 from core.personal_colab import session_workspace, upload_name
 from core.colab_ui import render_connections, render_reset
 from core.voice_recommendations import recommend_style, preview_text, style_note, speaker_gender
+from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -33,7 +34,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.23 · Gemini 대본 분석 연결·응답 오류 복구"
+APP_VERSION = "v2.9.24 · Gemini 키 입력 호환 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1064,7 +1065,7 @@ def main():
                 "Gemini API Key (선불/무료키 또는 쉼표 구분 다중 키)",
                 value=saved_key,
                 type="password",
-                placeholder="AIzaSy... (여러 개 입력 시 쉼표로 구분: key1, key2)",
+                placeholder="AI Studio에서 복사한 전체 키 · 여러 개는 쉼표로 구분",
                 help="Google AI Studio API 키를 입력하세요. 한도는 프로젝트·모델별로 적용되며 같은 프로젝트의 키를 추가해도 늘어나지 않습니다.",
                 key="input_gemini_api_key"
             )
@@ -1090,16 +1091,20 @@ def main():
             if g_model == "gemini-2.5-pro-preview-tts":
                 st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
 
-            parsed_keys = [k.strip() for k in re.split(r'[,;\s\n]+', g_key) if k.strip()]
-            if len(parsed_keys) > 1:
-                st.success(f"✅ Gemini API Key {len(parsed_keys)}개 등록 완료")
-            elif len(parsed_keys) == 1:
-                st.success("✅ Gemini API Key 준비 완료")
+            try:
+                parsed_keys = parse_gemini_keys(g_key)
+            except GeminiKeyInputError as exc:
+                parsed_keys = []
+                st.warning(str(exc))
+            if parsed_keys:
+                st.info(f"Gemini API 키 {len(parsed_keys)}개 입력됨 · 연결은 분석·생성 요청 때 확인합니다.")
+                if ",".join(parsed_keys) != g_key.strip():
+                    st.caption("붙여넣은 키의 바깥 따옴표·키 이름·구분문자를 정리했습니다.")
                 st.caption("한도 초과 시 완료 파일을 유지하고 멈춥니다. 선택한 모델·성우를 유지하며, 35초씩 자동 대기하거나 다른 모델로 바꾸지 않습니다.")
             elif not g_key and st.session_state["active_engine_mode"] == "gemini":
                 st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
                 st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")
-            return g_key, g_model
+            return ",".join(parsed_keys) if parsed_keys else g_key, g_model
 
         if show_gemini_prominent:
             gemini_api_key, gemini_model = render_gemini_section()

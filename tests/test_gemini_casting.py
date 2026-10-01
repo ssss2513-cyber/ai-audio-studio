@@ -238,6 +238,67 @@ def test_long_server_retry_after_is_respected(monkeypatch):
 
 def test_bad_key_format_is_reported_without_transmission(monkeypatch):
     calls, _ = memory_http(monkeypatch, [])
-    with pytest.raises(casting.CastingError, match="INVALID_KEY_FORMAT"):
+    with pytest.raises(casting.CastingError, match="KEY_VALUE_REQUIRED"):
         analyze(api_key="제미나이키")
     assert calls == []
+
+
+@pytest.mark.parametrize("pasted,expected", [
+    ("opaque.credential+part/part==", "opaque.credential+part/part=="),
+    ('  “test-key”  ', "test-key"),
+    ('Gemini API Key: “test-key”', "test-key"),
+    ('제미나이 API 키：test-key', "test-key"),
+    ('export GEMINI_API_KEY="test-key"', "test-key"),
+    ('["test-key"，"second-key"]', "test-key"),
+    ('\ufefftest-\u200bkey；second-key', "test-key"),
+])
+def test_pasted_key_reaches_request_and_casting_applies(monkeypatch, pasted, expected):
+    calls, _ = memory_http(monkeypatch, [(200, api_response())])
+    result = analyze(api_key=pasted)
+    assert len(calls) == 1
+    assert calls[0][0].headers["x-goog-api-key"] == expected
+    state = {}
+    casting.apply_casting_to_state(state, result=result, speakers=["도윤"],
+                                   segments=[], script=SCRIPT, profiles={})
+    assert state["voice_settings"]["도윤"]["voice"] == "Fenrir"
+    assert state["gemini_gender_도윤"] == "남성"
+    assert state["style_select_도윤"] == "😊 밝고 활기차게"
+
+
+@pytest.mark.parametrize("pasted", ["AIzaSy...", "AQ••••", "********"])
+def test_masked_or_abbreviated_keys_are_not_sent(monkeypatch, pasted):
+    calls, _ = memory_http(monkeypatch, [])
+    with pytest.raises(casting.CastingError, match="INCOMPLETE_KEY") as exc:
+        analyze(api_key=pasted)
+    assert pasted not in str(exc.value)
+    assert calls == []
+
+
+def test_key_order_and_opaque_punctuation_are_preserved():
+    from core.gemini_keys import parse_gemini_keys
+    assert parse_gemini_keys('“first-key”， “second-key”；“first-key”') == ["first-key", "second-key"]
+    assert parse_gemini_keys('opaque.key=part/part+end==') == ['opaque.key=part/part+end==']
+
+
+def test_voice_synthesis_receives_the_same_normalized_key(monkeypatch):
+    from core import gemini_client
+    from core.tts_engine import TTSEngine, VoiceConfig
+    calls = []
+    def synthesize(prompt, output_file, **kwargs):
+        calls.append(kwargs)
+        return output_file
+    monkeypatch.setattr(gemini_client, "synthesize", synthesize)
+    monkeypatch.setattr(TTSEngine, "_gemini_key_counter", -1)
+    config = VoiceConfig(engine="gemini", voice="Kore", api_key='Gemini API Key: “opaque.key+part/part==”')
+    assert TTSEngine.generate_gemini_speech("안녕하세요.", "unused.mp3", config) == "unused.mp3"
+    assert calls[0]["api_key"] == "opaque.key+part/part=="
+    assert calls[0]["pacing_group"] == ("opaque.key+part/part==",)
+
+
+def test_normalized_keys_are_redacted_from_generation_errors():
+    from core.generation_jobs import _error_message
+    from core.tts_engine import VoiceConfig
+    config = VoiceConfig(api_key='Gemini API Key: “opaque.key+part/part==”')
+    message = _error_message(ValueError("Failed credential opaque.key+part/part=="), [SimpleNamespace(config=config)])
+    assert "opaque.key" not in message
+    assert "[API 키]" in message

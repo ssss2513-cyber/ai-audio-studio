@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import edge_tts
 
+from .gemini_keys import parse_gemini_keys
+
 _GEMINI_KEY_LOCK = threading.Lock()
 
 def clean_spoken_text(text: str) -> str:
@@ -661,7 +663,7 @@ class TTSEngine:
         if not text:
             raise ValueError("생성할 대사를 입력해주세요.")
         raw_key = voice_config.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-        keys = list(dict.fromkeys(k for k in re.split(r"[,;\s]+", raw_key) if k))
+        keys = parse_gemini_keys(raw_key)
         if not keys:
             raise ValueError("Gemini API 키를 입력해주세요.")
         if voice_config.voice not in GEMINI_VOICES:

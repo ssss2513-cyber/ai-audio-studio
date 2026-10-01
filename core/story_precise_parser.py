@@ -282,8 +282,11 @@ def parse_story_with_gemini(
     from google import genai
     import re
 
-    keys_list = [k.strip() for k in re.split(r'[,;\s\n]+', api_key) if k.strip()]
-    first_key = keys_list[0] if keys_list else api_key
+    from .gemini_keys import parse_gemini_keys
+    keys_list = parse_gemini_keys(api_key)
+    if not keys_list:
+        raise ValueError("Gemini API 키가 설정되지 않았습니다. 사이드바에 키를 입력해주세요.")
+    first_key = keys_list[0]
     client = genai.Client(api_key=first_key)
 
     char_guide = ""

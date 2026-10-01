@@ -216,7 +216,13 @@ def _error_message(exc, items):
         for secret in (config.gpt_sovits_url, config.cosyvoice_url):
             if secret:
                 message = message.replace(secret, "[내 코랩 주소]")
-        for secret in re.split(r"[,;\s]+", config.api_key or ""):
+        from .gemini_keys import GeminiKeyInputError, parse_gemini_keys
+        secrets = re.split(r"[,;\s]+", config.api_key or "")
+        try:
+            secrets += parse_gemini_keys(config.api_key)
+        except GeminiKeyInputError:
+            pass
+        for secret in sorted(set(secrets), key=len, reverse=True):
             if secret:
                 message = message.replace(secret, "[API 키]")
     return re.sub(r"/v1/[A-Za-z0-9_-]{16,128}", "/v1/[연결 토큰]", message)[:1600]

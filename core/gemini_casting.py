@@ -8,6 +8,8 @@ import time
 
 import requests
 
+from .gemini_keys import GeminiKeyInputError, parse_gemini_keys
+
 ANALYSIS_MODEL = "gemini-3.8-flash"
 GENDERS = ("남성", "여성")
 
@@ -210,12 +212,13 @@ def _http_error(status):
 def analyze_gemini_casting(*, script, speakers, profiles, existing, voices, styles, api_key, progress=None):
     # REST avoids SDK/version/async-client initialization failures on hosted apps.
     # Only text analysis uses this transport; synthesis and its pacing are unchanged.
-    keys = [key.strip("\"'`\ufeff\u200b") for key in re.split(r"[,;\s]+", api_key.strip()) if key]
-    if not keys or not keys[0]:
+    try:
+        keys = parse_gemini_keys(api_key)
+    except GeminiKeyInputError as exc:
+        raise CastingError(str(exc) + " 기존 설정은 유지됩니다.") from None
+    if not keys:
         raise CastingError("왼쪽 ‘Gemini API 키 등록’에 키를 입력한 뒤 다시 눌러주세요. 기존 설정은 유지됩니다.")
     key = keys[0]
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
-        raise CastingError("API 키에 설명 문구나 특수문자가 섞여 있습니다 [INVALID_KEY_FORMAT]. 키 값만 다시 입력해주세요. 기존 설정은 유지됩니다.")
     if not script.strip() or not speakers:
         raise CastingError("대본과 화자를 먼저 입력해주세요.")
     if len(script) > 200_000:

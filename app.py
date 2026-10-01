@@ -30,7 +30,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.20 · Cosy 동시 생성 상한 10개 · 대사 순서 보존"
+APP_VERSION = "v2.9.21 · Gemini·Cosy 독립 연속 생성 · 번호순 합치기"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -348,8 +348,18 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.progress(float(job.get("progress", 0)))
         st.write(f"**저장 완료 {job['done']} / {job['total']}개** · 기존 파일 재사용 {job.get('reused', 0)}개")
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
-        if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920"):
-            st.caption("Gemini 최대 2개 · Cosy v2.9.12는 메모리 여유에 따라 10개까지 · 완료한 음성은 대사 번호순으로 합칩니다.")
+        if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920", "ordered_independent_v2921"):
+            st.caption("Gemini 최대 2개 · Cosy 최대 10개 · 각 엔진은 빈자리에 다음 대사를 넣으며, 모든 대사가 완료되면 번호순으로 한 번 합칩니다.")
+            engine_names = {"gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
+            for engine, progress in (job.get("engine_progress") or {}).items():
+                label = engine_names.get(engine, engine)
+                status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단"}.get(progress.get("status"), "대기")
+                receiving = f" · 수신 {progress['receiving']}개" if progress.get('receiving') else ""
+                st.caption(f"{label}: 저장 {progress['done']}/{progress['total']}개 · 진행 {progress.get('active', 0)}개{receiving} · {status}")
+                error = (job.get("engine_errors") or {}).get(engine)
+                if error and active:
+                    suffix = "다른 엔진은 계속 생성합니다." if len(job["engine_progress"]) > 1 else "진행 중인 결과를 저장합니다."
+                    st.warning(f"{label} · {error['index']}번({error['speaker']}): {error['message']} {suffix}")
             parallel = job.get("cosy_parallel") or {}
             if parallel:
                 if parallel.get("enabled") is False:
@@ -358,13 +368,15 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                     if parallel.get("target_limit"):
                         st.caption(f"Cosy 동시 생성: 설정 상한 {parallel['target_limit']}개 · 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개")
                     else:
-                        st.caption(f"Cosy 동시 생성: 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개 · 10개까지 늘리려면 코랩 v2.9.12로 업데이트해주세요.")
+                        st.caption(f"Cosy 동시 생성: 현재 허용 {parallel.get('limit', 1)}개 · 진행 {len(job.get('active_cosy_indices', []))}개 · 10개까지 늘리려면 코랩 v2.9.13으로 업데이트해주세요.")
                 else:
                     st.caption("Cosy 첫 대사 생성 중 · 결과를 저장한 뒤 메모리 여유를 보며 동시 수를 단계적으로 늘립니다.")
                 if parallel.get("reason"):
                     st.caption(parallel["reason"])
                 if parallel.get("memory_retries"):
                     st.caption(f"메모리 부족 대사 재처리 {parallel['memory_retries']}회 · 완료 파일과 음질 설정 유지")
+                if parallel.get("continuous_queue") is False:
+                    st.caption("현재 코랩은 32개 묶음 방식입니다. v2.9.13으로 업데이트하면 묶음 사이의 대기를 줄이고 빈자리를 계속 채웁니다.")
             for note in job.get("execution_notes", []):
                 st.caption(note)
         if job.get("generated", 0):
@@ -2084,7 +2096,7 @@ def main():
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
-        st.caption("Gemini는 최대 2개, Cosy v2.9.12는 메모리 여유에 따라 동시 생성을 10개까지 늘립니다. 첫 대사도 저장하며, 전체 완료 후 번호순으로 합칩니다.")
+        st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Gemini 최대 2개·Cosy 최대 10개 안에서 하나가 끝나면 다음 대사를 바로 시작하고, 모든 대사가 완료되면 번호순으로 MP3 하나로 합칩니다. Cosy 연속 대기열은 코랩 v2.9.13부터 적용됩니다.")
         
         total_segs = len(st.session_state["parsed_segments"])
         

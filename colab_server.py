@@ -45,7 +45,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.16'
+SERVER_VERSION = '2.9.18'
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 CONTINUOUS_CAPABILITY = 'continuous_queue_v2913'
@@ -55,6 +55,7 @@ MAX_CONCURRENT = 4
 MAX_QUEUE_ITEMS = 4096
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
 GENERATION_CAPABILITY = 'validated_generation_v293'
+QUALITY_CAPABILITY = 'sentence_completion_guard_v2918'
 REFERENCE_CACHE_CAPABILITY = 'reference_cache_v294'
 REFERENCE_TRANSPORT_CAPABILITY = 'reference_transport_v295'
 DURATION_GUARD_CAPABILITY = 'reference_duration_guard_v296'
@@ -184,7 +185,7 @@ def duration_limits(text, reference_units, reference_seconds):
     pauses = min(4.0, len(re.findall(r'[,.!?，。！？]', text)) * 0.3)
     upper = min(90.0, max(10.0, units * 0.8 + 4.0,
                           units / reference_rate * 1.8 + 4.0 + pauses))
-    return max(0.15, units / 30.0), upper
+    return max(0.15, units / 15.0), upper
 
 
 class GeneratedAudioValidationError(RuntimeError):
@@ -192,43 +193,91 @@ class GeneratedAudioValidationError(RuntimeError):
 
 
 def synthesis_chunks(text, prompt_text, tokenizer):
-    """Pack short sentences together, with a token budget for Korean inputs."""
+    """Prefer complete sentences, then clauses, before splitting a long sentence.
+
+    Keep every non-whitespace character. Do not insert a period into a split
+    clause or run a Korean sentence through an English text normalizer.
+    """
     def tokens(value):
         return len(tokenizer.encode(value, allowed_special='all'))
 
-    # The upstream frontend uses 60-80 tokens. Keep Korean out of its English
-    # normalizer, but use a comparable token budget instead of 180 characters.
-    chunks, current = [], ''
-    for word in text.split():
-        candidate = (current + ' ' + word).strip()
-        if current and tokens(candidate) > 80:
-            chunks.append(current)
-            current = ''
-        # A script without spaces must also respect the token budget.
-        while tokens(word) > 80:
-            low, high = 1, len(word)
-            while low < high:
-                middle = (low + high + 1) // 2
-                if tokens(word[:middle]) <= 80:
-                    low = middle
-                else:
-                    high = middle - 1
-            chunks.append(word[:low])
-            word = word[low:]
-        current = (current + ' ' + word).strip()
-        if (re.search(r'[.!?。！？]["”\']?$', current) and tokens(current) >= 60
-                and len(current) >= len(prompt_text) / 2):
-            chunks.append(current)
-            current = ''
-    if current:
-        chunks.append(current)
-    # Do not synthesize a tiny final fragment on its own if it fits the previous
-    # chunk with a small, bounded extension to the normal budget.
-    if len(chunks) > 1 and (tokens(chunks[-1]) < 25 or len(chunks[-1]) < len(prompt_text) / 2):
+    remaining, chunks = text.strip(), []
+    while tokens(remaining) > 100:
+        low, high = 1, len(remaining)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if tokens(remaining[:middle]) <= 100:
+                low = middle
+            else:
+                high = middle - 1
+        prefix = remaining[:low]
+        ends = [m.end() for m in re.finditer(r'''(?<!\d)[.!?。！？]+[”’"')\]]*''', prefix)]
+        if ends:
+            cut = ends[-1]
+        else:
+            clauses = [m.end() for m in re.finditer(r'[,;:，；：]\s*', prefix)
+                       if tokens(prefix[:m.end()]) >= 30]
+            words = [m.start() for m in re.finditer(r'\s+', prefix)]
+            cut = clauses[-1] if clauses else (words[-1] if words else low)
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    if len(chunks) > 1 and tokens(chunks[-1]) < 18:
         joined = chunks[-2] + ' ' + chunks[-1]
         if tokens(joined) <= 100:
             chunks[-2:] = [joined]
+    if re.sub(r'\s+', '', ''.join(chunks)) != re.sub(r'\s+', '', text):
+        raise RuntimeError('문장 분할 과정에서 대사가 달라져 생성을 중단했습니다.')
     return chunks
+
+
+def install_completion_guard(model):
+    """Reject capped or looping token streams before they reach the vocoder.
+
+    The pinned decoder yields no stop token: normal exhaustion before max_len
+    means it met its stop condition. Reaching max_len is a truncation, not a
+    completed utterance. No sampling probability/temperature is changed.
+    """
+    from types import MethodType
+    original = model.model.llm.inference_wrapper
+
+    def guarded(self, lm_input, sampling, min_len, max_len, uuid):
+        count, recent = 0, []
+        generator = original(lm_input, sampling, min_len, max_len, uuid)
+        try:
+            for token in generator:
+                count += 1
+                recent.append(int(token))
+                if len(recent) > 100:
+                    recent.pop(0)
+                if len(recent) == 100 and any(
+                        all(recent[j] == recent[j - period] for j in range(period, 100))
+                        for period in range(1, 11)):
+                    raise GeneratedAudioValidationError('같은 발음 토큰이 비정상적으로 반복되어 해당 구간을 저장하지 않았습니다.')
+                yield token
+            if not count or count >= max_len:
+                raise GeneratedAudioValidationError('발음 생성이 정상 종료되지 않고 길이 제한에 도달해 잘린 결과를 저장하지 않았습니다.')
+        finally:
+            generator.close()
+
+    model.model.llm.inference_wrapper = MethodType(guarded, model.model.llm)
+
+
+def smooth_chunk_edges(audio, sample_rate):
+    """Only soften a nonzero 2 ms boundary; never trim spoken samples."""
+    import numpy as np
+    width = min(max(2, int(sample_rate * 0.002)), len(audio) // 4)
+    if width < 2:
+        return audio
+    if abs(float(audio[0])) > 0.0001 or abs(float(audio[-1])) > 0.0001:
+        audio = audio.copy()
+        ramp = np.linspace(0, 1, width, dtype=audio.dtype)
+        if abs(float(audio[0])) > 0.0001:
+            audio[:width] *= ramp
+        if abs(float(audio[-1])) > 0.0001:
+            audio[-width:] *= ramp[::-1]
+    return audio
 
 
 def install_same_rule_sampling(llm):
@@ -300,6 +349,8 @@ def install_offline_cache_reuse(model):
     import uuid
     from types import MethodType
     original = model.model.tts
+    if not hasattr(model.model, '_studio_acoustic_lock'):
+        model.model._studio_acoustic_lock = threading.Lock()
 
     # Mirror upstream defaults: instruct2 intentionally omits the LLM prompt
     # speech token, while cross-lingual mode also omits prompt_text.
@@ -325,14 +376,26 @@ def install_offline_cache_reuse(model):
         try:
             self.llm_job(text, prompt_text, llm_prompt_speech_token, llm_embedding, request)
             tokens = torch.tensor(self.tts_speech_token_dict[request]).unsqueeze(dim=0)
-            acoustic_started = time.monotonic()
-            speech = self.token2wav(token=tokens, prompt_token=flow_prompt_speech_token,
-                                    prompt_feat=prompt_speech_feat, embedding=flow_embedding,
-                                    token_offset=0, uuid=request, finalize=True, speed=speed)
-            cpu_speech = speech.cpu()
             timer = getattr(self, '_studio_generation_timer', None)
-            if timer is not None:
-                timer['acoustic_seconds'] += time.monotonic() - acoustic_started
+            waiting = time.monotonic()
+            # The shared flow/vocoder has mutable forward hooks (weight_norm)
+            # and buffers. Per-UUID output caches do not make these immutable.
+            # LLM requests stay concurrent; serialize only acoustic execution.
+            with self._studio_acoustic_lock:
+                if timer is not None:
+                    timer['acoustic_wait_seconds'] += time.monotonic() - waiting
+                acoustic_started = time.monotonic()
+                try:
+                    speech = self.token2wav(token=tokens, prompt_token=flow_prompt_speech_token,
+                                            prompt_feat=prompt_speech_feat, embedding=flow_embedding,
+                                            token_offset=0, uuid=request, finalize=True, speed=speed)
+                    cpu_speech = speech.cpu()
+                finally:
+                    # CUDA launches are asynchronous: do not release the shared
+                    # module until this stream's operations have actually ended.
+                    torch.cuda.current_stream().synchronize()
+                    if timer is not None:
+                        timer['acoustic_seconds'] += time.monotonic() - acoustic_started
             yield {'tts_speech': cpu_speech}
         finally:
             with self.lock:
@@ -435,7 +498,8 @@ def configure_fp32_acceleration(model):
 class RequestTimer(threading.local):
     """Sampling and decoder timers belong to the calling inference thread."""
     def __init__(self):
-        self.values = {'llm_seconds': 0.0, 'sampling_seconds': 0.0, 'acoustic_seconds': 0.0}
+        self.values = {'llm_seconds': 0.0, 'sampling_seconds': 0.0, 'acoustic_seconds': 0.0,
+                       'acoustic_wait_seconds': 0.0}
 
     def __getitem__(self, key):
         return self.values[key]
@@ -690,10 +754,11 @@ def exclusive_gpu_lease():
 def install_request_streams(model):
     """Keep FP32 weights and per-UUID inference caches; separate CUDA streams.
 
-    The pinned offline path is reentrant. Its original llm_context is a single
+    The original llm_context is a single
     reusable CUDA context manager and cannot be entered by multiple threads.
     Running the inline LLM on each request's current stream removes that shared
-    context and also keeps the following flow/vocoder ordered on that stream.
+    context. The following shared flow/vocoder is protected separately until
+    its CUDA stream completes, while LLM requests can still overlap.
     """
     import torch
     revision = subprocess.check_output(['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'],
@@ -1177,6 +1242,7 @@ def serve(port):
     acceleration['cpu_threads'] = torch.get_num_threads()
     acceleration['label'] += ' · CPU 중첩 병렬 제한'
     parallel_enabled = install_request_streams(model)
+    install_completion_guard(model)
     generation_timer = install_generation_timer(model)
     def memory_snapshot():
         free, total = torch.cuda.mem_get_info()
@@ -1216,7 +1282,8 @@ def serve(port):
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
                 'gpu_name': gpu_name, 'acceleration': acceleration, 'concurrency': concurrency.status(),
-                'capabilities': ['style_instruction', GENERATION_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
+                'acoustic_concurrency': 1,
+                'capabilities': ['style_instruction', GENERATION_CAPABILITY, QUALITY_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
                                  THROUGHPUT_CAPABILITY, LOSSLESS_TRANSPORT_CAPABILITY, BATCH_CAPABILITY,
                                  PARALLEL_CAPABILITY, CONTINUOUS_CAPABILITY, ADAPTIVE_FOUR_CAPABILITY]}
@@ -1349,6 +1416,7 @@ def serve(port):
                 generation_timer['llm_seconds'] = 0.0
                 generation_timer['sampling_seconds'] = 0.0
                 generation_timer['acoustic_seconds'] = 0.0
+                generation_timer['acoustic_wait_seconds'] = 0.0
                 recovery_count, recovery_seconds = 0, 0.0
                 # One recovery attempt per entire request, not an unbounded
                 # per-chunk loop. No model/precision/voice/speed change on retry.
@@ -1361,6 +1429,8 @@ def serve(port):
                         is_recovery = False
                         while True:
                             attempt_started = time.monotonic()
+                            attempt_is_recovery = is_recovery
+                            chunk_pieces = []
                             try:
                                 if style_instruction:
                                     generated = model.inference_instruct2(chunk, instruction, '',
@@ -1370,41 +1440,41 @@ def serve(port):
                                     generated = model.inference_zero_shot(chunk, prompt_text, '',
                                                                           zero_shot_spk_id=reference_id,
                                                                           stream=False, speed=1.0, text_frontend=False)
-                                chunk_pieces = []
                                 for item in generated:
                                     chunk_pieces.append(item['tts_speech'].detach().cpu().numpy().reshape(-1))
-                            finally:
-                                if is_recovery:
-                                    recovery_seconds += time.monotonic() - attempt_started
-                            if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
-                                raise GeneratedAudioValidationError(f'{index}번째 구간에서 빈 음성이 반환되어 저장하지 않았습니다.')
-                            speech = np.concatenate(chunk_pieces)
-                            seconds = speech.size / sample_rate
-                            if not np.all(np.isfinite(speech)) or float(np.sqrt(np.mean(speech ** 2))) < 0.0001:
-                                raise GeneratedAudioValidationError(f'{index}번째 구간의 음성이 무음이거나 손상되어 저장하지 않았습니다.')
-                            if lower <= seconds <= upper:
+                                if not chunk_pieces or sum(part.size for part in chunk_pieces) == 0:
+                                    raise GeneratedAudioValidationError(f'{index}번째 구간에서 빈 음성이 반환되어 저장하지 않았습니다.')
+                                speech = np.concatenate(chunk_pieces)
+                                seconds = speech.size / sample_rate
+                                if not np.all(np.isfinite(speech)) or float(np.sqrt(np.mean(speech ** 2))) < 0.0001:
+                                    raise GeneratedAudioValidationError(f'{index}번째 구간의 음성이 무음이거나 손상되어 저장하지 않았습니다.')
+                                if not lower <= seconds <= upper:
+                                    raise GeneratedAudioValidationError(
+                                        f'{index}번째 구간 길이 검사 실패 (생성 {seconds:.1f}초, 범위 {lower:.1f}~{upper:.1f}초).')
                                 break
-                            logging.warning('request=%s chunk=%d duration=%.2f bounds=%.2f..%.2f units=%.1f ref_units=%.1f ref_spoken=%.2f',
-                                            request_id, index, seconds, lower, upper, speech_units(chunk),
-                                            reference_units, reference_spoken_seconds)
-                            if recovery_remaining:
+                            except GeneratedAudioValidationError as exc:
+                                logging.warning('request=%s chunk=%d validation=%s', request_id, index, exc)
+                                if not recovery_remaining:
+                                    raise GeneratedAudioValidationError(
+                                        str(exc) + ' 요청당 추가 생성은 한 번까지만 합니다. 이전 완료 대사는 유지됩니다.') from exc
                                 recovery_remaining -= 1
                                 recovery_count += 1
                                 is_recovery = True
-                                print(f'{index}번째 구간 결과 길이({seconds:.1f}초)가 검사 범위를 벗어나 해당 구간만 한 번 다시 생성합니다. 음질 설정은 유지합니다.', flush=True)
-                                del speech, chunk_pieces
-                                continue
-                            raise GeneratedAudioValidationError(
-                                f'{index}번째 구간이 길이 검사를 통과하지 못했습니다 '
-                                f'(생성 {seconds:.1f}초, 검사 범위 {lower:.1f}~{upper:.1f}초). '
-                                '추가 생성은 요청당 한 번까지만 하며, 통과하지 않은 결과는 저장하지 않습니다. '
-                                '길이만으로 참고 대사 오류 여부를 확정할 수 없습니다. 이전 완료 대사는 유지됩니다.')
+                                chunk_pieces.clear()
+                                print(f'{index}번째 구간이 완료 검사를 통과하지 못해 해당 구간만 한 번 다시 생성합니다. '
+                                      '목소리·스타일·FP32 설정은 유지합니다.', flush=True)
+                            finally:
+                                if attempt_is_recovery:
+                                    recovery_seconds += time.monotonic() - attempt_started
                         logging.info('request=%s chunk=%d/%d chars=%d seconds=%.2f',
                                      request_id, index, len(chunks), len(chunk), seconds)
                         print(f'음성 생성 {index}/{len(chunks)} 완료 · 처리 {time.monotonic() - chunk_started:.1f}초 · 음성 {seconds:.1f}초', flush=True)
-                        pieces.append(speech)
+                        pieces.append(smooth_chunk_edges(speech, sample_rate))
                         if index < len(chunks):
-                            pieces.append(np.zeros(int(sample_rate * 0.12), dtype=np.float32))
+                            # A long sentence split for token limits is not a
+                            # sentence ending. Do not add a 120 ms stop there.
+                            boundary = 0.12 if re.search(r'''[.!?。！？][”’"')\]]*$''', chunk) else 0.02
+                            pieces.append(np.zeros(int(sample_rate * boundary), dtype=np.float32))
                 synthesis_seconds = time.monotonic() - synthesis_started
                 postprocess_started = time.monotonic()
                 if not pieces or sum(x.size for x in pieces) == 0:
@@ -1464,6 +1534,8 @@ def serve(port):
                     'X-Postprocess-Seconds': f'{postprocess_seconds:.3f}',
                     'X-LLM-Seconds': f'{generation_timer["llm_seconds"]:.3f}',
                     'X-Acoustic-Seconds': f'{generation_timer["acoustic_seconds"]:.3f}',
+                    'X-Acoustic-Wait-Seconds': f'{generation_timer["acoustic_wait_seconds"]:.3f}',
+                    'X-Quality-Guard': QUALITY_CAPABILITY,
                     'X-Sampling-Seconds': f'{generation_timer["sampling_seconds"]:.3f}',
                     'X-Generation-Retries': str(recovery_count),
                     'X-Retry-Seconds': f'{recovery_seconds:.3f}',

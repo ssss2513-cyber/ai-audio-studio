@@ -32,11 +32,10 @@ from core.gemini_key_ui import render_key_inputs
 from core.gemini_recovery_ui import render_gemini_recovery
 from core.chirp_client import CHIRP_VOICES, validate_key as validate_chirp_key
 from core.chirp_ui import render_chirp_settings, render_chirp_voice
-from core.qwen_client import QWEN_VOICES, connection_status as qwen_connection_status, export_plan as export_qwen_plan
-from core.qwen_ui import render_qwen_connection, render_qwen_voice
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
-from core.qwen_voicebank_client import connection_status as qwen_bank_status, export_plan as export_qwen_bank_plan
-from core.qwen_voicebank_ui import render_connection as render_qwen_bank_connection, render_voice as render_qwen_bank_voice, preset as bank_preset
+from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
+from core.qwen_bank_connection import connection_status as qwen_bank_status
+from core.qwen_bank_controls import render_connection as render_qwen_bank_connection, render_voice as render_qwen_bank_voice, preset as bank_preset
 from core.gemini_casting import (
     CastingError, analyze_gemini_casting, apply_casting_to_state, casting_fingerprint,
 )
@@ -47,7 +46,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.39 · Qwen 20종 연결 원인 구분"
+APP_VERSION = "v2.9.40 · Qwen 20종 전용 · 이전 9종 제거"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Qwen3 · Chirp · Gemini) - {APP_VERSION}",
@@ -216,7 +215,7 @@ def gemini_preset(speaker, current=None):
     current = current or {}
     preset = GEMINI_CHARACTER_PRESETS.get(speaker, {})
     catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
-               "edge-tts": KOREAN_EDGE_VOICES, "qwen": QWEN_VOICES, "qwen-bank": QWEN_BANK_VOICES,
+               "edge-tts": KOREAN_EDGE_VOICES, "qwen-bank": QWEN_BANK_VOICES,
                "chirp": {name: {"gender": gender} for name, gender in CHIRP_VOICES.items()}}.get(current.get("engine"), {})
     gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
               or speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", "")))
@@ -230,7 +229,7 @@ def gemini_preset(speaker, current=None):
 def chirp_preset(speaker, current=None):
     current = current or {}
     catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
-               "edge-tts": KOREAN_EDGE_VOICES, "qwen": QWEN_VOICES, "qwen-bank": QWEN_BANK_VOICES}.get(current.get("engine"), {})
+               "edge-tts": KOREAN_EDGE_VOICES, "qwen-bank": QWEN_BANK_VOICES}.get(current.get("engine"), {})
     gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
               or speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", "")))
     voice = (current.get("voice") if current.get("engine") in ("gemini", "chirp")
@@ -241,10 +240,10 @@ def chirp_preset(speaker, current=None):
             "style": "🎤 기본", "speed": current.get("speed", 1.0) if current.get("engine") == "chirp" else 1.0}
 
 
-def qwen_preset(speaker, current=None):
+def qwen_bank_preset(speaker, current=None, used=()):
     current = current or {}
     catalog = {"gemini": GEMINI_VOICES, "supertonic": SUPERTONIC_VOICES,
-               "edge-tts": KOREAN_EDGE_VOICES, "qwen": QWEN_VOICES, "qwen-bank": QWEN_BANK_VOICES,
+               "edge-tts": KOREAN_EDGE_VOICES, "qwen-bank": QWEN_BANK_VOICES,
                "chirp": {name: {"gender": gender} for name, gender in CHIRP_VOICES.items()}}.get(current.get("engine"), {})
     profile = st.session_state.get(f"voice_profile_{speaker}", "")
     gender = (current.get("gender") or catalog.get(current.get("voice"), {}).get("gender")
@@ -252,25 +251,43 @@ def qwen_preset(speaker, current=None):
     if not gender:
         known = GEMINI_CHARACTER_PRESETS.get(speaker, {}).get("voice")
         gender = GEMINI_VOICES.get(known, {}).get("gender", "")
-    needs_review = (current.get("gender_needs_review", False)
-                    if current.get("engine") == "qwen" else not bool(gender))
-    gender = gender or "여성"
-    voice = current.get("voice") if current.get("engine") == "qwen" else None
-    if voice not in QWEN_VOICES or QWEN_VOICES[voice]["gender"] != gender:
-        voice = "Uncle_Fu" if gender == "남성" else "Sohee"
-    recommendation = recommend_style(speaker, st.session_state.get("parsed_segments", []), profile)
-    style = current.get("style") if current.get("engine") == "qwen" else recommendation.style
-    return dict(engine="qwen", voice=voice, gender=gender,
-                style=resolve_style(style, VOICE_STYLES),
-                gender_needs_review=needs_review,
-                qwen_instruction=current.get("qwen_instruction", "") if current.get("engine") == "qwen" else "")
-
-
-def qwen_bank_preset(speaker, current=None, used=()):
-    current = current or {}
-    inferred = qwen_preset(speaker, current)
-    gender = None if inferred.get("gender_needs_review") else inferred["gender"]
     return bank_preset(speaker, current, gender, used)
+
+
+def retire_qwen_customvoice(busy):
+    """Remove the old engine without interrupting its already-running job."""
+    if st.session_state.get("active_engine_mode") == "qwen":
+        st.session_state["active_engine_mode"] = "qwen-bank"
+    if busy:
+        return
+    # These names are migration metadata only, never offered as voice choices.
+    previous_gender = {name: "남성" for name in ("Uncle_Fu", "Ryan", "Aiden", "Dylan", "Eric")}
+    previous_gender.update({name: "여성" for name in ("Sohee", "Serena", "Vivian", "Ono_Anna")})
+    settings = st.session_state.get("voice_settings", {})
+    used = {row.get("voice") for row in settings.values() if row.get("engine") == "qwen-bank"}
+    changed = []
+    for speaker, current in list(settings.items()):
+        if current.get("engine") != "qwen":
+            continue
+        st.session_state.setdefault("_retired_qwen_cast", {})[speaker] = dict(current)
+        gender = current.get("gender")
+        if gender not in ("남성", "여성"):
+            gender = previous_gender.get(current.get("voice"))
+        if not gender:
+            gender = speaker_gender(speaker, st.session_state.get(f"voice_profile_{speaker}", ""))
+        converted = dict(current)
+        converted.update(bank_preset(speaker, current, gender, used))
+        converted.pop("qwen_instruction", None)
+        settings[speaker] = converted
+        used.add(converted["voice"])
+        st.session_state[f"engine_select_{speaker}"] = "qwen-bank"
+        st.session_state[f"qwen_bank_voice_{speaker}"] = converted["voice"]
+        st.session_state[f"qwen_bank_gender_{speaker}"] = converted["gender"]
+        changed.append(speaker)
+    for key in ("qwen_url", "input_qwen_url", "checked_qwen_url"):
+        st.session_state.pop(key, None)
+    if changed:
+        st.session_state["_qwen_bank_migration_notice"] = changed
 
 
 def change_gemini_gender(speaker):
@@ -351,8 +368,6 @@ def apply_preset_to_speakers(speakers, engine_type):
         elif engine_type == "qwen-bank":
             used = {row["voice"] for row in new_settings.values() if row.get("engine") == "qwen-bank"}
             new_settings[spk] = qwen_bank_preset(spk, st.session_state.get("voice_settings", {}).get(spk), used)
-        elif engine_type == "qwen":
-            new_settings[spk] = qwen_preset(spk, st.session_state.get("voice_settings", {}).get(spk))
         elif engine_type == "cosyvoice":
             new_settings[spk] = {
                 "engine": "cosyvoice",
@@ -439,10 +454,6 @@ def set_speakers_preset(engine_type: str):
         elif eng == "qwen-bank":
             set_state_safe(f"qwen_bank_voice_{spk}", voice)
             set_state_safe(f"qwen_bank_gender_{spk}", QWEN_BANK_VOICES[voice]["gender"])
-        elif eng == "qwen":
-            set_state_safe(f"qwen_voice_{spk}", voice)
-            set_state_safe(f"qwen_gender_{spk}", QWEN_VOICES[voice]["gender"])
-            set_state_safe(f"qwen_instruction_{spk}", sdata.get("qwen_instruction", ""))
         elif eng == "edge-tts":
             set_state_safe(f"edge_voice_{spk}", voice)
         elif eng == "gpt-sovits":
@@ -470,7 +481,7 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         st.caption(f"작업 범위: {job['first']}번 ~ {job['last']}번")
         if job.get("execution_mode") in ("ordered_parallel_v2918", "ordered_parallel_v2919", "ordered_parallel_v2920", "ordered_independent_v2921"):
             st.caption("Qwen 요청 최대 4개(코랩 GPU 배치 1~2개) · Chirp 최대 4개 · Gemini 최대 2개 · Cosy 동시 수는 아래에 표시됩니다. 완료 대사는 번호순으로 한 번 합칩니다.")
-            engine_names = {"qwen-bank": "Qwen 기본 목소리 20종", "qwen": "Qwen3-TTS", "chirp": "Chirp 3 HD", "gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
+            engine_names = {"qwen-bank": "Qwen 기본 목소리 20종", "qwen": "이전 Qwen 작업", "chirp": "Chirp 3 HD", "gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
             for engine, progress in (job.get("engine_progress") or {}).items():
                 label = engine_names.get(engine, engine)
                 status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단",
@@ -1024,6 +1035,11 @@ def main():
     work_dir = session_workspace(st.session_state)
     generation_active = is_running(work_dir)
     correct_legacy_gemini_voices()
+    retire_qwen_customvoice(generation_active)
+    if st.session_state.get("_qwen_bank_migration_notice"):
+        st.info("이전 Qwen 화자를 같은 성별의 기본 목소리 20종으로 옮겼습니다: "
+                + ", ".join(st.session_state["_qwen_bank_migration_notice"])
+                + ". 새 목소리는 음색이 다르므로 생성 전에 배정을 확인해주세요. 기존 생성 파일은 보관합니다.")
 
     # 지연된 대본 텍스트가 있다면 위젯 생성 전에 안전하게 적용
     if "pending_script_text" in st.session_state:
@@ -1055,7 +1071,7 @@ def main():
             st.session_state.pop(setting, None)
 
     # Personal connections and optional API keys belong only to this browser session.
-    for setting in ("gemini_api_key", "cloud_tts_api_key", "gpt_sovits_url", "cosyvoice_url", "qwen_url", "qwen_bank_url"):
+    for setting in ("gemini_api_key", "cloud_tts_api_key", "gpt_sovits_url", "cosyvoice_url", "qwen_bank_url"):
         if setting not in st.session_state:
             st.session_state[setting] = ""
 
@@ -1160,7 +1176,6 @@ def main():
             "🎙️ GPT-SoVITS v4 (코랩 목소리 복제)",
             "🔀 하이브리드 (인물별 선택)",
             "☁️ Google Chirp 3 HD (월 100만 자 무료)",
-            "🗣️ Qwen3-TTS 1.7B (코랩 · 감정 스타일)",
             "🎭 Qwen 기본 목소리 20종 (남성 10 · 여성 10)"
         ]
         curr_idx = 0
@@ -1174,10 +1189,8 @@ def main():
             curr_idx = 4
         elif st.session_state["active_engine_mode"] == "chirp":
             curr_idx = 5
-        elif st.session_state["active_engine_mode"] == "qwen":
-            curr_idx = 6
         elif st.session_state["active_engine_mode"] == "qwen-bank":
-            curr_idx = 7
+            curr_idx = 6
 
         selected_mode_label = st.radio(
             "🎙️ TTS 기본 엔진 선택",
@@ -1199,8 +1212,6 @@ def main():
             new_mode = "chirp"
         elif "기본 목소리 20종" in selected_mode_label:
             new_mode = "qwen-bank"
-        elif "Qwen" in selected_mode_label:
-            new_mode = "qwen"
 
         # 기본 엔진 선택은 기존 화자 설정을 덮어쓰지 않는다.
         # 전체 화자 변경은 화자 설정 영역의 명시적인 일괄 적용 버튼에서만 수행한다.
@@ -1212,9 +1223,6 @@ def main():
         render_qwen_bank_connection(
             prominent=st.session_state["active_engine_mode"] in ("qwen-bank", "custom")
             or any(config.get("engine") == "qwen-bank" for config in st.session_state["voice_settings"].values()))
-        render_qwen_connection(
-            prominent=st.session_state["active_engine_mode"] in ("qwen", "custom")
-            or any(config.get("engine") == "qwen" for config in st.session_state["voice_settings"].values()))
         chirp_api_key = render_chirp_settings(
             prominent=st.session_state["active_engine_mode"] in ("chirp", "custom")
             or any(config.get("engine") == "chirp" for config in st.session_state["voice_settings"].values()))
@@ -1297,7 +1305,6 @@ def main():
     st.info(
         f"💡 **현재 기본 엔진: {selected_mode_label}**\n"
         "- **기본 목소리 20종 추가**: 남성 10개·여성 10개를 바로 선택 · 처음 한 번 자동 준비 · 녹음 업로드 불필요\n"
-        "- **Qwen3-TTS 1.7B**: 내 코랩에서 한국어 생성 · 화자별 감정·말투 지시 · 참조 녹음 불필요\n"
         "- **Google Chirp 3 HD**: 코랩 없이 한국어 음성 생성 · 월 100만 자까지 무료, 초과분 과금\n"
         "- **Supertonic 3**: 하이브 수퍼톤 한국어 모델로 **완전 무료 + 인터넷/키 없이도 로컬에서 초고속 생성**\n"
         "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **스튜디오 성우급 감정 연기**\n"
@@ -1447,15 +1454,9 @@ def main():
             st.toast("새 기본 목소리를 배정했습니다. 성별과 목소리를 확인해주세요.")
             st.rerun()
         with st.expander("🎭 새 기본 목소리 20종 목록 보기"):
-            st.caption("기존 9종과 별도의 제작 목소리 목록입니다. 선택한 목소리는 첫 생성 때 준비하며, 이후 같은 기준 음성을 재사용합니다.")
+            st.caption("남성 10개·여성 10개의 제작 목소리 목록입니다. 선택한 목소리는 첫 생성 때 준비하며, 이후 같은 기준 음성을 재사용합니다.")
             st.table([{"번호": key, "성별": row["gender"], "목소리": row["name"], "특징": row["description"]}
                       for key, row in QWEN_BANK_VOICES.items()])
-        if st.button("🗣️ 전체 화자를 Qwen3-TTS로 변경", use_container_width=True,
-                     disabled=generation_active, key="qwen_cast_all",
-                     help="기존 성별을 유지하고 Qwen 목소리와 추천 스타일을 설정합니다. 음성이나 Gemini 분석을 요청하지 않습니다."):
-            set_speakers_preset("qwen")
-            st.toast("Qwen으로 변경했습니다. 화자별 성별·목소리·스타일을 확인해주세요.")
-            st.rerun()
         if st.button("☁️ 전체 화자를 Google Chirp 3 HD로 변경", use_container_width=True,
                      disabled=generation_active, key="chirp_cast_all",
                      help="현재 성별과 호환되는 보이스 이름을 우선 유지합니다. Gemini API 호출 없이 바꾸며, 생성 버튼을 눌러야 음성을 만듭니다."):
@@ -1603,6 +1604,9 @@ def main():
                     spk_engine = current_cfg.get("engine", st.session_state["active_engine_mode"])
                     if spk_engine == "custom":
                         spk_engine = "supertonic"
+                    if spk_engine == "qwen":
+                        st.info(f"{spk}: 이전 Qwen 작업을 완료하면 기본 목소리 20종으로 전환됩니다.")
+                        continue
 
                     # 화자 헤더 (글자 줄바꿈 원천 방지 및 초고대비 배치)
                     st.markdown(
@@ -1616,7 +1620,7 @@ def main():
                         </div>""", 
                         unsafe_allow_html=True
                     )
-                    engine_choices = ["supertonic", "gemini", "cosyvoice", "gpt-sovits", "chirp", "qwen", "qwen-bank"]
+                    engine_choices = ["supertonic", "gemini", "cosyvoice", "gpt-sovits", "chirp", "qwen-bank"]
                     chosen_engine = st.selectbox(
                         "음성 엔진 선택",
                         options=engine_choices,
@@ -1625,7 +1629,6 @@ def main():
                             "supertonic": "👑 Supertonic 3 (로컬 무료)",
                             "gemini": "⚡ Gemini Flash",
                             "chirp": "☁️ Google Chirp 3 HD",
-                            "qwen": "🗣️ Qwen3-TTS (코랩 · 스타일)",
                             "qwen-bank": "🎭 기본 목소리 20종 (코랩)",
                             "cosyvoice": "🔥 CosyVoice 2 (코랩 GPU 복제)",
                             "gpt-sovits": "🎙️ GPT-SoVITS (복제)",
@@ -1677,12 +1680,6 @@ def main():
                             current_cfg = qwen_bank_preset(spk, current_cfg, used)
                             set_state_safe(f"qwen_bank_voice_{spk}", current_cfg["voice"])
                             set_state_safe(f"qwen_bank_gender_{spk}", current_cfg["gender"])
-                        elif chosen_engine == "qwen":
-                            current_cfg = qwen_preset(spk, current_cfg)
-                            set_state_safe(f"qwen_voice_{spk}", current_cfg["voice"])
-                            set_state_safe(f"qwen_gender_{spk}", current_cfg["gender"])
-                            set_state_safe(f"qwen_instruction_{spk}", current_cfg["qwen_instruction"])
-                            set_state_safe(f"style_select_{spk}", current_cfg["style"])
                         elif chosen_engine == "chirp":
                             current_cfg = chirp_preset(spk, current_cfg)
                             set_state_safe(f"chirp_voice_{spk}", current_cfg["voice"])
@@ -1862,9 +1859,6 @@ def main():
                     elif spk_engine == "qwen-bank":
                         render_qwen_bank_voice(spk, current_cfg, work_dir=work_dir,
                                                segments=st.session_state["parsed_segments"], busy=generation_active)
-                    elif spk_engine == "qwen":
-                        render_qwen_voice(spk, current_cfg, work_dir=work_dir,
-                                          segments=st.session_state["parsed_segments"], busy=generation_active)
                     elif spk_engine == "chirp":
                         render_chirp_voice(spk, current_cfg, work_dir=work_dir,
                                            segments=st.session_state["parsed_segments"],
@@ -2375,7 +2369,6 @@ def main():
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
         st.caption("새 기본 목소리 20종은 선택한 목소리를 처음 한 번 준비합니다. 전체 생성에서는 사용할 목소리를 먼저 한꺼번에 준비한 뒤 대사를 연속 생성하고, 번호순으로 MP3 하나로 합칩니다.")
-        st.caption("기존 Qwen 9종은 코랩 모델을 한 번 올려 재사용합니다. GPU 배치는 최대 2개이며, 사이트는 최대 4개 요청을 미리 보내 전송·저장 동안 다음 작업을 이어갑니다. 메모리가 부족하면 정밀도를 유지하고 배치만 1개로 줄입니다.")
         st.caption("Chirp는 코랩 없이 최대 4개를 연속 생성합니다. 한 대사가 끝나면 다음 대사를 바로 요청하고, 전부 완료되면 번호순으로 MP3 하나로 합칩니다.")
         st.caption("Gemini와 Cosy는 각각 독립적으로 생성합니다. Cosy 코랩 v2.9.16은 첫 대사를 저장한 뒤 실제 처리 속도에 맞춰 동시 1~4개 중 선택합니다. 빈자리가 나면 다음 대사를 바로 넣고, 모두 완료되면 번호순으로 MP3 하나로 합칩니다. 동시 수를 줄일 때도 진행 중인 대사는 끝까지 저장합니다.")
         st.caption("다음 Gemini 생성부터 요청 시작 간격은 최소 7초입니다. 등록한 모든 키와 재시도를 합쳐 평균 분당 약 8.6회 이내로 조절하며, 완료된 음성은 계속 재사용합니다.")
@@ -2442,19 +2435,6 @@ def main():
         except GeminiKeyInputError as exc:
             keys_for_start, key_input_error = [], str(exc)
         selected_segments = st.session_state["parsed_segments"][seg_range[0] - 1 : seg_range[1]]
-        qwen_segments = [seg for seg in selected_segments
-                         if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "qwen"]
-        if qwen_segments:
-            if len(qwen_segments) == len(selected_segments):
-                try:
-                    qwen_plan = export_qwen_plan(selected_segments, st.session_state["voice_settings"], pause_ms, include_spk_in_sub)
-                    st.download_button("⬇️ Qwen 코랩 직접 생성용 대본 받기", qwen_plan,
-                                       file_name="Qwen_대본_목소리_스타일.json", mime="application/json",
-                                       help="무료 코랩 안에서 생성할 때 사용합니다. Qwen 코랩 3번 셀에 올리면 현재 목소리·스타일로 생성하고 MP3 하나로 합칩니다.")
-                except ValueError as exc:
-                    st.warning(str(exc))
-            else:
-                st.caption("코랩 직접 생성 파일은 선택 범위의 모든 화자를 Qwen으로 바꾸면 받을 수 있습니다. 사이트 전체 생성에서는 엔진을 섞어서 사용할 수 있습니다.")
         bank_segments = [seg for seg in selected_segments
                          if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "qwen-bank"]
         if bank_segments and len(bank_segments) == len(selected_segments):
@@ -2506,7 +2486,6 @@ def main():
                 generation_revision = {"cosyvoice": "v7_cosy_generation",
                                        "gemini": "v8_gemini_voice_identity",
                                        "chirp": "v1_chirp_native_wav",
-                                       "qwen": "v1_qwen_customvoice_17b",
                                        "qwen-bank": "v1_qwen_designed_cast_base_17b"}.get(seg_engine, "v6_style_directions")
                 cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_{generation_revision}"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
@@ -2546,9 +2525,8 @@ def main():
                     cfg = VoiceConfig(engine="qwen-bank", voice=spk_cfg_data.get("voice", "F01"),
                                       style="🎤 기본", qwen_url=st.session_state.get("qwen_bank_url", ""))
                 elif seg_engine == "qwen":
-                    cfg = VoiceConfig(engine="qwen", voice=spk_cfg_data.get("voice", "Sohee"),
-                                      style=seg_style, qwen_url=st.session_state.get("qwen_url", ""),
-                                      qwen_instruction=spk_cfg_data.get("qwen_instruction", ""))
+                    st.error("이전 Qwen 설정이 남아 있습니다. 기본 목소리 20종으로 배정해주세요.")
+                    return
                 elif seg_engine == "chirp":
                     cfg = VoiceConfig(engine="chirp", voice=spk_cfg_data.get("voice", "Kore"),
                                       speed=float(spk_cfg_data.get("speed", 1.0)),
@@ -2592,12 +2570,6 @@ def main():
                         st.error(message)
                         return
                     checked_engines.add("qwen-bank")
-                if cfg.engine == "qwen" and "qwen" not in checked_engines:
-                    ok, message = qwen_connection_status(cfg.qwen_url)
-                    if not ok:
-                        st.error(message)
-                        return
-                    checked_engines.add("qwen")
                 if cfg.engine == "gemini" and not keys_for_start:
                     st.error(key_input_error or "Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
                     return

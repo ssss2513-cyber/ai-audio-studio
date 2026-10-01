@@ -77,6 +77,8 @@ class VoiceConfig:
     nfe_steps: int = 32                  # F5-TTS NFE Step (16~64)
     cosyvoice_url: str = ""              # CosyVoice Colab/WebUI API 주소
     cloud_tts_api_key: str = field(default="", repr=False)
+    qwen_url: str = field(default="", repr=False)
+    qwen_instruction: str = ""
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -584,6 +586,12 @@ class TTSEngine:
         pass
 
     @staticmethod
+    def generate_qwen_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None):
+        from .qwen_client import synthesize
+        return synthesize(clean_spoken_text(text), output_file, config,
+                          metrics=metrics, progress=progress, cancel=cancel)
+
+    @staticmethod
     def generate_chirp_speech(text, output_file, config, *, metrics=None, progress=None, cancel=None):
         from .chirp_client import synthesize
         return synthesize(clean_spoken_text(text), output_file,
@@ -972,6 +980,8 @@ class TTSEngine:
         동기 방식으로 음성 생성 호출
         """
         text = clean_spoken_text(text)
+        if voice_config and voice_config.engine == "qwen":
+            return cls.generate_qwen_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "chirp":
             return cls.generate_chirp_speech(text, output_file, voice_config)
         if voice_config and voice_config.engine == "gemini":

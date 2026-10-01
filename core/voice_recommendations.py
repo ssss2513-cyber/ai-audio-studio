@@ -129,6 +129,8 @@ def recommend_style(speaker, segments, profile=""):
 
 
 def style_note(engine, style, styles):
+    if engine == 'qwen':
+        return 'Qwen 1.7B CustomVoice에 감정·말투 지시를 별도로 전달합니다. 선택한 성우·성별을 유지하며, 결과는 보이스와 대사에 따라 달라집니다.'
     if engine == 'chirp':
         return 'Chirp 3 HD는 선택한 목소리와 읽기 속도를 사용합니다. Gemini의 감정·연령 지시문은 보내지 않습니다.'
     if engine == 'gpt-sovits':

@@ -48,7 +48,7 @@ def offline(monkeypatch):
     monkeypatch.setattr(client.random, 'uniform', lambda *args: 0)
     waits, pacing = [], []
     monkeypatch.setattr(client, '_wait_retry', lambda delay, cancel: waits.append(delay) or delay)
-    def pace(cancel):
+    def pace(cancel, on_cooldown=None):
         if cancel and cancel():
             raise CancelledError()
         pacing.append(True)

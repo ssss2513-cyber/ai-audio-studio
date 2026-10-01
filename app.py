@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import math
 import os
 import re
 import time
@@ -37,7 +38,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.26 · 스타일 오류·Gemini 서버 재시도 복구"
+APP_VERSION = "v2.9.27 · Gemini 한도 대기 후 자동 이어서 생성"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -398,12 +399,17 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
             engine_names = {"gemini": "Gemini", "cosyvoice": "CosyVoice", "gpt-sovits": "GPT-SoVITS", "supertonic": "Supertonic"}
             for engine, progress in (job.get("engine_progress") or {}).items():
                 label = engine_names.get(engine, engine)
-                status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단"}.get(progress.get("status"), "대기")
+                status = {"running": "생성 중", "complete": "완료", "failed": "오류로 중단", "paused": "일시 중단",
+                          "quota_wait": "한도 대기 · 자동 재개 예정"}.get(progress.get("status"), "대기")
                 receiving = f" · 수신 {progress['receiving']}개" if progress.get('receiving') else ""
                 st.caption(f"{label}: 저장 {progress['done']}/{progress['total']}개 · 진행 {progress.get('active', 0)}개{receiving} · {status}")
                 for index, retry in (job.get("retrying_lines") or {}).items():
                     if retry.get("engine") == engine:
-                        st.info(f"{index}번({retry['speaker']}): {retry['phase']}")
+                        phase = retry['phase']
+                        if retry.get("waiting_for_quota"):
+                            remaining = max(0, math.ceil(retry.get("quota_retry_at", 0) - time.time()))
+                            phase = f"Gemini 요청 제한(429) · 약 {remaining}초 후 자동 이어서 생성 · 버튼을 다시 누르지 않아도 됩니다."
+                        st.info(f"{index}번({retry['speaker']}): {phase}")
                 error = (job.get("engine_errors") or {}).get(engine)
                 if error and active:
                     suffix = "다른 엔진은 계속 생성합니다." if len(job["engine_progress"]) > 1 else "진행 중인 결과를 저장합니다."
@@ -481,10 +487,11 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
         if latest.get("engine") == "gemini":
             st.caption(f"최근 {latest['index']}번 Gemini: 전체 {latest.get('total_seconds', 0):.1f}초"
                        f" · Google 응답·수신 {latest.get('request_seconds', 0):.1f}초"
-                       f" · 요청 간격 대기 {latest.get('pacing_seconds', 0):.1f}초"
+                       f" · 요청 간격·한도 대기 {latest.get('pacing_seconds', 0):.1f}초"
                        f" · 원음 저장 {latest.get('postprocess_seconds', 0):.1f}초")
             if latest.get("retries"):
-                st.caption(f"서버 오류 자동 복구 {latest['retries']}회 · 추가 대기 {latest.get('retry_seconds', 0):.1f}초")
+                st.caption(f"자동 재시도 {latest['retries']}회 · 이 중 한도 대기 후 재시도 {latest.get('quota_retries', 0)}회"
+                           f" · 서버 오류 대기 {latest.get('retry_seconds', 0):.1f}초")
             st.caption(f"사용 모델: {latest.get('model', '확인 필요')} · 요청 {latest.get('attempts', 1)}회")
         current = job.get("current_metrics") or {}
         if active and current.get("engine") == "gemini":

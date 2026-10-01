@@ -17,6 +17,8 @@ import threading
 import time
 import wave
 
+from .gemini_quota import MAX_QUOTA_WAIT, quota_error_message, quota_recovery
+
 _CLIENTS = threading.local()
 _PACERS = {}
 _PACERS_LOCK = threading.Lock()
@@ -31,18 +33,36 @@ class RequestPacer:
         self.interval = interval
         self.lock = threading.Lock()
         self.last_started = time.monotonic() - interval
+        self.not_before = 0.0
 
-    def wait(self, cancel=None):
-        started = time.monotonic()
+    def defer(self, delay, interval=None):
+        """All workers sharing keys must honor the same provider cooldown."""
         with self.lock:
-            while True:
-                if cancel and cancel():
-                    raise CancelledError()
-                remaining = self.interval - (time.monotonic() - self.last_started)
+            self.not_before = max(self.not_before, time.monotonic() + delay)
+            if interval is not None:
+                self.interval = max(self.interval, interval)
+
+    def wait(self, cancel=None, on_cooldown=None):
+        started = time.monotonic()
+        reported_deadline = None
+        while True:
+            if cancel and cancel():
+                raise CancelledError()
+            with self.lock:
+                now = time.monotonic()
+                remaining = max(self.last_started + self.interval, self.not_before) - now
+                cooldown = max(0.0, self.not_before - now)
+                deadline = self.not_before if cooldown else 0.0
                 if remaining <= 0:
-                    self.last_started = time.monotonic()
-                    return time.monotonic() - started
-                time.sleep(min(remaining, 0.1))
+                    self.last_started = now
+            # Do not hold the lock while sleeping: another worker's 429 must
+            # be able to extend the shared cooldown before the next request.
+            if on_cooldown and reported_deadline != deadline:
+                on_cooldown(cooldown)
+                reported_deadline = deadline
+            if remaining <= 0:
+                return time.monotonic() - started
+            time.sleep(min(remaining, 0.1))
 
 
 def _pacer(keys):
@@ -51,7 +71,7 @@ def _pacer(keys):
     with _PACERS_LOCK:
         now = time.monotonic()
         for old, pacer in list(_PACERS.items()):
-            if now - pacer.last_started > 600 and not pacer.lock.locked():
+            if now - max(pacer.last_started, pacer.not_before) > 600 and not pacer.lock.locked():
                 _PACERS.pop(old, None)
         return _PACERS.setdefault(identity, RequestPacer())
 
@@ -129,17 +149,7 @@ def _wait_retry(delay, cancel):
 def _request_error(exc):
     code = _status_code(exc)
     if code == 429:
-        # Do not rotate keys/models to get around a project quota. A delayed
-        # duplicate request may consume quota without producing a usable file.
-        hint = ""
-        match = re.search(r'(?:retryDelay[\"\s:]+|retry in\s+)([0-9.]+)s', str(exc), re.I)
-        if match:
-            delay = float(match.group(1))
-            if math.isfinite(delay) and 0 < delay < 86400:
-                hint = f" 서버가 안내한 재시도 대기: 약 {math.ceil(delay)}초."
-        return RuntimeError("Gemini 요청 한도 오류(429)로 멈췄습니다." + hint
-                            + " 완료된 음성은 유지됩니다. AI Studio에서 해당 프로젝트의 한도를 확인한 뒤 이어서 생성해주세요."
-                            + " 같은 프로젝트의 API 키를 추가해도 한도는 늘어나지 않습니다.")
+        return RuntimeError(quota_error_message(quota_recovery(exc)))
     if code in (401, 403):
         return RuntimeError(f"Gemini 접근 오류({code})입니다. API 키와 선택한 모델의 이용 권한을 확인해주세요.")
     if code in (400, 404):
@@ -157,7 +167,8 @@ def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, prog
     started = time.monotonic()
     metrics = metrics if metrics is not None else {}
     metrics.update(engine="gemini", model=model, attempts=0, pacing_seconds=0.0,
-                   request_seconds=0.0, retries=0, retry_seconds=0.0, retrying=False)
+                   request_seconds=0.0, retries=0, retry_seconds=0.0, retrying=False,
+                   quota_retries=0, waiting_for_quota=False, quota_retry_at=0.0)
     target = Path(output_file).absolute()
     if target.suffix.lower() not in (".wav", ".mp3"):
         raise ValueError("출력 파일은 WAV 또는 MP3여야 합니다.")
@@ -168,10 +179,23 @@ def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, prog
         speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))))
     pacer = _pacer(pacing_group or api_key)
+    previous_quota_delay = 0.0
+
+    def cooldown_progress(remaining):
+        metrics.update(waiting_for_quota=remaining > 0,
+                       quota_retry_at=time.time() + remaining if remaining > 0 else 0.0)
+        if remaining > 0:
+            metrics["retrying"] = True
+            if progress:
+                progress("Gemini 요청 제한(429) · 대기 후 자동 이어서 생성", metrics)
+
     for attempt in range(_SERVER_RETRIES + 1):
         if progress:
             progress("요청 간격 조절" if attempt == 0 else f"Gemini 재시도 {attempt}/{_SERVER_RETRIES} · 요청 간격 조절", metrics)
-        metrics["pacing_seconds"] += pacer.wait(cancel)
+        metrics["pacing_seconds"] += pacer.wait(cancel, on_cooldown=cooldown_progress)
+        if cancel and cancel():
+            raise CancelledError()
+        metrics.update(retrying=attempt > 0, waiting_for_quota=False, quota_retry_at=0.0)
         metrics["attempts"] = attempt + 1
         metrics["retries"] = attempt
         if progress:
@@ -191,6 +215,16 @@ def synthesize(prompt, output_file, *, api_key, model, voice, metrics=None, prog
         if failure is None:
             break
         code = _status_code(failure)
+        if code == 429 and attempt < _SERVER_RETRIES:
+            recovery = quota_recovery(failure)
+            if recovery.kind == "temporary":
+                delay = max(recovery.delay, previous_quota_delay * 2) + random.uniform(0.0, 0.5)
+                if delay <= MAX_QUOTA_WAIT:
+                    previous_quota_delay = delay
+                    pacer.defer(delay, recovery.interval)
+                    metrics["quota_retries"] += 1
+                    metrics["retrying"] = True
+                    continue
         if code not in _SERVER_RETRY_CODES or attempt == _SERVER_RETRIES:
             error = _request_error(failure)
             if attempt:

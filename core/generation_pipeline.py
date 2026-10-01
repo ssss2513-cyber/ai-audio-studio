@@ -90,9 +90,12 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             in_flight = sum(by_index[index].config.engine == engine for index in active)
             progress['active'] = len(calculating) if engine == 'cosyvoice' else in_flight
             progress['receiving'] = max(0, in_flight - progress['active'])
+            waiting_for_quota = any(retry.get('engine') == engine and retry.get('waiting_for_quota')
+                                    for retry in state['retrying_lines'].values())
             progress['status'] = ('failed' if engine in state['engine_errors'] else
                                   'complete' if progress['done'] == progress['total'] else
-                                  'paused' if pause.is_set() else 'running')
+                                  'paused' if pause.is_set() else
+                                  'quota_wait' if waiting_for_quota else 'running')
 
     def complete(item, path, metrics, reused=False):
         state['retrying_lines'].pop(item.index, None)
@@ -252,7 +255,9 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
             elif kind in ('started', 'phase'):
                 if details.get('retrying'):
                     state['retrying_lines'][item.index] = dict(
-                        engine=item.config.engine, speaker=item.speaker, phase=details.get('phase', '자동 재시도 중'))
+                        engine=item.config.engine, speaker=item.speaker, phase=details.get('phase', '자동 재시도 중'),
+                        waiting_for_quota=bool(details.get('waiting_for_quota')),
+                        quota_retry_at=details.get('quota_retry_at', 0.0))
                 else:
                     state['retrying_lines'].pop(item.index, None)
                 active.add(item.index)

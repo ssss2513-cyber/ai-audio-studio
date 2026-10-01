@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Refresh this release revision whenever either notebook is updated.
 # The pinned link opens the same named notebook that the download button serves.
 NOTEBOOK_RELEASE_REVISION = "fc0a7215efad6e00b76cce55489efec7b9516e91"
-COSY_NOTEBOOK_RELEASE_REVISION = "e78d66a1ec3cfae04197c98ce3e8f22e17a836d6"
+COSY_NOTEBOOK_RELEASE_REVISION = "8eccd5465a9b05042e1bf3fd9ddbdc2989d4238b"
 ENGINES = {
     "gpt-sovits": ("GPT-SoVITS v4", "gpt_sovits_url", "input_gpt_sovits_url", TTSEngine.test_gpt_sovits_connection),
     "cosyvoice": ("CosyVoice 2", "cosyvoice_url", "input_cosyvoice_url", TTSEngine.test_cosyvoice_connection),

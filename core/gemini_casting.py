@@ -4,6 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
+
+import requests
 
 ANALYSIS_MODEL = "gemini-3.8-flash"
 GENDERS = ("남성", "여성")
@@ -146,52 +149,156 @@ def validate_casting(payload, *, script, speakers, profiles, existing, voices, s
     return result
 
 
-def analyze_gemini_casting(*, script, speakers, profiles, existing, voices, styles, api_key):
-    keys = [key for key in re.split(r"[,;\s]+", api_key.strip()) if key]
-    if not keys:
+def _request_body(script, speakers, profiles, existing, voices, styles):
+    data = {"script": script, "speakers": [
+        {"speaker": s, "profile": profiles.get(s, ""), "existing_voice": existing.get(s, {}).get("voice", "")}
+        for s in speakers]}
+    return {
+        "systemInstruction": {"parts": [{"text": _instructions(voices, styles)}]},
+        "contents": [{"role": "user", "parts": [{"text": json.dumps(data, ensure_ascii=False)}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": _schema(speakers, voices, styles),
+            "maxOutputTokens": min(32768, max(8192, len(speakers) * 650)),
+            "thinkingConfig": {"thinkingLevel": "low"},
+        },
+    }
+
+
+def _response_payload(envelope):
+    if not isinstance(envelope, dict):
+        raise CastingError("분석 응답 형식 오류 [INVALID_RESPONSE]. 기존 설정은 유지됩니다.")
+    if (envelope.get("promptFeedback") or {}).get("blockReason"):
+        raise CastingError("Gemini가 이 대본의 분석을 제한했습니다 [CONTENT_BLOCKED]. 기존 설정은 유지됩니다.")
+    candidates = envelope.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        raise CastingError("Gemini가 분석 결과를 비워서 반환했습니다 [EMPTY_RESPONSE]. 기존 설정은 유지됩니다.")
+    candidate = candidates[0]
+    finish = candidate.get("finishReason", "")
+    if finish == "MAX_TOKENS":
+        raise CastingError("분석 결과의 길이 한도에 도달했습니다 [MAX_TOKENS]. 기존 설정은 유지됩니다.")
+    if finish not in ("STOP", "", "FINISH_REASON_UNSPECIFIED"):
+        raise CastingError("Gemini가 분석 결과 생성을 중단했습니다 [RESPONSE_BLOCKED]. 기존 설정은 유지됩니다.")
+    text = "".join(p.get("text", "") for p in (candidate.get("content") or {}).get("parts", [])
+                   if isinstance(p, dict) and not p.get("thought") and isinstance(p.get("text", ""), str)).strip()
+    # Some model/API combinations wrap JSON despite responseMimeType.
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise CastingError("Gemini 분석 결과가 완성되지 않았습니다 [INVALID_JSON]. 기존 설정은 유지됩니다.") from None
+
+
+def _http_error(status):
+    if status == 429:
+        return "Gemini 대본 분석 요청 한도에 걸렸습니다 [HTTP 429]. AI Studio에서 프로젝트의 분석 모델 한도를 확인해주세요."
+    if status in (401, 403):
+        return f"Gemini 대본 분석 권한 오류 [HTTP {status}]. API 키의 모델 이용 권한을 확인해주세요."
+    if status == 404:
+        return f"이 API 키에서 분석 모델 {ANALYSIS_MODEL}을 찾지 못했습니다 [HTTP 404]."
+    if status == 400:
+        return "Gemini가 분석 요청을 거절했습니다 [HTTP 400]. API 키 또는 분석 요청 형식을 확인해주세요."
+    if status in (408, 504):
+        return f"Gemini 서버의 분석 대기 시간이 초과됐습니다 [HTTP {status}]."
+    if status >= 500:
+        return f"Gemini 분석 서버가 일시적으로 응답하지 못했습니다 [HTTP {status}]."
+    return f"Gemini 분석 연결이 거절됐습니다 [HTTP {status}]."
+
+
+def analyze_gemini_casting(*, script, speakers, profiles, existing, voices, styles, api_key, progress=None):
+    # REST avoids SDK/version/async-client initialization failures on hosted apps.
+    # Only text analysis uses this transport; synthesis and its pacing are unchanged.
+    keys = [key.strip("\"'`\ufeff\u200b") for key in re.split(r"[,;\s]+", api_key.strip()) if key]
+    if not keys or not keys[0]:
         raise CastingError("왼쪽 ‘Gemini API 키 등록’에 키를 입력한 뒤 다시 눌러주세요. 기존 설정은 유지됩니다.")
+    key = keys[0]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        raise CastingError("API 키에 설명 문구나 특수문자가 섞여 있습니다 [INVALID_KEY_FORMAT]. 키 값만 다시 입력해주세요. 기존 설정은 유지됩니다.")
     if not script.strip() or not speakers:
         raise CastingError("대본과 화자를 먼저 입력해주세요.")
     if len(script) > 200_000:
         raise CastingError("대본이 20만 자를 넘습니다. 작품을 나눠 분석해주세요. 기존 설정은 유지됩니다.")
-    from google import genai
-    from google.genai import types
-
-    data = {"script": script, "speakers": [
-        {"speaker": s, "profile": profiles.get(s, ""), "existing_voice": existing.get(s, {}).get("voice", "")}
-        for s in speakers]}
-    client = None
-    try:
-        client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(
-            timeout=90_000, retry_options=types.HttpRetryOptions(attempts=1)))
-        response = client.models.generate_content(
-            model=ANALYSIS_MODEL, contents=json.dumps(data, ensure_ascii=False),
-            config=types.GenerateContentConfig(
-                system_instruction=_instructions(voices, styles),
-                response_mime_type="application/json", response_schema=_schema(speakers, voices, styles),
-                max_output_tokens=min(32768, max(8192, len(speakers) * 650))))
-        payload = json.loads(response.text or "")
-    except (json.JSONDecodeError, AttributeError) as exc:
-        raise CastingError("분석 결과가 완성되지 않았습니다. 기존 설정은 유지됩니다. 다시 눌러주세요.") from None
-    except Exception as exc:
-        code = str(getattr(exc, "code", ""))
-        if code == "429":
-            message = "Gemini 대본 분석 요청 한도(429)에 걸렸습니다. 잠시 후 다시 눌러주세요."
-        elif code in ("401", "403"):
-            message = "Gemini 대본 분석 권한을 확인해주세요. 입력한 키의 모델 이용 권한이 필요합니다."
-        elif code in ("400", "404"):
-            message = "Gemini 대본 분석 모델에 요청하지 못했습니다. API 키의 모델 이용 권한을 확인해주세요."
-        else:
-            message = "Gemini 대본 분석 응답을 받지 못했습니다. 잠시 후 다시 눌러주세요."
-        raise CastingError(message + " 기존 설정은 유지됩니다.") from None
-    finally:
-        if client is not None:
+    body = _request_body(script, speakers, profiles, existing, voices, styles)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{ANALYSIS_MODEL}:generateContent"
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+    with requests.Session() as session:
+        for attempt in range(2):
+            if progress:
+                progress("대본의 성별·나이·관계를 분석하고 있습니다." if attempt == 0
+                         else "일시 오류를 복구해 한 번 더 분석하고 있습니다. (자동 재시도 1/1)")
+            retryable, delay, message = False, 1.0, ""
             try:
-                client.close()
-            except Exception:
-                pass
-    return validate_casting(payload, script=script, speakers=speakers, profiles=profiles,
-                            existing=existing, voices=voices, styles=styles)
+                # No automatic redirects, hidden retries or key/model rotation.
+                with session.post(url, headers=headers, json=body, timeout=(10, 60), allow_redirects=False) as response:
+                    status = response.status_code
+                    if status == 200:
+                        try:
+                            envelope = response.json()
+                        except ValueError:
+                            raise CastingError("Gemini 연결 응답을 읽지 못했습니다 [INVALID_RESPONSE]. 기존 설정은 유지됩니다.") from None
+                        try:
+                            payload = _response_payload(envelope)
+                        except CastingError as exc:
+                            if "[MAX_TOKENS]" in str(exc) and attempt == 0 and body["generationConfig"]["maxOutputTokens"] < 32768:
+                                body["generationConfig"]["maxOutputTokens"] = 32768
+                                if progress:
+                                    progress("분석 결과가 길어 출력 한도를 늘려 다시 요청합니다.")
+                                continue
+                            raise
+                        return validate_casting(payload, script=script, speakers=speakers, profiles=profiles,
+                                                existing=existing, voices=voices, styles=styles)
+                    message = _http_error(status)
+                    retryable = status in (408, 500, 502, 503, 504)
+                    retry_after = response.headers.get("Retry-After", "")
+                    if retry_after:
+                        try:
+                            delay = max(1.0, float(retry_after))
+                        except ValueError:
+                            # A date or unrecognized delay must not cause an early retry.
+                            retryable = False
+                        if delay > 5:
+                            retryable = False
+                            message += f" 서버 안내 대기: 약 {min(int(delay), 86400)}초."
+                    if status == 400 and attempt == 0:
+                        # Remove optional generation features only when the API
+                        # explicitly identifies them as incompatible.
+                        try:
+                            detail = str((response.json().get("error") or {}).get("message", "")).lower()
+                        except (ValueError, AttributeError):
+                            detail = ""
+                        config = body["generationConfig"]
+                        if any(t in detail for t in ("response_schema", "responseschema", "response schema")):
+                            config.pop("responseSchema", None)
+                            retryable = True
+                        if any(t in detail for t in ("thinkingconfig", "thinking_config", "thinking level", "thinkinglevel")):
+                            config.pop("thinkingConfig", None)
+                            retryable = True
+            except CastingError:
+                raise
+            except requests.exceptions.SSLError:
+                message = "Gemini 연결의 인증서를 확인하지 못했습니다 [TLS_ERROR]."
+            except requests.exceptions.ProxyError:
+                message, retryable = "Gemini 연결 경유 서버에 접속하지 못했습니다 [PROXY_ERROR].", True
+            except requests.exceptions.Timeout:
+                message, retryable = "Gemini 대본 분석의 응답 대기 시간이 초과됐습니다 [TIMEOUT].", True
+            except requests.exceptions.ConnectionError:
+                message, retryable = "Gemini 분석 서버에 연결하지 못했습니다 [CONNECTION_ERROR].", True
+            except requests.exceptions.RequestException:
+                message = "Gemini 분석 요청을 전송하지 못했습니다 [REQUEST_ERROR]."
+            except Exception as exc:
+                # Exception class only: provider messages/URLs may contain keys
+                # or script fragments and must never be shown or persisted.
+                kind = re.sub(r"[^A-Za-z0-9_]", "", type(exc).__name__)[:60]
+                message = f"분석 요청 처리 오류 [{kind}]."
+            if not retryable or attempt == 1:
+                suffix = " 자동 재시도 1회 후에도 실패했습니다." if attempt else ""
+                raise CastingError(message + suffix + " 기존 설정은 유지됩니다.") from None
+            if progress:
+                progress(message + " 잠시 후 한 번 자동 재시도합니다.")
+            time.sleep(delay)
+    raise CastingError("분석을 완료하지 못했습니다 [NO_RESULT]. 기존 설정은 유지됩니다.")
 
 
 def apply_casting_to_state(state, *, result, speakers, segments, script, profiles):

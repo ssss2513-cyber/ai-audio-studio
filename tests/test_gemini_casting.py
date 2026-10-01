@@ -97,41 +97,147 @@ def test_editing_script_or_profile_invalidates_old_analysis():
     assert old != casting.casting_fingerprint(SCRIPT, ["도윤"], {"도윤": "여성"})
 
 
+def api_response(rows=None, *, finish="STOP"):
+    return {"candidates": [{"content": {"role": "model", "parts": [
+        {"text": json.dumps({"speakers": rows if rows is not None else [row()]})}
+    ]}, "finishReason": finish}]}
+
+
+@pytest.fixture(autouse=True)
+def no_real_network(monkeypatch):
+    import requests
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Real HTTP requests are forbidden in casting tests")
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", forbidden)
+    monkeypatch.setattr(casting.time, "sleep", lambda _: None)
+
+
+def memory_http(monkeypatch, replies):
+    """Exercise real requests serialization with an in-memory HTTP adapter."""
+    import requests
+    original = requests.Session
+    calls, closed = [], []
+    class Adapter(requests.adapters.HTTPAdapter):
+        def send(self, request, **kwargs):
+            calls.append((request, kwargs))
+            reply = replies[len(calls) - 1]
+            if isinstance(reply, Exception):
+                raise reply
+            status, body, *headers = reply
+            response = requests.Response()
+            response.status_code = status
+            response.request = request
+            response.url = request.url
+            response.headers.update(headers[0] if headers else {})
+            response._content = json.dumps(body, ensure_ascii=False).encode()
+            response.encoding = "utf-8"
+            return response
+        def close(self):
+            closed.append(True)
+            super().close()
+    def session():
+        result = original()
+        result.mount("https://generativelanguage.googleapis.com/", Adapter())
+        return result
+    monkeypatch.setattr(requests, "Session", session)
+    return calls, closed
+
+
+def analyze(**kwargs):
+    params = dict(script=SCRIPT, speakers=["도윤"], profiles={}, existing={},
+                  voices=GEMINI_VOICES, styles=VOICE_STYLES, api_key="test-key,other-key")
+    params.update(kwargs)
+    return casting.analyze_gemini_casting(**params)
+
+
 def test_analysis_uses_one_text_request_and_closes_client(monkeypatch):
-    from google import genai
-    calls, options, closed = [], [], []
-    def generate_content(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(text=json.dumps({"speakers": [row()]}))
-    def client(**kwargs):
-        options.append(kwargs)
-        return SimpleNamespace(models=SimpleNamespace(generate_content=generate_content), close=lambda: closed.append(True))
-    monkeypatch.setattr(genai, "Client", client)
-    result = casting.analyze_gemini_casting(script=SCRIPT, speakers=["도윤"], profiles={}, existing={},
-                                          voices=GEMINI_VOICES, styles=VOICE_STYLES, api_key="test-key,other-key")
-    assert len(calls) == 1 and closed == [True]
-    assert options[0]["http_options"].retry_options.attempts == 1
-    assert options[0]["api_key"] == "test-key"
-    assert json.loads(calls[0]["contents"])["script"] == SCRIPT
-    assert "test-key" not in calls[0]["contents"]
-    assert calls[0]["config"].response_mime_type == "application/json"
+    calls, closed = memory_http(monkeypatch, [(200, api_response())])
+    result = analyze()
+    assert len(calls) == 1 and closed
+    request, options = calls[0]
+    body = json.loads(request.body)
+    assert request.method == "POST" and request.url.endswith(":generateContent")
+    assert request.headers["x-goog-api-key"] == "test-key"
+    assert "test-key" not in request.url and b"test-key" not in request.body
+    assert options["timeout"] == (10, 60)
+    assert json.loads(body["contents"][0]["parts"][0]["text"])["script"] == SCRIPT
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "low"
     assert result["도윤"]["voice"] == "Fenrir"
 
 
 def test_analysis_quota_failure_exposes_no_secret_or_partial_update(monkeypatch):
-    from google import genai
-    calls = []
-    class QuotaError(Exception):
-        code = 429
-    def generate_content(**kwargs):
-        calls.append(kwargs)
-        raise QuotaError("secret-key")
-    monkeypatch.setattr(genai, "Client", lambda **kwargs: SimpleNamespace(
-        models=SimpleNamespace(generate_content=generate_content), close=lambda: None))
+    calls, closed = memory_http(monkeypatch, [(429, {"error": {"message": "secret-key"}})])
     existing = {"도윤": {"voice": "Kore"}}
     before = copy.deepcopy(existing)
     with pytest.raises(casting.CastingError) as error:
-        casting.analyze_gemini_casting(script=SCRIPT, speakers=["도윤"], profiles={}, existing=existing,
-                                      voices=GEMINI_VOICES, styles=VOICE_STYLES, api_key="secret-key")
-    assert "429" in str(error.value) and "secret-key" not in str(error.value)
-    assert len(calls) == 1 and existing == before
+        analyze(existing=existing, api_key="secret-key")
+    assert "HTTP 429" in str(error.value) and "secret-key" not in str(error.value)
+    assert len(calls) == 1 and existing == before and closed
+
+
+def test_transient_timeout_recovers_once_without_changing_key_or_model(monkeypatch):
+    import requests
+    calls, _ = memory_http(monkeypatch, [requests.Timeout("sensitive URL"), (200, api_response())])
+    updates = []
+    assert analyze(progress=updates.append)["도윤"]["voice"] == "Fenrir"
+    assert len(calls) == 2
+    assert calls[0][0].url == calls[1][0].url
+    assert calls[0][0].body == calls[1][0].body
+    assert calls[0][0].headers["x-goog-api-key"] == calls[1][0].headers["x-goog-api-key"]
+    assert any("자동 재시도" in update for update in updates)
+    assert all("sensitive" not in update for update in updates)
+
+
+def test_busy_server_stops_after_one_retry_with_actual_status(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [(503, {"error": {"message": "secret"}})] * 2)
+    with pytest.raises(casting.CastingError) as error:
+        analyze()
+    assert len(calls) == 2
+    assert "HTTP 503" in str(error.value) and "secret" not in str(error.value)
+
+
+def test_unknown_model_is_not_disguised_as_a_connection_error(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [(404, {"error": {"message": "secret"}})])
+    with pytest.raises(casting.CastingError, match="HTTP 404"):
+        analyze()
+    assert len(calls) == 1
+
+
+def test_incompatible_schema_retries_with_json_and_keeps_gender_validation(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [
+        (400, {"error": {"message": "response_schema is unsupported"}}),
+        (200, api_response([row(voice="Kore")])),
+    ])
+    result = analyze()
+    body = json.loads(calls[1][0].body)
+    assert "responseSchema" not in body["generationConfig"]
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert GEMINI_VOICES[result["도윤"]["voice"]]["gender"] == "남성"
+
+
+def test_truncated_response_gets_one_larger_output_budget(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [(200, api_response(finish="MAX_TOKENS")), (200, api_response())])
+    assert analyze()["도윤"]["voice"] == "Fenrir"
+    assert json.loads(calls[1][0].body)["generationConfig"]["maxOutputTokens"] == 32768
+
+
+def test_provider_blocks_do_not_retry(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [(200, {"promptFeedback": {"blockReason": "SAFETY"}})])
+    with pytest.raises(casting.CastingError, match="CONTENT_BLOCKED"):
+        analyze()
+    assert len(calls) == 1
+
+
+def test_long_server_retry_after_is_respected(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [(503, {}, {"Retry-After": "60"})])
+    with pytest.raises(casting.CastingError, match="60초"):
+        analyze()
+    assert len(calls) == 1
+
+
+def test_bad_key_format_is_reported_without_transmission(monkeypatch):
+    calls, _ = memory_http(monkeypatch, [])
+    with pytest.raises(casting.CastingError, match="INVALID_KEY_FORMAT"):
+        analyze(api_key="제미나이키")
+    assert calls == []

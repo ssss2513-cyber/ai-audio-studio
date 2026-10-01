@@ -33,7 +33,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.22 · 대본 맞춤 Gemini 보이스·스타일 자동 배정"
+APP_VERSION = "v2.9.23 · Gemini 대본 분석 연결·응답 오류 복구"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Supertonic 3 · Gemini Flash · AI 목소리 복제) - {APP_VERSION}",
@@ -1277,6 +1277,7 @@ def main():
             if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True,
                          key="gemini_cast_all", disabled=generation_active,
                          help="현재 대본과 인물 정보를 분석해 성별·나이·역할에 맞는 보이스와 스타일을 함께 설정합니다. Gemini API 키가 필요합니다."):
+                casting_status = st.empty()
                 try:
                     if not gemini_api_key.strip():
                         raise CastingError("왼쪽 ‘Gemini API 키 등록’에 키를 입력한 뒤 다시 눌러주세요. 기존 설정은 유지됩니다.")
@@ -1296,12 +1297,14 @@ def main():
                         cast = analyze_gemini_casting(
                             script=source_text, speakers=cast_speakers, profiles=profiles,
                             existing=existing, voices=GEMINI_VOICES, styles=VOICE_STYLES,
-                            api_key=gemini_api_key)
+                            api_key=gemini_api_key, progress=casting_status.caption)
+                    casting_status.empty()
                     apply_casting_to_state(st.session_state, result=cast, speakers=cast_speakers,
                                            segments=cast_segments, script=source_text, profiles=profiles)
                     st.toast(f"{len(cast_speakers)}명 보이스·스타일 자동 설정 완료")
                     st.rerun()
                 except CastingError as exc:
+                    casting_status.empty()
                     st.error(str(exc))
         with col_bar3:
             if st.button("🎙️ 전체 AI 목소리 복제 (Colab GPU)", use_container_width=True):

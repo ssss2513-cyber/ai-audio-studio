@@ -302,48 +302,95 @@ def test_auto_concurrency_uses_measured_memory_and_limits_after_oom():
     policy.begin()
     assert policy.limit == 1 and not policy.calibrated
     policy.calibrated_after_success()
-    assert policy.limit == 8  # remaining memory / observed requirement + reserves
+    assert policy.limit == 2  # first retained clip enables a gradual ramp
+    for expected in range(3, 11):
+        policy.completed_wave(policy.limit)
+        assert policy.limit == expected
+    policy.completed_wave(10)
+    assert policy.limit == 10 and policy.status()['target_limit'] == 10
     info['free'] = gib
     assert not policy.can_add(1)
     policy.memory_failure(8)
     info['free'] = 20*gib
     policy.refresh()
     assert policy.limit == 4
-    # A large GPU is bounded by the 32-entry request, not a fixed 2-worker setting.
-    large = dict(free=90*gib, total=96*gib, allocated=6*gib, reserved=6*gib, peak=7*gib)
-    other = colab_server.AutoConcurrency(lambda: large, lambda: None)
-    other.begin(); other.calibrated_after_success()
-    assert other.limit == 32
+    policy.completed_wave(4)
+    assert policy.limit == 4  # an OOM downshift persists, avoiding a retry loop
 
 
-def test_real_cosy_requests_overlap_to_memory_limit_and_save_matching_indices(tmp_path, local_cosy):
-    local_cosy.parallel.ceiling = 32
-    barrier = threading.Barrier(5)
-    reached, done, statuses = [], [], []
+def test_concurrency_excludes_shared_reference_memory_and_waits_for_headroom():
+    gib = 1024 ** 3
+    info = dict(free=12*gib, total=16*gib, allocated=4*gib, reserved=4*gib, peak=4*gib)
+    policy = colab_server.AutoConcurrency(lambda: info, lambda: None)
+    policy.begin()
+    info.update(free=10*gib, allocated=6*gib, reserved=6*gib, peak=int(6.4*gib))
+    policy.calibrated_after_success()
+    assert policy.per_request == gib // 2  # shared 2 GiB reference stays allocated once
+    info['free'] = 2*gib
+    policy.completed_wave(2)
+    assert policy.limit == 2 and not policy.can_add(1)
+    info['free'] = 10*gib
+    policy.completed_wave(2)
+    assert policy.limit == 3
+    policy.completed_wave(1)
+    assert policy.limit == 3  # a partially filled batch does not prove the next lane
+
+
+def enable_parallel(control):
+    control.parallel.target_limit = control.parallel.ceiling = 10
+    control.parallel.reason = ''
+
+
+@pytest.mark.parametrize('fail_at_ten', [False, True])
+def test_real_cosy_requests_ramp_to_ten_and_save_matching_indices(tmp_path, local_cosy, fail_at_ten):
+    enable_parallel(local_cosy)
+    ten_running = threading.Event()
+    done, statuses = [], []
+    active = peak = 0
+    failed_index, calls = None, {}
     guard = threading.Lock()
     def hook(index):
-        if 2 <= index <= 6:
+        nonlocal active, peak, failed_index
+        with guard:
+            active += 1
+            peak = max(peak, active)
+            calls[index] = calls.get(index, 0) + 1
+            if active == 10:
+                ten_running.set()
+        try:
+            if local_cosy.parallel.limit == 10:
+                assert ten_running.wait(timeout=3)
+                with guard:
+                    if fail_at_ten and failed_index is None:
+                        failed_index = index
+                        raise HTTPException(503, {'code': 'cuda_memory_limit', 'message': 'ten-lane OOM'})
+            time.sleep(0.035 + (index % 4) * 0.01)
+        finally:
             with guard:
-                reached.append(index)
-            barrier.wait(timeout=3)
-            time.sleep((7 - index) * 0.015)
+                active -= 1
     local_cosy.hook = hook
-    assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 9), cancel=lambda: False,
+    assert batch.synthesize_batch(entries_at(tmp_path, local_cosy, 32), cancel=lambda: False,
         on_started=lambda index: None, on_completed=lambda index, *args: done.append(index),
         on_status=statuses.append)
-    assert sorted(reached) == [2, 3, 4, 5, 6]
-    assert done[0] == 1 and done[1] == 6
-    assert sorted(done) == list(range(1, 10))
-    assert max(status['limit'] for status in statuses) == 5
+    assert peak == 10
+    assert done[0] == 1 and done != sorted(done)
+    assert sorted(done) == list(range(1, 33))
+    assert max(status['limit'] for status in statuses) == 10
+    assert statuses[-1]['target_limit'] == 10
+    if fail_at_ten:
+        assert local_cosy.parallel.limit <= 5
+        assert statuses[-1]['memory_retries'] == 1
+        assert calls[failed_index] == 2
+        assert all(count == 1 for index, count in calls.items() if index != failed_index)
     for index in done:
         assert (tmp_path / f'{index}.wav').read_bytes() == audio_bytes(index)
 
 
 def test_parallel_cosy_error_drains_other_inflight_successes_before_error(tmp_path, local_cosy):
-    local_cosy.parallel.ceiling = 32
-    barrier, done = threading.Barrier(5), []
+    enable_parallel(local_cosy)
+    barrier, done = threading.Barrier(2), []
     def hook(index):
-        if 2 <= index <= 6:
+        if 2 <= index <= 3:
             barrier.wait(timeout=3)
             if index == 2:
                 raise HTTPException(502, 'parallel voice failure')
@@ -352,20 +399,20 @@ def test_parallel_cosy_error_drains_other_inflight_successes_before_error(tmp_pa
     with pytest.raises(RuntimeError, match='parallel voice failure'):
         batch.synthesize_batch(entries_at(tmp_path, local_cosy, 10), cancel=lambda: False,
             on_started=lambda index: None, on_completed=lambda index, *args: done.append(index))
-    assert sorted(done) == [1, 3, 4, 5, 6]
-    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3, 4, 5, 6]
+    assert sorted(done) == [1, 3]
+    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3]
     assert not (tmp_path / '2.wav').exists()
 
 
 def test_parallel_cosy_oom_drains_then_retries_only_failed_clip_once(tmp_path, local_cosy):
-    local_cosy.parallel.ceiling = 32
-    barrier, done, statuses = threading.Barrier(5), [], []
+    enable_parallel(local_cosy)
+    barrier, done, statuses = threading.Barrier(2), [], []
     counts, guard = {}, threading.Lock()
     def hook(index):
         with guard:
             counts[index] = counts.get(index, 0) + 1
             attempt = counts[index]
-        if 2 <= index <= 6 and attempt == 1:
+        if 2 <= index <= 3 and attempt == 1:
             barrier.wait(timeout=3)
             if index == 2:
                 raise HTTPException(503, {'code': 'cuda_memory_limit', 'message': 'simulated OOM'})
@@ -375,20 +422,20 @@ def test_parallel_cosy_oom_drains_then_retries_only_failed_clip_once(tmp_path, l
         on_started=lambda index: None, on_completed=lambda index, *args: done.append(index), on_status=statuses.append)
     assert sorted(done) == list(range(1, 10))
     assert counts[2] == 2 and all(count == 1 for index, count in counts.items() if index != 2)
-    assert done.index(2) > max(done.index(index) for index in range(3, 7))
-    assert local_cosy.parallel.limit <= 2
+    assert done.index(2) > done.index(3)
+    assert local_cosy.parallel.limit == 1
     assert statuses[-1]['memory_retries'] == 1
 
 
 def test_parallel_cosy_pause_saves_every_started_calculation_without_refill(tmp_path, local_cosy):
-    local_cosy.parallel.ceiling = 32
+    enable_parallel(local_cosy)
     all_running, release, pause = threading.Event(), threading.Event(), threading.Event()
     seen, done, guard = set(), [], threading.Lock()
     def hook(index):
-        if 2 <= index <= 6:
+        if 2 <= index <= 3:
             with guard:
                 seen.add(index)
-                if len(seen) == 5:
+                if len(seen) == 2:
                     all_running.set()
             assert release.wait(3)
     local_cosy.hook = hook
@@ -406,8 +453,8 @@ def test_parallel_cosy_pause_saves_every_started_calculation_without_refill(tmp_
             on_started=lambda index: None, on_completed=lambda index, *args: done.append(index))
     finally:
         release.set(); thread.join(timeout=4)
-    assert sorted(done) == [1, 2, 3, 4, 5, 6]
-    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3, 4, 5, 6]
+    assert sorted(done) == [1, 2, 3]
+    assert sorted(int(call[0]) for call in local_cosy.calls) == [1, 2, 3]
 
 
 def test_generation_timers_are_isolated_between_threads():
@@ -423,7 +470,7 @@ def test_generation_timers_are_isolated_between_threads():
 
 
 def test_persistent_oom_stops_after_one_retry_and_keeps_saved_clips(tmp_path, local_cosy):
-    local_cosy.parallel.ceiling = 32
+    enable_parallel(local_cosy)
     def hook(index):
         if index == 2:
             raise HTTPException(503, {'code': 'cuda_memory_limit', 'message': 'persistent memory shortage'})

@@ -44,7 +44,7 @@ PYTHON = ROOT / 'venv/bin/python'
 MODEL = SOURCE / 'pretrained_models/CosyVoice2-0.5B'
 STATE = ROOT / 'state.json'
 SERVICE = 'ai-voice-studio-cosyvoice'
-SERVER_VERSION = '2.9.11'
+SERVER_VERSION = '2.9.12'
 BATCH_CAPABILITY = 'ordered_batch_stream_v2910'
 PARALLEL_CAPABILITY = 'adaptive_cuda_parallel_v2911'
 LOSSLESS_TRANSPORT_CAPABILITY = 'lossless_transport_v299'
@@ -462,12 +462,12 @@ def install_generation_timer(model):
 
 
 class AutoConcurrency:
-    """Estimate a memory budget from real work; never claim a measured speedup.
+    """Ramp actual requested work toward ten lanes, subject to live memory.
 
-    The first requested clip is retained, not an extra test generation. Use its
-    peak plus headroom and a 2 GiB floor per active utterance. An OOM lowers the
-    session ceiling. 32 is the existing bounded batch protocol's hard limit,
-    not a promise that any GPU can run 32 copies at once.
+    Retain the first clip and estimate temporary workspace above the persistent
+    model/reference allocations. Start with two lanes, then add at most one lane
+    per successful completion wave. No synthetic speech or model changes are
+    needed to probe capacity. This estimates memory, not throughput or quality.
     """
     GIB = 1024 ** 3
 
@@ -475,9 +475,10 @@ class AutoConcurrency:
         self.snapshot, self.reset_peak, self.recover = snapshot, reset_peak, recover
         self.calibrated = False
         self.limit = 1
-        self.ceiling = 32 if enabled else 1
-        self.per_request = 2 * self.GIB
-        self.reserve = 2 * self.GIB
+        self.target_limit = 10 if enabled else 1
+        self.ceiling = self.target_limit
+        self.per_request = self.GIB // 2
+        self.reserve = self.GIB
         self.baseline = 0
         self.memory_retries = 0
         self.reason = '' if enabled else '현재 모델 조합은 순차 처리로 실행합니다.'
@@ -490,28 +491,39 @@ class AutoConcurrency:
     def calibrated_after_success(self):
         if not self.calibrated:
             info = self.snapshot()
-            observed = max(0, info['peak'] - self.baseline)
-            self.per_request = max(self.per_request, int(observed * 1.5 + self.GIB / 2))
+            # References retained after the clip are shared, not ten copies of
+            # per-request workspace. Leave extra room for longer later clips.
+            observed = max(0, info['peak'] - max(self.baseline, info['allocated']))
+            self.per_request = max(self.per_request, int(observed * 1.25))
             self.calibrated = True
+            self.limit = min(2, self.ceiling)
         self.refresh()
 
+    def available(self):
+        info = self.snapshot()
+        self.reserve = max(self.GIB, int(info['total'] * 0.10))
+        return info['free'] + max(0, info['reserved'] - info['allocated'])
+
     def refresh(self):
-        """Only recalculate the total ceiling while no request is in flight."""
+        """Recheck idle capacity without resetting the ramp or an OOM downshift."""
         if self.calibrated:
-            info = self.snapshot()
-            self.reserve = max(2 * self.GIB, int(info['total'] * 0.12))
-            usable = info['free'] + max(0, info['reserved'] - info['allocated']) - self.reserve
-            self.limit = max(1, min(self.ceiling, int(usable // self.per_request)))
+            usable = self.available() - self.reserve
+            self.limit = max(1, min(self.limit, self.ceiling, int(usable // self.per_request)))
         return self.limit
+
+    def completed_wave(self, active_before):
+        """One successful wave can refill its old slot and probe one new slot."""
+        if not self.calibrated or self.limit >= self.ceiling or active_before < self.limit:
+            return
+        if self.available() >= self.reserve + 2 * self.per_request:
+            self.limit += 1
 
     def can_add(self, active):
         if active >= self.limit:
             return False
         if active == 0:
             return True
-        info = self.snapshot()
-        available = info['free'] + max(0, info['reserved'] - info['allocated'])
-        return available >= self.reserve + self.per_request
+        return self.available() >= self.reserve + self.per_request
 
     def memory_failure(self, active_count):
         self.ceiling = max(1, min(self.ceiling, active_count // 2))
@@ -520,7 +532,8 @@ class AutoConcurrency:
 
     def status(self):
         return dict(mode='auto', limit=self.limit, calibrated=self.calibrated,
-                    hard_limit=32, estimated_request_gib=round(self.per_request / self.GIB, 2),
+                    target_limit=self.target_limit, hard_limit=10,
+                    estimated_request_gib=round(self.per_request / self.GIB, 2),
                     reserve_gib=round(self.reserve / self.GIB, 2),
                     memory_retries=self.memory_retries, reason=self.reason)
 
@@ -825,6 +838,8 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                 nonlocal count
                 if result is not None and put(*result):
                     count += 1
+                    return True
+                return False
 
             def record_failure(item, exc, retrying=False):
                 detail = getattr(exc, 'detail', str(exc))
@@ -848,7 +863,7 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                     if concurrency:
                         concurrency.begin()
                         concurrency.refresh()
-                    with ThreadPoolExecutor(max_workers=32 if concurrency else 1,
+                    with ThreadPoolExecutor(max_workers=10 if concurrency else 1,
                                             thread_name_prefix='cosy-inference') as pool:
                         while position < len(items) or pending or memory_failed:
                             stopped = cancel.is_set() or disconnected.is_set()
@@ -861,15 +876,21 @@ def install_batch_routes(app, synthesize, authorize, concurrency=None, gpu_lease
                                 pending[pool.submit(generate, item)] = item
                                 position += 1
                             if pending:
+                                active_before = len(pending)
+                                was_calibrated = concurrency and concurrency.calibrated
                                 ready, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                                successes = 0
                                 for future in ready:
                                     item = pending.pop(future)
                                     try:
-                                        save_result(future.result())
+                                        successes += bool(save_result(future.result()))
                                     except Exception as exc:
                                         record_failure(item, exc)
-                                if not pending and concurrency and not failures and not memory_failed and count:
-                                    concurrency.calibrated_after_success()
+                                if successes and concurrency and not failures and not memory_failed:
+                                    if not pending:
+                                        concurrency.calibrated_after_success()
+                                    if was_calibrated:
+                                        concurrency.completed_wave(active_before)
                                 continue
                             if stopped or failures:
                                 break

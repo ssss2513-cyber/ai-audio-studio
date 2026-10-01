@@ -56,7 +56,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
     failures = []
     threads = []
     by_index = {item.index: item for item in items}
-    state.update(execution_mode='ordered_parallel_v2919', active_indices=[], execution_notes=[], cosy_parallel={})
+    state.update(execution_mode='ordered_parallel_v2920', active_indices=[], execution_notes=[], cosy_parallel={})
 
     def stopped():
         if pause_path.exists():
@@ -137,7 +137,7 @@ def run_generation(work_dir, items, state, pause, force_overwrite, save, record_
                     if used_batch:
                         position += len(group)
                         continue
-                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.11로 업데이트하면 GPU 메모리에 맞춰 동시 생성합니다.')
+                    emit('notice', item, '현재 Cosy 코랩은 대사별 요청 방식입니다. v2.9.12로 업데이트하면 메모리 여유에 따라 10개까지 동시 생성합니다.')
                 _generate_one(item, state['id'], stopped, emit)
                 position += 1
             except CancelledError:

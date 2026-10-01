@@ -40,7 +40,7 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
         return False
     if PARALLEL_CAPABILITY not in status.get('capabilities', []) and on_status is not None:
         on_status(dict(enabled=False, limit=1, calibrated=True,
-                       reason='현재 코랩은 순차 생성입니다. v2.9.11 동시 생성 업데이트를 실행해주세요.'))
+                       reason='현재 코랩은 순차 생성입니다. v2.9.12 동시 생성 업데이트를 실행해주세요.'))
     references, items, by_index = {}, [], {}
     for entry in entries:
         if normalize_url(entry['url']) != base or entry['index'] in by_index:
@@ -92,7 +92,7 @@ def synthesize_batch(entries, *, cancel, on_completed, on_started, on_status=Non
             parallel = header.get('parallel')
             if isinstance(parallel, dict) and type(parallel.get('limit')) is int and 1 <= parallel['limit'] <= 32:
                 if on_status is not None:
-                    on_status(dict({key: parallel[key] for key in ('limit', 'calibrated', 'memory_retries', 'reason')
+                    on_status(dict({key: parallel[key] for key in ('limit', 'target_limit', 'calibrated', 'memory_retries', 'reason')
                                     if key in parallel}, enabled=parallel.get('mode') == 'auto'))
             if kind != 'audio' and body_size:
                 raise RuntimeError('코랩 제어 정보에 잘못된 음성 데이터가 있습니다.')

@@ -6,7 +6,10 @@ import streamlit as st
 
 from qwen_voicebank_catalog import BANK_REVISION, VOICEBANK
 from .personal_colab import connection_url
-from .qwen_voicebank_client import connection_status, close_worker_client, synthesize
+from .qwen_voicebank_client import (
+    CONNECTION_REPORT_VERSION, connection_report, connection_status,
+    close_worker_client, synthesize,
+)
 from .tts_engine import VoiceConfig
 from .voice_recommendations import preview_text
 
@@ -27,6 +30,12 @@ def preset(speaker, current, gender, used=()):
 
 
 def render_connection(prominent=False):
+    if st.session_state.get('_qwen_bank_report_version') != CONNECTION_REPORT_VERSION:
+        # Discard the earlier ambiguous message without touching the address,
+        # speaker assignments, generated files or the user's Colab process.
+        st.session_state.pop('checked_qwen_bank_url', None)
+        st.session_state.pop('qwen_bank_connection_details', None)
+        st.session_state['_qwen_bank_report_version'] = CONNECTION_REPORT_VERSION
     with st.expander('🎭 기본 목소리 20종 · 전용 코랩 연결', expanded=prominent):
         st.markdown('**남성 10개 + 여성 10개 · 녹음 업로드·Gemini 키 불필요**')
         st.caption('기존 Qwen 9종에 더해 고를 수 있는 새 목소리 목록입니다. 코랩이 선택한 목소리를 처음 한 번 만들고 저장한 뒤, 같은 목소리로 대사를 읽습니다.')
@@ -58,13 +67,22 @@ def render_connection(prominent=False):
             st.warning(str(exc))
         if st.session_state.get('qwen_bank_url') != url:
             st.session_state.pop('checked_qwen_bank_url', None)
+            st.session_state.pop('qwen_bank_connection_details', None)
         st.session_state['qwen_bank_url'] = url
         if st.button('기본 목소리 20종 연결 확인', disabled=not url, use_container_width=True):
             with st.spinner('전용 코랩 확인 중…'):
-                st.session_state['checked_qwen_bank_url'] = connection_status(url)
+                ok, message, details = connection_report(url)
+                st.session_state['checked_qwen_bank_url'] = (ok, message)
+                st.session_state['qwen_bank_connection_details'] = details
         checked = st.session_state.get('checked_qwen_bank_url')
         if checked:
             (st.success if checked[0] else st.error)(checked[1])
+            details = st.session_state.get('qwen_bank_connection_details')
+            if details:
+                st.markdown('**연결 확인 결과**')
+                st.code('\n'.join(f'{label}: {answer}' for label, answer in details.items()),
+                        language=None, wrap_lines=True)
+        st.caption('연결 확인은 음성을 생성하지 않습니다. 연결이 안 되면 서버 종류·모델·목소리 목록 버전을 구분해 표시합니다.')
         st.caption('목소리는 현재 코랩 런타임에 저장됩니다. 코랩 6번 셀에서 보관하면 새 런타임에서도 같은 음성을 복원할 수 있습니다.')
 
 

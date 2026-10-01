@@ -47,7 +47,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.38 · Cosy 계산 대기 완화 · 최대 4개 속도 자동 조절"
+APP_VERSION = "v2.9.39 · Qwen 20종 연결 원인 구분"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (Qwen3 · Chirp · Gemini) - {APP_VERSION}",

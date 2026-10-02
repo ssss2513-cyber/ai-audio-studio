@@ -12,14 +12,44 @@ import re
 import sys
 
 
-def safe_error(exc):
-    text = str(exc)
+def scrub(text):
+    text = str(text)
     for name in ('KAGGLE_API_TOKEN', 'KAGGLE_KEY'):
         value = os.environ.get(name, '')
         if value:
             text = text.replace(value, '[인증정보]')
     text = re.sub(r'https?://\S+', '[주소]', text)
-    return text[-1600:]
+    text = re.sub(r'(?i)(authorization\s*[:=]\s*|bearer\s+)\S+', r'\1[인증정보]', text)
+    return text[:2400]
+
+
+def safe_error(exc):
+    # HTTPError.__str__ only gives "409 Conflict for url". Kaggle's useful
+    # reason is in the response body; retain known message fields, not headers,
+    # request bodies or the full response (which can contain signed URLs).
+    response = getattr(exc, 'response', None)
+    messages = []
+
+    def collect(value, depth=0):
+        if depth > 4:
+            return
+        if isinstance(value, str) and value.strip():
+            messages.append(scrub(value.strip()))
+        elif isinstance(value, dict):
+            for key in ('message', 'error', 'detail', 'details', 'errors', 'reason'):
+                if key in value:
+                    collect(value[key], depth + 1)
+        elif isinstance(value, list):
+            for item in value[:5]:
+                collect(item, depth + 1)
+
+    if response is not None:
+        try:
+            collect(response.json())
+        except (ValueError, TypeError):
+            if 'text/plain' in response.headers.get('Content-Type', ''):
+                collect(response.text)
+    return scrub(' · '.join(dict.fromkeys(messages)) or str(exc))
 
 
 def field(obj, name, fallback='', default=None):
@@ -98,8 +128,28 @@ def operate(api, request):
         if field(result, 'invalid_dataset_sources', 'invalidDatasetSources'):
             raise ValueError('캐글이 대본 데이터를 연결하지 못했습니다. 작업 상태를 확인해주세요.')
         return {'version': field(result, 'version_number', 'versionNumber'), 'url': result.url}
+    if operation == 'kernel_info':
+        from kagglesdk.kernels.types.kernels_api_service import ApiGetKernelRequest
+        owner, slug = request['ref'].split('/')
+        query = ApiGetKernelRequest()
+        query.user_name, query.kernel_slug = owner, slug
+        try:
+            with api.build_kaggle_client() as client:
+                result = client.kernels.kernels_api_client.get_kernel(query)
+        except Exception as exc:
+            if getattr(getattr(exc, 'response', None), 'status_code', None) == 404:
+                return {'exists': False}
+            raise
+        return {'exists': True, 'version': getattr(result.metadata, 'current_version_number', None)}
     if operation == 'status':
-        result = api.kernels_status(request['ref'])
+        # The CLI wrapper converts HTTP 401/403 into a generic ValueError,
+        # losing the status needed to distinguish access errors from absence.
+        from kagglesdk.kernels.types.kernels_api_service import ApiGetKernelSessionStatusRequest
+        owner, slug = request['ref'].split('/')
+        query = ApiGetKernelSessionStatusRequest()
+        query.user_name, query.kernel_slug = owner, slug
+        with api.build_kaggle_client() as client:
+            result = client.kernels.kernels_api_client.get_kernel_session_status(query)
         status = getattr(result.status, 'name', str(result.status)).lower().rsplit('.', 1)[-1]
         logs = ''
         try:
@@ -142,7 +192,8 @@ def main():
         except (Exception, SystemExit) as exc:
             response = getattr(exc, 'response', None)
             result = {'ok': False, 'error': safe_error(exc),
-                      'http_status': getattr(response, 'status_code', None)}
+                      'http_status': getattr(response, 'status_code', None),
+                      'operation': request.get('operation', '')}
     print(json.dumps(result, ensure_ascii=False))
 
 

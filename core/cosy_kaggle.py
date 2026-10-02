@@ -247,11 +247,15 @@ def render_status(work_dir):
         return
     credentials = st.session_state.get('_kaggle_credentials')
     active = kaggle_jobs.is_running(work_dir)
-    if active and credentials and not kaggle_jobs.monitoring(work_dir):
+    old_conflict = (initial.get('status') == 'needs_check'
+        and not initial.get('conflict_recovery_version')
+        and (initial.get('diagnostic', {}).get('http_status') == 409 or '409' in initial.get('error', '')))
+    if (active or old_conflict) and credentials and not kaggle_jobs.monitoring(work_dir):
         try:
             kaggle_jobs.reconnect(work_dir, credentials)
         except ValueError:
             pass
+        active = kaggle_jobs.is_running(work_dir)
 
     @st.fragment(run_every=3 if active else None)
     def panel():
@@ -281,6 +285,8 @@ def render_status(work_dir):
                         key='kaggle_result_' + key, on_click='ignore')
         elif job.get('error'):
             st.error(job['error'])
+            if job.get('submission') == 'not_created':
+                st.info('이전 작업 때문에 막혔던 생성 제한을 해제했습니다. 위의 생성 또는 미리듣기 버튼을 다시 누르세요.')
         else:
             st.info(job.get('message', '캐글에서 작업 중입니다.'))
         st.markdown('[내 캐글 작업 열기](https://www.kaggle.com/code/' + job['ref'] + ')')
@@ -290,6 +296,8 @@ def render_status(work_dir):
             st.caption(f'경과 {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다. 캐글 기록 반영은 지연될 수 있습니다.')
             st.caption('중단하려면 ‘내 캐글 작업 열기’에서 실행 중인 작업을 중지하세요. 사이트를 닫아도 제출된 캐글 작업은 계속됩니다.')
         if job['status'] in ('failed', 'needs_check'):
+            if job['status'] == 'needs_check':
+                st.caption('아래 버튼으로 기존 작업을 확인합니다. 실제 작업이 있으면 이어받고, 등록되지 않은 것이 확인되면 다시 생성할 수 있습니다.')
             if st.button('상태·결과 다시 확인', key='kaggle_reconnect', disabled=not credentials):
                 try:
                     kaggle_jobs.reconnect(work_dir, credentials)
@@ -301,6 +309,13 @@ def render_status(work_dir):
                 st.caption('완료된 대사는 저장했습니다. 대본·설정을 그대로 두고 생성 버튼을 누르면 저장된 대사를 이어서 사용합니다.')
                 st.download_button('이어하기 파일 보관', Path(job['resume']).read_bytes,
                     file_name='resume.zip', mime='application/zip', key='kaggle_resume', on_click='ignore')
+            detail = job.get('submission_diagnostic') or job.get('diagnostic')
+            if detail:
+                with st.expander('캐글 오류 상세 보기'):
+                    st.write('발생 단계: ' + kaggle_jobs.OPERATION_LABELS.get(detail.get('operation'), '요청 처리'))
+                    if detail.get('http_status'):
+                        st.write('응답 코드: ' + str(detail['http_status']))
+                    st.code(detail.get('reason', ''), language=None)
         if job.get('logs'):
             with st.expander('캐글 실행 기록 보기'):
                 st.code(job['logs'], language=None)

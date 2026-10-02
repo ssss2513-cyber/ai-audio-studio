@@ -24,12 +24,20 @@ WORKERS = {}
 ACTIVE = {'uploading', 'dataset_ready', 'submitting', 'queued', 'running', 'receiving', 'checking'}
 TERMINAL_REMOTE = {'complete', 'error', 'failed', 'canceled', 'cancelled'}
 REF_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/voice-studio-[a-z0-9-]+$')
+OPERATION_LABELS = {'auth': '계정 연결', 'create_dataset': '대본 전송',
+    'dataset_status': '대본 준비 확인', 'push': '생성 요청',
+    'status': '실행 상태 확인', 'kernel_info': '작업 등록 확인', 'pull': '결과 받기'}
 
 
 class KaggleError(RuntimeError):
-    def __init__(self, message, http_status=None):
+    def __init__(self, message, http_status=None, operation=''):
         super().__init__(message)
         self.http_status = http_status
+        self.operation = operation
+
+
+class KaggleOutputPending(KaggleError):
+    """A successful output listing has not exposed all expected files yet."""
 
 
 def api_call(credentials, operation, timeout=90, **arguments):
@@ -50,11 +58,13 @@ def api_call(credentials, operation, timeout=90, **arguments):
                 input=json.dumps(dict(operation=operation, **arguments)), text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=config, timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise KaggleError('캐글 응답 시간이 초과되었습니다. 작업을 재전송하지 않고 상태부터 확인합니다.') from None
+            raise KaggleError('캐글 응답 시간이 초과되었습니다. 작업을 재전송하지 않고 상태부터 확인합니다.',
+                operation=operation) from None
     try:
         response = json.loads(process.stdout)
     except (ValueError, TypeError):
-        raise KaggleError('캐글 연결 모듈을 시작하지 못했습니다. 사이트 업데이트 완료 후 다시 연결해주세요.') from None
+        raise KaggleError('캐글 연결 모듈을 시작하지 못했습니다. 사이트 업데이트 완료 후 다시 연결해주세요.',
+            operation=operation) from None
     if not response.get('ok'):
         message = response.get('error') or '캐글 인증 또는 요청을 처리하지 못했습니다.'
         for key in ('key', 'token'):
@@ -62,8 +72,28 @@ def api_call(credentials, operation, timeout=90, **arguments):
                 message = message.replace(credentials[key], '[인증정보]')
         if "No module named 'kaggle'" in message:
             message = '캐글 연결 모듈을 설치하는 중입니다. 사이트 배포 완료 후 다시 연결해주세요.'
-        raise KaggleError(message, response.get('http_status'))
+        raise KaggleError(message, response.get('http_status'), operation)
     return response['result']
+
+
+def _remember_error(state, exc):
+    state['diagnostic'] = dict(operation=getattr(exc, 'operation', ''),
+        http_status=getattr(exc, 'http_status', None), reason=str(exc))
+    if getattr(exc, 'operation', '') == 'push':
+        state['submission_diagnostic'] = dict(state['diagnostic'])
+
+
+def _error_message(exc):
+    operation = OPERATION_LABELS.get(getattr(exc, 'operation', ''), '요청 처리')
+    code = getattr(exc, 'http_status', None)
+    reason = str(exc)
+    if code == 409:
+        return f'캐글 {operation} 중 충돌(409)이 발생했습니다. 캐글 응답: {reason}'
+    if code in (401, 403):
+        return f'캐글 {operation} 권한을 확인해주세요. 같은 캐글 계정의 토큰으로 다시 연결하세요. 캐글 응답: {reason}'
+    if code == 429:
+        return f'캐글이 요청을 제한했습니다. 잠시 후 다시 확인해주세요. 캐글 응답: {reason}'
+    return f'캐글 {operation}: {reason}'
 
 
 def authenticate(credentials):
@@ -165,7 +195,8 @@ def _launch(work_dir, state, credentials, submit=False):
                 # An input-upload error occurred before any GPU request.
                 # Only ambiguous submit / read / download failures need polling.
                 before_submit = state.get('status') in ('uploading', 'dataset_ready', 'failed')
-                state.update(status='failed' if before_submit else 'needs_check', error=str(exc),
+                _remember_error(state, exc)
+                state.update(status='failed' if before_submit else 'needs_check', error=_error_message(exc),
                     message='대본 전송을 완료하지 못했습니다.' if before_submit else
                     '캐글 작업 상태를 다시 확인해주세요. 같은 작업을 자동으로 다시 제출하지 않았습니다.')
                 try:
@@ -189,7 +220,7 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
         if monitoring(work_dir) or is_running(work_dir):
             raise ValueError('현재 캐글 작업이 진행 중입니다. 완료 후 다음 작업을 시작해주세요.')
         if old and old.get('status') == 'needs_check':
-            raise ValueError('이전 작업이 실행 중일 수 있습니다. 아래 ‘상태·결과 다시 확인’을 먼저 눌러주세요.')
+            raise ValueError('캐글 작업 상태를 확인해야 합니다. 아래 ‘상태·결과 다시 확인’을 누르면 진행 중인 작업은 이어받고, 등록되지 않은 작업은 생성 제한을 해제합니다.')
         signature = fingerprint(plan)
         if not force and old and old.get('signature') == signature and old.get('status') == 'complete':
             if Path(old.get('result', {}).get('full_audio', '')).is_file():
@@ -218,7 +249,8 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
         (code / 'kernel-metadata.json').write_text(json.dumps(metadata), encoding='utf-8')
         state = dict(id=job_id, signature=signature, ref=ref, folder=str(folder),
             status='uploading', message='대본과 목소리 설정을 내 캐글 계정에 비공개로 전송합니다.',
-            total=len(plan['items']), done=0, started=time.time(), preview=preview, error='')
+            total=len(plan['items']), done=0, started=time.time(), preview=preview, error='',
+            submission='not_sent')
         _save(work_dir, state)
         _launch(work_dir, state, deepcopy(credentials), submit=True)
         return state
@@ -241,10 +273,20 @@ def _submit(work_dir, state, credentials):
             raise KaggleError(state['error'])
         threading.Event().wait(8)
     # Persist the expected reference BEFORE the one non-idempotent GPU submit.
-    state.update(status='submitting', message='캐글 GPU 2개에 생성 작업을 요청합니다.')
+    state.update(status='submitting', submission='unknown', message='캐글 GPU 2개에 생성 작업을 요청합니다.')
     _save(work_dir, state)
-    api_call(credentials, 'push', timeout=180, folder=str(folder / 'code'))
-    state.update(status='queued', message='캐글 GPU 배정을 기다리고 있습니다.', error='')
+    try:
+        result = api_call(credentials, 'push', timeout=180, folder=str(folder / 'code'))
+    except KaggleError as exc:
+        # A conflict/timeout can follow an accepted push. Reconcile the exact
+        # unique job through reads, never repeat the non-idempotent GPU submit.
+        _remember_error(state, exc)
+        state.update(status='checking', submission_error=_error_message(exc),
+            message='생성 요청 응답을 확인 중입니다. 실제 작업이 시작됐는지 자동으로 확인합니다.', error='')
+        _save(work_dir, state)
+        return
+    state.update(status='queued', submission='accepted', version=result.get('version'),
+        message='캐글 GPU 배정을 기다리고 있습니다.', error='')
     _save(work_dir, state)
 
 
@@ -266,27 +308,61 @@ def _monitor(work_dir, state, credentials):
             misses = 0
         except KaggleError as exc:
             misses += 1
-            if misses >= 4:
-                if exc.http_status == 404:
-                    state.update(status='failed', error='캐글에서 이 작업을 찾지 못했습니다. 계정·작업 주소를 확인하고 다시 생성해주세요.')
-                    _save(work_dir, state)
-                    return
+            _remember_error(state, exc)
+            if misses >= 5 or exc.http_status in (401, 403):
+                # Missing session != missing notebook. Confirm the job itself
+                # is absent before allowing a new GPU submission.
+                if exc.http_status in (404, 409):
+                    info = api_call(credentials, 'kernel_info', ref=state['ref'])
+                    if not info['exists']:
+                        reason = state.get('submission_error', '')
+                        state.update(status='failed', submission='not_created',
+                            message='캐글에 생성 작업이 등록되지 않은 것을 확인했습니다. 다시 생성할 수 있습니다.',
+                            error=('캐글에 생성 작업이 등록되지 않았습니다. 위의 생성 또는 미리듣기 버튼을 다시 눌러주세요.'
+                                   + ('\n\n' + reason if reason else '')))
+                        _save(work_dir, state)
+                        return
                 raise
-            state.update(message='캐글 상태 응답을 기다립니다. 생성 요청은 다시 보내지 않습니다.')
+            state.update(status='checking', error='', message=
+                '캐글의 일시적인 충돌을 확인하고 있습니다. 생성 요청은 중복 전송하지 않습니다.'
+                if exc.http_status == 409 else '캐글 상태 응답을 기다립니다. 생성 요청은 다시 보내지 않습니다.')
             _save(work_dir, state)
             threading.Event().wait(20)
             continue
         status = response['status']
+        state.update(submission='accepted', remote_status=status)
+        state.pop('submission_error', None)
+        state.pop('submission_diagnostic', None)
         logs = readable_logs(response.get('logs', ''))
         counts = re.findall(r'✅\s+(\d+)/(\d+)\s+·\s+GPU', logs)
         if counts:
             state['done'], state['total'] = map(int, counts[-1])
         state['logs'] = logs[-10000:]
         if status in TERMINAL_REMOTE:
-            state.update(status='receiving', message='캐글 결과를 공유 사이트로 가져오고 있습니다.')
+            state.update(status='receiving', error='', message='캐글 결과를 공유 사이트로 가져오고 있습니다.')
             _save(work_dir, state)
-            _receive(work_dir, state, credentials, status, response.get('error', ''))
-            return
+            for attempt in range(6):
+                try:
+                    _receive(work_dir, state, credentials, status, response.get('error', ''),
+                        wait_for_files=attempt < 5)
+                    return
+                except KaggleError as exc:
+                    _remember_error(state, exc)
+                    # Kaggle can report completion before its output API is
+                    # ready. Retry downloading; never rerun synthesis.
+                    if not isinstance(exc, KaggleOutputPending) and exc.http_status not in (404, 409, 429, 500, 502, 503, 504):
+                        raise
+                    if attempt == 5:
+                        if status != 'complete':
+                            state.update(status='failed', error=response.get('error') or
+                                '캐글 실행이 중단되어 결과 파일이 없습니다. 아래 실행 기록을 확인한 뒤 다시 생성해주세요.',
+                                message='캐글 작업 종료를 확인했습니다. 다시 생성할 수 있습니다.')
+                            _save(work_dir, state)
+                            return
+                        raise
+                    state.update(message='캐글에서 결과 파일을 정리 중입니다. 결과 수신을 자동으로 다시 확인합니다.')
+                    _save(work_dir, state)
+                    threading.Event().wait(20)
         message = '캐글 GPU 배정을 기다리고 있습니다.'
         if status == 'running':
             if 'MP3 하나로 저장' in logs:
@@ -302,11 +378,13 @@ def _monitor(work_dir, state, credentials):
         threading.Event().wait(15)
 
 
-def _receive(work_dir, state, credentials, remote_status, remote_error):
+def _receive(work_dir, state, credentials, remote_status, remote_error, wait_for_files=False):
     output = Path(state['folder']) / 'output'
     api_call(credentials, 'pull', ref=state['ref'], folder=str(output), timeout=900)
     manifest = output / 'voice_studio_site_result.json'
     if not manifest.is_file():
+        if wait_for_files:
+            raise KaggleOutputPending('캐글 결과 목록에 완료 정보가 아직 반영되지 않았습니다.', operation='pull')
         state.update(status='failed', error=remote_error or
             '캐글 실행이 결과를 저장하기 전에 종료됐습니다. 아래 실행 기록과 캐글 작업 링크를 확인해주세요.')
         _save(work_dir, state)
@@ -326,6 +404,8 @@ def _receive(work_dir, state, credentials, remote_status, remote_error):
         state['resume'] = str(resume)
     state.update(total=info.get('total', state['total']), done=info.get('done', 0))
     bundle = folder / 'complete_audio.zip'
+    if info.get('status') == 'complete' and not bundle.is_file() and wait_for_files:
+        raise KaggleOutputPending('캐글에서 완성 음성 파일을 준비할 때까지 기다리고 있습니다.', operation='pull')
     if info.get('status') == 'complete' and bundle.is_file():
         expected = {'full_audio.mp3', 'subtitles.srt', 'subtitles.vtt', 'timing.json', 'VOICE_ATTRIBUTION.txt'}
         with zipfile.ZipFile(bundle) as archive:
@@ -361,7 +441,8 @@ def reconnect(work_dir, credentials):
     if monitoring(work_dir):
         return False
     # Reconnect only polls/downloads. It NEVER repeats a dataset or kernel push.
-    state.update(status='checking', error='', message='기존 캐글 작업 상태와 결과를 확인합니다.')
+    state.update(status='checking', error='', conflict_recovery_version=1,
+        message='기존 캐글 작업 상태와 결과를 확인합니다.')
     _save(work_dir, state)
     return _launch(work_dir, state, deepcopy(credentials))
 

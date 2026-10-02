@@ -28,7 +28,6 @@ from core.voice_recommendations import (
     resolve_style, style_display_label, style_description,
 )
 from core.gemini_keys import GeminiKeyInputError, parse_gemini_keys
-from core.gemini_key_ui import render_key_inputs
 from core.gemini_recovery_ui import render_gemini_recovery
 from core.chirp_client import CHIRP_VOICES, validate_key as validate_chirp_key
 from core.chirp_ui import render_chirp_settings, render_chirp_voice
@@ -52,7 +51,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.45 · 코지2·3 캐글 GPU 2개 추가 · 코랩 유지"
+APP_VERSION = "v2.9.46 · 코지2·3 캐글·코랩 지원"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1137,7 +1136,7 @@ def main():
             segs = parse_story_precisely(raw_text, custom_characters=custom_characters)
         elif use_gemini:
             if not gemini_key:
-                return False, "Gemini AI 화자 분석을 위해 사이드바에 Gemini API Key를 입력해주세요."
+                return False, "현재 세션에 등록된 Gemini API 키가 없어 AI 화자 분석을 진행할 수 없습니다."
             try:
                 segs = parse_story_with_gemini(
                     raw_text,
@@ -1267,7 +1266,7 @@ def main():
             st.success("✅ Supertonic 3 로컬 엔진 활성화됨 (100% 완전 무료 · API 키 불필요)")
             st.caption("💡 하이브(HYBE) 수퍼톤의 가벼운 고속 ONNX 모델로, 내 컴퓨터에서 완전 무료로 동작합니다.")
 
-        # 3. Gemini Flash TTS 및 AI 화자 분석 설정
+        # Keep existing session values without displaying the Gemini settings panel.
         gemini_model_options = [
             "gemini-3.1-flash-tts-preview",
             "gemini-2.5-flash-preview-tts",
@@ -1276,49 +1275,8 @@ def main():
         curr_model = st.session_state.get("gemini_model", "gemini-3.1-flash-tts-preview")
         if curr_model not in gemini_model_options:
             curr_model = "gemini-3.1-flash-tts-preview"
-        model_idx = gemini_model_options.index(curr_model)
         gemini_api_key = st.session_state.get("gemini_api_key", "")
         gemini_model = curr_model
-
-        show_gemini_prominent = st.session_state["active_engine_mode"] in ["gemini", "custom"]
-
-        def render_gemini_section():
-            st.markdown("#### ⚡ Gemini Flash API 설정")
-            g_key, parsed_keys = render_key_inputs()
-
-            def _format_model_name(m: str) -> str:
-                labels = {
-                    "gemini-3.1-flash-tts-preview": "⚡ Gemini 3.1 Flash TTS (미리보기 · 프로젝트 한도 적용)",
-                    "gemini-2.5-flash-preview-tts": "🚀 Gemini 2.5 Flash TTS (기존 재시도 모델 · 프로젝트 한도 적용)",
-                    "gemini-2.5-pro-preview-tts": "💎 Gemini 2.5 Pro TTS (유료 결제 계정 전용 · 무료 키는 한도 0)"
-                }
-                return labels.get(m, m)
-
-            g_model = st.selectbox(
-                "Gemini TTS 음성 합성 모델 선택",
-                options=gemini_model_options,
-                index=model_idx,
-                format_func=_format_model_name,
-                key="select_gemini_model"
-            )
-            st.session_state["gemini_model"] = g_model
-
-            if g_model == "gemini-2.5-pro-preview-tts":
-                st.warning("⚠️ **Gemini 2.5 Pro 안내**: 구글 정책상 Pro TTS는 Google Cloud 유료 결제(Billing)가 등록된 API 키에서만 사용 가능합니다. 무료 API 키를 쓰시는 경우 429(한도 0) 오류가 발생하므로 **'Gemini 3.1 Flash'**를 선택해주세요.")
-
-            if parsed_keys:
-                st.caption("새로 시작하는 Gemini 생성은 등록한 키 전체를 합쳐 요청 시작 간격을 최소 7초로 조절합니다(평균 분당 약 8.6회 이내). Google이 더 긴 대기를 요구하면 그 시간을 따릅니다.")
-                st.caption("일시적인 요청 제한은 서버가 안내한 시간 후 재시도합니다. 오류에는 사용한 키 번호·모델·해당 대사 요청 횟수와 Google 제한 항목을 표시하며 완료 음성은 보관합니다.")
-            elif not g_key and st.session_state["active_engine_mode"] == "gemini":
-                st.warning("⚠️ Gemini API 키를 입력하세요. 무료로 쓰시려면 'Supertonic 3 (로컬 무료)'를 선택하세요.")
-                st.markdown("[👉 Google AI Studio에서 무료 키 받기 (10초 소요)](https://aistudio.google.com/)")
-            return ",".join(parsed_keys) if parsed_keys else g_key, g_model
-
-        if show_gemini_prominent:
-            gemini_api_key, gemini_model = render_gemini_section()
-        else:
-            with st.expander("⚡ Gemini API 키 등록 / 화자 분석 연동", expanded=bool(st.session_state.get("gemini_api_key"))):
-                gemini_api_key, gemini_model = render_gemini_section()
 
         # Visitors connect their own GPU runtime; URLs stay in session state.
         if st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
@@ -1392,7 +1350,7 @@ def main():
                         else:
                             st.error(msg)
                 elif not gemini_api_key:
-                    st.error("⚠️ Gemini AI 분석을 위해 사이드바 '⚡ Gemini Flash API 설정'에 API Key를 먼저 입력해주세요!")
+                    st.error("현재 세션에 등록된 Gemini API 키가 없어 AI 화자 분석을 진행할 수 없습니다.")
                 else:
                     progress_bar = st.progress(0.0)
                     status_text = st.empty()
@@ -1514,7 +1472,7 @@ def main():
                 casting_status = st.empty()
                 try:
                     if not gemini_api_key.strip():
-                        raise CastingError("왼쪽 ‘Gemini API 키 등록’에 키를 입력한 뒤 다시 눌러주세요. 기존 설정은 유지됩니다.")
+                        raise CastingError("현재 세션에 등록된 Gemini API 키가 없어 자동 배정을 진행할 수 없습니다.")
                     # Parse current editor contents, including edits since the
                     # last analysis, without changing anything until AI succeeds.
                     pairs = parse_story_precisely(st.session_state.get("script_editor", ""),
@@ -1878,7 +1836,7 @@ def main():
                         # 목소리 미리듣기 버튼 (Gemini)
                         if st.button(f"🔊 {spk} Gemini Flash 미리듣기", key=f"preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             if not gemini_api_key:
-                                st.error("⚠️ 사이드바에 Gemini API Key를 먼저 입력해주세요! (무료로 쓰시려면 상단 'Supertonic'을 누르세요)")
+                                st.error("현재 세션에 등록된 Gemini API 키가 없어 미리듣기를 생성할 수 없습니다.")
                             else:
                                 safe_spk = "".join(c for c in spk if c.isalnum() or c in ('_', '-'))
                                 preview_file = os.path.join(work_dir, f"preview_gemini_{safe_spk}.mp3")
@@ -2656,7 +2614,7 @@ def main():
                         return
                     checked_engines.add("qwen-bank")
                 if cfg.engine == "gemini" and not keys_for_start:
-                    st.error(key_input_error or "Gemini 화자가 있습니다. 사이드바에 Gemini API 키를 입력해주세요.")
+                    st.error(key_input_error or "Gemini 화자가 있으나 현재 세션에 등록된 Gemini API 키가 없습니다.")
                     return
                 if cfg.engine == "chirp":
                     try:

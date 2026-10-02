@@ -11,6 +11,13 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 
+CURRENT_STAGE = 'module_load'
+
+
+def stage(name):
+    global CURRENT_STAGE
+    CURRENT_STAGE = name
+
 
 def scrub(text):
     text = str(text)
@@ -68,6 +75,50 @@ def output_page(api, ref, page_token=None):
         return client.kernels.kernels_api_client.list_kernel_session_output(request)
 
 
+def inspect_job(api, ref):
+    """Separate account authentication from access to one particular kernel.
+
+    Kaggle's own CLI notes that kernel status 401/403 can mean a wrong slug.
+    A missing list/search entry alone is never proof that a job was not made.
+    """
+    from kagglesdk.kernels.types.kernels_api_service import ApiGetKernelRequest
+    owner, slug = ref.split('/')
+    if owner.lower() != api.get_config_value(api.CONFIG_NAME_USER).lower():
+        raise ValueError('연결한 계정과 이 작업의 소유자가 다릅니다.')
+    stage('account_check')
+    page = api.kernels_list_with_response(mine=True, page_size=100, sort_by='dateCreated')
+    stage('kernel_info')
+    query = ApiGetKernelRequest()
+    query.user_name, query.kernel_slug = owner, slug
+    try:
+        with api.build_kaggle_client() as client:
+            result = client.kernels.kernels_api_client.get_kernel(query)
+        return {'account_authenticated': True, 'exists': True,
+                'ref': getattr(result.metadata, 'ref', None) or ref}
+    except Exception as exc:
+        code = getattr(getattr(exc, 'response', None), 'status_code', None)
+        if code not in (401, 403, 404):
+            raise
+        reason = safe_error(exc)
+    # Read the authenticated owner's inventory. Match only the exact unique
+    # title/ref we submitted; never attach to a merely similar notebook.
+    stage('job_lookup')
+    seen = set()
+    for _ in range(10):
+        for item in page.kernels or []:
+            candidate = getattr(item, 'ref', '') or ''
+            if candidate.lower() == ref.lower() or getattr(item, 'title', '') == slug:
+                return {'account_authenticated': True, 'exists': True, 'ref': candidate or ref}
+        token = page.next_page_token
+        if not token or token in seen:
+            break
+        seen.add(token)
+        page = api.kernels_list_with_response(mine=True, page_size=100,
+            sort_by='dateCreated', page_token=token)
+    return {'account_authenticated': True, 'exists': False if code == 404 else None,
+            'http_status': code, 'reason': reason}
+
+
 def download_results(api, ref, destination):
     # The pinned CLI's downloader buffers whole files. Stream only our named
     # outputs and validate paths/status/size instead of downloading every WAV.
@@ -112,8 +163,11 @@ def download_results(api, ref, destination):
 def operate(api, request):
     operation = request['operation']
     if operation == 'auth':
+        stage('account_check')
         api.kernels_list(mine=True, page_size=1)
         return {'username': api.get_config_value(api.CONFIG_NAME_USER)}
+    if operation == 'inspect_job':
+        return inspect_job(api, request['ref'])
     if operation == 'create_dataset':
         result = api.dataset_create_new(request['folder'], public=False, quiet=True, convert_to_csv=False)
         if result is None or result.error:
@@ -174,6 +228,7 @@ def main():
     # notices (or HTTP debug logs) into the session's result object.
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         try:
+            stage('authentication')
             from kaggle.api.kaggle_api_extended import KaggleApi
             api = KaggleApi()
             api.config_values = {}
@@ -186,14 +241,15 @@ def main():
                 api.config_values.update({api.CONFIG_NAME_USER: username, api.CONFIG_NAME_KEY: key})
                 connected = api._authenticate_with_legacy_apikey()
             if not connected:
-                raise ValueError('캐글 토큰이 유효하지 않거나 만료되었습니다. API 설정에서 새 토큰을 발급해주세요.')
+                raise ValueError('입력한 인증정보로 캐글 계정을 확인하지 못했습니다. 토큰 재발급으로 해결되는지는 아직 확인되지 않았습니다.')
             api._authenticated = True
+            stage(request['operation'])
             result = {'ok': True, 'result': operate(api, request)}
         except (Exception, SystemExit) as exc:
             response = getattr(exc, 'response', None)
             result = {'ok': False, 'error': safe_error(exc),
                       'http_status': getattr(response, 'status_code', None),
-                      'operation': request.get('operation', '')}
+                      'operation': request.get('operation', ''), 'stage': CURRENT_STAGE}
     print(json.dumps(result, ensure_ascii=False))
 
 

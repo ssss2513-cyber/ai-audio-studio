@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = threading.RLock()
@@ -26,14 +27,17 @@ TERMINAL_REMOTE = {'complete', 'error', 'failed', 'canceled', 'cancelled'}
 REF_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/voice-studio-[a-z0-9-]+$')
 OPERATION_LABELS = {'auth': '계정 연결', 'create_dataset': '대본 전송',
     'dataset_status': '대본 준비 확인', 'push': '생성 요청',
-    'status': '실행 상태 확인', 'kernel_info': '작업 등록 확인', 'pull': '결과 받기'}
+    'status': '실행 상태 확인', 'kernel_info': '작업 등록 확인', 'pull': '결과 받기',
+    'inspect_job': '기존 계정·작업 확인', 'authentication': '인증정보 확인',
+    'account_check': '내 계정 접근 확인', 'job_lookup': '내 작업 주소 확인'}
 
 
 class KaggleError(RuntimeError):
-    def __init__(self, message, http_status=None, operation=''):
+    def __init__(self, message, http_status=None, operation='', stage=''):
         super().__init__(message)
         self.http_status = http_status
         self.operation = operation
+        self.stage = stage or operation
 
 
 class KaggleOutputPending(KaggleError):
@@ -72,25 +76,25 @@ def api_call(credentials, operation, timeout=90, **arguments):
                 message = message.replace(credentials[key], '[인증정보]')
         if "No module named 'kaggle'" in message:
             message = '캐글 연결 모듈을 설치하는 중입니다. 사이트 배포 완료 후 다시 연결해주세요.'
-        raise KaggleError(message, response.get('http_status'), operation)
+        raise KaggleError(message, response.get('http_status'), operation, response.get('stage', ''))
     return response['result']
 
 
 def _remember_error(state, exc):
     state['diagnostic'] = dict(operation=getattr(exc, 'operation', ''),
-        http_status=getattr(exc, 'http_status', None), reason=str(exc))
+        stage=getattr(exc, 'stage', ''), http_status=getattr(exc, 'http_status', None), reason=str(exc))
     if getattr(exc, 'operation', '') == 'push':
         state['submission_diagnostic'] = dict(state['diagnostic'])
 
 
 def _error_message(exc):
-    operation = OPERATION_LABELS.get(getattr(exc, 'operation', ''), '요청 처리')
+    operation = OPERATION_LABELS.get(getattr(exc, 'stage', '') or getattr(exc, 'operation', ''), '요청 처리')
     code = getattr(exc, 'http_status', None)
     reason = str(exc)
     if code == 409:
         return f'캐글 {operation} 중 충돌(409)이 발생했습니다. 캐글 응답: {reason}'
     if code in (401, 403):
-        return f'캐글 {operation} 권한을 확인해주세요. 같은 캐글 계정의 토큰으로 다시 연결하세요. 캐글 응답: {reason}'
+        return f'캐글 {operation}에서 접근이 거부되었습니다({code}). 이 코드만으로 토큰 만료라고 판단할 수 없습니다. 캐글 응답: {reason}'
     if code == 429:
         return f'캐글이 요청을 제한했습니다. 잠시 후 다시 확인해주세요. 캐글 응답: {reason}'
     return f'캐글 {operation}: {reason}'
@@ -102,6 +106,49 @@ def authenticate(credentials):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,60}', username):
         raise KaggleError('캐글 사용자 이름을 확인하지 못했습니다.')
     return dict(credentials, username=username)
+
+
+def _adopt_job_ref(state, candidate, username):
+    """Trust only a Kaggle-returned Voice Studio reference owned by this user."""
+    if not isinstance(candidate, str) or not candidate:
+        return
+    if candidate.startswith('https://'):
+        parsed = urlparse(candidate)
+        if parsed.hostname not in ('www.kaggle.com', 'kaggle.com'):
+            return
+        candidate = parsed.path.removeprefix('/code/').strip('/')
+    if not REF_PATTERN.fullmatch(candidate) or candidate.split('/')[0].lower() != username.lower():
+        return
+    if candidate != state['ref']:
+        state.setdefault('requested_ref', state['ref'])
+        state['ref'] = candidate
+
+
+def _confirm_job(work_dir, state, credentials):
+    """Read account + metadata before blaming a token or unlocking generation."""
+    info = api_call(credentials, 'inspect_job', timeout=120, ref=state['ref'])
+    state['account_authenticated'] = bool(info.get('account_authenticated'))
+    if info.get('exists') is False:
+        reason = state.get('submission_error', '')
+        state.update(status='failed', submission='not_created',
+            message='계정 인증은 정상이며, 캐글에 생성 작업이 등록되지 않은 것을 확인했습니다.',
+            error=('토큰 인증은 통과했습니다. 기존 생성 작업이 없어 생성 제한을 해제했습니다. '
+                   '위의 생성 또는 미리듣기 버튼을 다시 눌러주세요.'
+                   + ('\n\n최초 생성 요청 오류: ' + reason if reason else '')))
+        _save(work_dir, state)
+        return 'missing'
+    if info.get('exists'):
+        _adopt_job_ref(state, info.get('ref'), credentials['username'])
+        _save(work_dir, state)
+        return 'found'
+    state.update(status='needs_check',
+        message='계정 인증은 정상입니다. 기존 작업의 접근 상태를 확인해야 합니다.',
+        error='기존 토큰으로 계정 인증은 통과했지만 해당 작업에 접근하지 못했습니다. '
+              '토큰을 다시 발급받지 마세요. 아래 ‘내 캐글 작업 열기’에서 작업 주소를 확인해주세요.')
+    state['diagnostic'] = dict(operation='inspect_job', stage='kernel_info',
+        http_status=info.get('http_status'), reason=info.get('reason', ''))
+    _save(work_dir, state)
+    return 'unknown'
 
 
 def _state_path(work_dir):
@@ -196,6 +243,8 @@ def _launch(work_dir, state, credentials, submit=False):
                 # Only ambiguous submit / read / download failures need polling.
                 before_submit = state.get('status') in ('uploading', 'dataset_ready', 'failed')
                 _remember_error(state, exc)
+                if getattr(exc, 'stage', '') in ('authentication', 'account_check'):
+                    state.pop('account_authenticated', None)
                 state.update(status='failed' if before_submit else 'needs_check', error=_error_message(exc),
                     message='대본 전송을 완료하지 못했습니다.' if before_submit else
                     '캐글 작업 상태를 다시 확인해주세요. 같은 작업을 자동으로 다시 제출하지 않았습니다.')
@@ -287,6 +336,7 @@ def _submit(work_dir, state, credentials):
         return
     state.update(status='queued', submission='accepted', version=result.get('version'),
         message='캐글 GPU 배정을 기다리고 있습니다.', error='')
+    _adopt_job_ref(state, result.get('url'), credentials['username'])
     _save(work_dir, state)
 
 
@@ -302,6 +352,7 @@ def readable_logs(raw):
 
 def _monitor(work_dir, state, credentials):
     misses = 0
+    account_checked = False
     while True:
         try:
             response = api_call(credentials, 'status', ref=state['ref'])
@@ -309,19 +360,28 @@ def _monitor(work_dir, state, credentials):
         except KaggleError as exc:
             misses += 1
             _remember_error(state, exc)
+            if (exc.http_status in (401, 403) and exc.stage == 'status'
+                    and not account_checked):
+                account_checked = True
+                state.update(status='checking', error='',
+                    message='기존 토큰으로 계정 인증과 작업 주소를 따로 확인합니다.')
+                _save(work_dir, state)
+                outcome = _confirm_job(work_dir, state, credentials)
+                if outcome != 'found':
+                    return
+                threading.Event().wait(5)
+                continue
             if misses >= 5 or exc.http_status in (401, 403):
                 # Missing session != missing notebook. Confirm the job itself
                 # is absent before allowing a new GPU submission.
                 if exc.http_status in (404, 409):
-                    info = api_call(credentials, 'kernel_info', ref=state['ref'])
-                    if not info['exists']:
-                        reason = state.get('submission_error', '')
-                        state.update(status='failed', submission='not_created',
-                            message='캐글에 생성 작업이 등록되지 않은 것을 확인했습니다. 다시 생성할 수 있습니다.',
-                            error=('캐글에 생성 작업이 등록되지 않았습니다. 위의 생성 또는 미리듣기 버튼을 다시 눌러주세요.'
-                                   + ('\n\n' + reason if reason else '')))
-                        _save(work_dir, state)
+                    previous_ref = state['ref']
+                    outcome = _confirm_job(work_dir, state, credentials)
+                    if outcome != 'found':
                         return
+                    if state['ref'] != previous_ref:
+                        misses = 0
+                        continue
                 raise
             state.update(status='checking', error='', message=
                 '캐글의 일시적인 충돌을 확인하고 있습니다. 생성 요청은 중복 전송하지 않습니다.'
@@ -331,6 +391,7 @@ def _monitor(work_dir, state, credentials):
             continue
         status = response['status']
         state.update(submission='accepted', remote_status=status)
+        state.pop('diagnostic', None)
         state.pop('submission_error', None)
         state.pop('submission_diagnostic', None)
         logs = readable_logs(response.get('logs', ''))
@@ -441,8 +502,9 @@ def reconnect(work_dir, credentials):
     if monitoring(work_dir):
         return False
     # Reconnect only polls/downloads. It NEVER repeats a dataset or kernel push.
-    state.update(status='checking', error='', conflict_recovery_version=1,
+    state.update(status='checking', error='', conflict_recovery_version=1, access_recovery_version=1,
         message='기존 캐글 작업 상태와 결과를 확인합니다.')
+    state.pop('account_authenticated', None)
     _save(work_dir, state)
     return _launch(work_dir, state, deepcopy(credentials))
 

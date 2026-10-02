@@ -41,7 +41,7 @@ def use_kaggle():
 
 
 def _forget_connection():
-    for key in ('_kaggle_credentials', 'kaggle_api_token'):
+    for key in ('_kaggle_credentials', 'kaggle_api_token', '_kaggle_connection_notice'):
         st.session_state.pop(key, None)
     st.session_state['_kaggle_upload_revision'] = st.session_state.get('_kaggle_upload_revision', 0) + 1
 
@@ -59,10 +59,31 @@ def render_downloads(work_dir, busy=False):
         credentials = st.session_state.get('_kaggle_credentials')
         if credentials:
             st.success('캐글 연결됨 · ' + credentials['username'])
+            if st.session_state.get('_kaggle_connection_notice'):
+                st.info(st.session_state['_kaggle_connection_notice'])
+            if st.button('현재 토큰으로 연결 다시 확인', key='kaggle_recheck_connection',
+                         disabled=busy or kaggle_jobs.monitoring(work_dir), use_container_width=True):
+                try:
+                    with st.spinner('현재 토큰으로 계정과 기존 작업을 확인합니다…'):
+                        checked = kaggle_jobs.authenticate(credentials)
+                        st.session_state['_kaggle_credentials'] = checked
+                        job = kaggle_jobs.get_job(work_dir)
+                        resumed = bool(job and job.get('status') in ('needs_check', 'failed')
+                            and kaggle_jobs.reconnect(work_dir, checked))
+                        st.session_state['_kaggle_connection_notice'] = (
+                            '현재 토큰으로 계정 인증을 확인했습니다. 기존 작업을 확인 중입니다.' if resumed else
+                            '현재 토큰으로 계정 인증을 확인했습니다. 새 토큰을 발급받을 필요가 없습니다.')
+                except kaggle_jobs.KaggleError as exc:
+                    st.session_state.pop('_kaggle_connection_notice', None)
+                    st.error(kaggle_jobs._error_message(exc))
+                except (ValueError, OSError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
             st.button('캐글 연결 정보 지우기', key='kaggle_disconnect', on_click=_forget_connection, disabled=busy)
         else:
-            st.markdown('① [캐글 API 설정 열기](https://www.kaggle.com/settings/api) → **Generate New Token**\n\n'
-                        '② 발급된 토큰을 아래에 붙여넣고 **내 캐글 연결**을 누르세요.')
+            st.markdown('이미 발급받은 토큰을 아래에 붙여넣고 **내 캐글 연결**을 누르세요.\n\n'
+                        '토큰이 없는 경우에만 [캐글 API 설정](https://www.kaggle.com/settings/api)에서 발급받습니다.')
             method = st.radio('연결 방법', ['API 토큰 붙여넣기', 'kaggle.json 파일 등록'],
                 key='kaggle_auth_method', disabled=busy)
             token, uploaded = '', None
@@ -87,7 +108,9 @@ def render_downloads(work_dir, busy=False):
                         supplied = {k: parsed[k].strip() for k in ('username', 'key')}
                     with st.spinner('내 캐글 계정 연결 확인 중…'):
                         st.session_state['_kaggle_credentials'] = kaggle_jobs.authenticate(supplied)
-                except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
+                except kaggle_jobs.KaggleError as exc:
+                    st.error(kaggle_jobs._error_message(exc))
+                except (ValueError, OSError) as exc:
                     st.error(str(exc))
                 else:
                     st.rerun()
@@ -250,7 +273,10 @@ def render_status(work_dir):
     old_conflict = (initial.get('status') == 'needs_check'
         and not initial.get('conflict_recovery_version')
         and (initial.get('diagnostic', {}).get('http_status') == 409 or '409' in initial.get('error', '')))
-    if (active or old_conflict) and credentials and not kaggle_jobs.monitoring(work_dir):
+    old_access_error = (initial.get('status') == 'needs_check'
+        and not initial.get('access_recovery_version')
+        and initial.get('diagnostic', {}).get('http_status') in (401, 403))
+    if (active or old_conflict or old_access_error) and credentials and not kaggle_jobs.monitoring(work_dir):
         try:
             kaggle_jobs.reconnect(work_dir, credentials)
         except ValueError:
@@ -309,13 +335,21 @@ def render_status(work_dir):
                 st.caption('완료된 대사는 저장했습니다. 대본·설정을 그대로 두고 생성 버튼을 누르면 저장된 대사를 이어서 사용합니다.')
                 st.download_button('이어하기 파일 보관', Path(job['resume']).read_bytes,
                     file_name='resume.zip', mime='application/zip', key='kaggle_resume', on_click='ignore')
-            detail = job.get('submission_diagnostic') or job.get('diagnostic')
-            if detail:
+            details = [('현재 확인 오류', job.get('diagnostic')),
+                       ('최초 생성 요청 오류', job.get('submission_diagnostic'))]
+            if any(detail for _, detail in details):
                 with st.expander('캐글 오류 상세 보기'):
-                    st.write('발생 단계: ' + kaggle_jobs.OPERATION_LABELS.get(detail.get('operation'), '요청 처리'))
-                    if detail.get('http_status'):
-                        st.write('응답 코드: ' + str(detail['http_status']))
-                    st.code(detail.get('reason', ''), language=None)
+                    if job.get('account_authenticated'):
+                        st.write('기존 토큰의 계정 인증: 통과')
+                    for label, detail in details:
+                        if not detail:
+                            continue
+                        st.write(label)
+                        phase = detail.get('stage') or detail.get('operation')
+                        st.write('발생 단계: ' + kaggle_jobs.OPERATION_LABELS.get(phase, '요청 처리'))
+                        if detail.get('http_status'):
+                            st.write('응답 코드: ' + str(detail['http_status']))
+                        st.code(detail.get('reason', ''), language=None)
         if job.get('logs'):
             with st.expander('캐글 실행 기록 보기'):
                 st.code(job['logs'], language=None)

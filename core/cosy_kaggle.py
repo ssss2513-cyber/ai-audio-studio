@@ -17,6 +17,7 @@ from cosy3_voicebank_catalog import BANK_REVISION, ATTRIBUTION
 from .cosy3_client import request_payload
 from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
+from .result_downloads import saved_file_download
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTEBOOKS = {
@@ -300,15 +301,15 @@ def render_status(work_dir):
             result = job['result']
             if st.checkbox('완성 음성 들어보기', key='play_kaggle_result'):
                 st.audio(result['full_audio'], format='audio/mp3')
-            st.download_button('⬇️ 전체 대사 MP3 한 파일 받기', Path(result['full_audio']).read_bytes,
+            saved_file_download('⬇️ 전체 대사 MP3 한 파일 받기', result['full_audio'],
                 file_name='preview.mp3' if job.get('preview') else 'full_audio.mp3', mime='audio/mpeg',
-                type='primary', use_container_width=True, key='kaggle_mp3', on_click='ignore')
+                primary=True, key='kaggle_mp3')
             with st.expander('자막·완성본 묶음 받기'):
                 for key, label, name, mime in [('srt', 'SRT 자막 받기', 'subtitles.srt', 'text/plain'),
                     ('vtt', 'VTT 자막 받기', 'subtitles.vtt', 'text/vtt'),
                     ('main_zip', 'MP3 + 자막 묶음 받기', 'complete_audio.zip', 'application/zip')]:
-                    st.download_button(label, Path(result[key]).read_bytes, file_name=name, mime=mime,
-                        key='kaggle_result_' + key, on_click='ignore')
+                    saved_file_download(label, result[key], file_name=name, mime=mime,
+                        key='kaggle_result_' + key, prepare_large=key == 'main_zip')
         elif job.get('error'):
             st.error(job['error'])
             if job.get('submission') == 'not_created':
@@ -333,8 +334,8 @@ def render_status(work_dir):
                     st.rerun()
             if job.get('resume'):
                 st.caption('완료된 대사는 저장했습니다. 대본·설정을 그대로 두고 생성 버튼을 누르면 저장된 대사를 이어서 사용합니다.')
-                st.download_button('이어하기 파일 보관', Path(job['resume']).read_bytes,
-                    file_name='resume.zip', mime='application/zip', key='kaggle_resume', on_click='ignore')
+                saved_file_download('이어하기 파일 보관', job['resume'],
+                    file_name='resume.zip', mime='application/zip', key='kaggle_resume', prepare_large=True)
             details = [('현재 확인 오류', job.get('diagnostic')),
                        ('최초 생성 요청 오류', job.get('submission_diagnostic'))]
             if any(detail for _, detail in details):

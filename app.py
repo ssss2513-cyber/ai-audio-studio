@@ -22,6 +22,7 @@ from core.tts_engine import (
     VOICE_STYLES
 )
 from core.personal_colab import session_workspace, upload_name
+from core.result_downloads import saved_file_download
 from core.colab_session_ui import render_connections, render_reset, render_qwen_bank_connection
 from core.voice_recommendations import (
     recommend_style, preview_text, style_note, speaker_gender,
@@ -53,7 +54,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.49 · 캐글 인증·작업 복구"
+APP_VERSION = "v2.9.50 · 완성 음성 다운로드 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -685,9 +686,9 @@ def render_generation_status(work_dir, active_at_render, pause_ms=500):
                     st.error(job["partial_error"])
                 partial_audio = job.get("partial_audio", "")
                 if job.get("partial_status") == "complete" and os.path.isfile(partial_audio):
-                    st.download_button("⬇️ 완료된 대사 MP3 한 파일 받기", Path(partial_audio).read_bytes,
-                                       file_name="completed_audio.mp3", mime="audio/mpeg", type="primary",
-                                       key="download_partial_audio_v2913", on_click="ignore", use_container_width=True)
+                    saved_file_download("⬇️ 완료된 대사 MP3 한 파일 받기", partial_audio,
+                                        file_name="completed_audio.mp3", mime="audio/mpeg", primary=True,
+                                        key="download_partial_audio_v2913")
                     st.caption(f"저장된 {job.get('partial_count', job['done'])}개 대사만 대본 순서대로 합쳤습니다. 아직 생성하지 않은 대사는 포함되지 않습니다.")
                 elif st.button("완료된 대사 한 파일로 합치기", key="prepare_partial_download_v2913",
                                type="primary", use_container_width=True):
@@ -2680,11 +2681,11 @@ def main():
         with col_down:
             st.markdown("### 📥 내 결과 다운로드")
             path = res.get("full_audio", "")
-            if path and os.path.isfile(path):
-                st.download_button("⬇️ 전체 대사 MP3 한 파일 받기", Path(path).read_bytes,
-                                   file_name="full_audio.mp3", mime="audio/mpeg", type="primary",
-                                   key="result_download_full_audio", use_container_width=True, on_click="ignore")
+            saved_file_download("⬇️ 전체 대사 MP3 한 파일 받기", path,
+                                file_name="full_audio.mp3", mime="audio/mpeg", primary=True,
+                                key="result_download_full_audio")
             st.caption("생성한 구간의 나레이션과 인물 대사를 대본 순서대로 합친 MP3 1개입니다.")
+            st.caption("버튼이 반응하지 않으면 왼쪽 재생바의 ⋮ → 다운로드로도 저장할 수 있습니다.")
             downloads = [
                 ("📦 완성본 패키지 (오디오 + 자막)", "main_zip", "tts_main_bundle.zip", "application/zip"),
                 ("📝 자막 파일 (SRT)", "srt", "subtitles.srt", "text/plain"),
@@ -2694,9 +2695,9 @@ def main():
                 for label, result_key, filename, mime in downloads:
                     path = res.get(result_key, "")
                     if path and os.path.isfile(path):
-                        st.download_button(label, Path(path).read_bytes, file_name=filename,
-                                           mime=mime, key="result_download_" + result_key,
-                                           use_container_width=True, on_click="ignore")
+                        saved_file_download(label, path, file_name=filename,
+                                            mime=mime, key="result_download_" + result_key,
+                                            prepare_large=result_key == "main_zip")
             st.caption("현재 접속에서 생성한 파일입니다. 창을 닫거나 작업을 지우기 전에 다운로드해주세요.")
 
         # 개별 대사별 타임라인 및 재생 목록

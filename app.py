@@ -37,6 +37,7 @@ from core.cosy3_connection_ui import render_connection as render_cosy3_connectio
 from core.cosy3_ui import (render_voice as render_cosy3_voice,
                           preset as cosy3_preset, sync_widgets as sync_cosy3_widgets)
 from core.cosy3_client import check_connection as cosy3_status, export_plan as export_cosy3_plan
+from core.cosy_kaggle import render_downloads as render_kaggle_downloads, render_export as render_kaggle_export
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
 from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
 from core.qwen_bank_connection import connection_status as qwen_bank_status
@@ -51,7 +52,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.44 · CosyVoice 2 음성 끊김 수정 · 3 연결 주소 표시"
+APP_VERSION = "v2.9.45 · 코지2·3 캐글 GPU 2개 추가 · 코랩 유지"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1248,6 +1249,8 @@ def main():
             st.session_state["active_engine_mode"] = new_mode
             st.rerun()
         st.caption("기본 엔진을 바꿔도 현재 화자별 설정은 유지됩니다. 모두 바꾸려면 화자 설정 영역의 ‘전체 …’ 버튼을 눌러주세요.")
+
+        render_kaggle_downloads()
 
         render_cosy3_connection(
             prominent=st.session_state["active_engine_mode"] in ("cosyvoice3", "custom")
@@ -2487,6 +2490,8 @@ def main():
         except GeminiKeyInputError as exc:
             keys_for_start, key_input_error = [], str(exc)
         selected_segments = st.session_state["parsed_segments"][seg_range[0] - 1 : seg_range[1]]
+        use_kaggle = render_kaggle_export(selected_segments, st.session_state["voice_settings"],
+            pause_ms, include_spk_in_sub, force_overwrite, generation_active)
         cosy3_segments = [seg for seg in selected_segments
                           if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "cosyvoice3"]
         if cosy3_segments and len(cosy3_segments) == len(selected_segments):
@@ -2521,8 +2526,10 @@ def main():
             btn_label = f"▶ 남은 대사 이어서 생성 ({seg_range[0]}번 ~ {seg_range[1]}번)"
         if generation_active:
             st.caption("생성 중인 작업은 시작할 때의 대본과 음성 설정을 사용합니다. 진행 상황은 아래에서 확인하세요.")
-        start_clicked = st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
-                                  disabled=generation_active)
+        start_clicked = False
+        if not use_kaggle:
+            start_clicked = st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
+                                      disabled=generation_active)
         if start_clicked or recovery_request:
             if recovery_request:
                 seg_range = (recovery_request["first"], recovery_request["last"])

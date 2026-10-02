@@ -13,3 +13,4 @@ scipy>=1.11.0
 onnxruntime>=1.16.0
 huggingface-hub>=0.20.0
 gradio_client
+kaggle==2.2.4; python_version >= '3.11'

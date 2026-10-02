@@ -78,7 +78,7 @@ def render_voice(speaker, current, *, work_dir, segments, busy, style_selector):
         voice = st.selectbox('목소리 · 성별마다 서로 다른 10명', options,
             index=options.index(default) if default in options else 0,
             format_func=lambda key: VOICEBANK[key]['name'], key=selected, disabled=busy)
-        st.caption('영어 공개 참고 음색으로 한국어를 읽습니다. 기본 목소리는 업로드·API 키가 필요 없습니다.')
+        st.caption('영어 공개 참고 음색으로 한국어를 읽습니다. 기본 목소리는 참고 녹음 업로드가 필요 없습니다.')
         with st.expander('기준 목소리 원본 듣기 · 영어 녹음'):
             st.audio(reference_url(voice), format='audio/wav')
             st.caption('기준 녹음입니다. 아래 한국어 미리듣기에서 실제 합성 결과를 들을 수 있습니다.')
@@ -125,6 +125,10 @@ def render_voice(speaker, current, *, work_dir, segments, busy, style_selector):
         st.caption('같은 목소리를 쓰는 화자: ' + ', '.join(duplicates))
     if st.button(f'🔊 {speaker} CosyVoice 3 미리듣기', key=f'preview_btn_{speaker}',
                  disabled=busy, use_container_width=True):
+        from .cosy_kaggle import use_kaggle, start_preview
+        if use_kaggle():
+            start_preview(work_dir, speaker, preview_text(speaker, segments), st.session_state['voice_settings'])
+            return
         url = st.session_state.get('cosyvoice3_url', '')
         path = Path(work_dir) / f'preview_cosy3_{time.time_ns()}.wav'
         try:

@@ -1,10 +1,12 @@
-"""Optional Kaggle downloads. Existing Colab connections remain independent."""
+"""Generate on Kaggle from the shared site; preserve existing Colab controls."""
 import hashlib
 import io
 import json
 import math
 from pathlib import Path
 import secrets
+import time
+from types import SimpleNamespace
 import zipfile
 
 import streamlit as st
@@ -14,6 +16,7 @@ from cosy_kaggle_contract import (FORMAT, VERSION, MODELS, MAX_ITEMS,
 from cosy3_voicebank_catalog import BANK_REVISION, ATTRIBUTION
 from .cosy3_client import request_payload
 from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
+from . import kaggle_jobs
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTEBOOKS = {
@@ -33,16 +36,82 @@ def notebook_download(engine, key):
         st.caption('캐글 노트북 파일 반영 중입니다. 잠시 후 새로고침해주세요.')
 
 
-def render_downloads():
-    with st.expander('🚀 캐글 GPU 2개 · 코지2·3'):
-        st.caption('기존 코랩도 계속 사용할 수 있습니다. 캐글은 대본 파일을 올려 직접 생성하는 추가 옵션입니다.')
-        for engine in NOTEBOOKS:
-            notebook_download(engine, 'kaggle_notebook_sidebar_' + engine)
+def use_kaggle():
+    return st.session_state.get('cosy_compute_provider') == 'kaggle'
+
+
+def _forget_connection():
+    for key in ('_kaggle_credentials', 'kaggle_api_token'):
+        st.session_state.pop(key, None)
+    st.session_state['_kaggle_upload_revision'] = st.session_state.get('_kaggle_upload_revision', 0) + 1
+
+
+def render_downloads(work_dir, busy=False):
+    with st.expander('🚀 코지2·3 · 캐글 연결', expanded=use_kaggle()):
+        if 'cosy_compute_provider' not in st.session_state:
+            st.session_state['cosy_compute_provider'] = (
+                'kaggle' if st.session_state.get('cosy_batch_location') == '캐글 GPU 2개' else 'colab')
+        st.radio('음성을 계산할 GPU', ['colab', 'kaggle'],
+            format_func=lambda value: '기존 코랩 연결' if value == 'colab' else '캐글 GPU 2개',
+            key='cosy_compute_provider', disabled=busy,
+            help='두 방식 모두 이 공유 사이트에서 생성하고 완성된 음성을 받습니다.')
+        st.caption('캐글을 한 번 연결하면 이 사이트의 생성 버튼으로 실행하고 MP3도 여기서 받습니다.')
+        credentials = st.session_state.get('_kaggle_credentials')
+        if credentials:
+            st.success('캐글 연결됨 · ' + credentials['username'])
+            st.button('캐글 연결 정보 지우기', key='kaggle_disconnect', on_click=_forget_connection, disabled=busy)
+        else:
+            st.markdown('① [캐글 API 설정 열기](https://www.kaggle.com/settings/api) → **Generate New Token**\n\n'
+                        '② 발급된 토큰을 아래에 붙여넣고 **내 캐글 연결**을 누르세요.')
+            method = st.radio('연결 방법', ['API 토큰 붙여넣기', 'kaggle.json 파일 등록'],
+                key='kaggle_auth_method', disabled=busy)
+            token, uploaded = '', None
+            if method == 'API 토큰 붙여넣기':
+                token = st.text_input('캐글 API 토큰', type='password', key='kaggle_api_token', disabled=busy)
+            else:
+                st.caption('캐글 API 설정의 Legacy API Credentials → Create Legacy API Key로 받은 파일입니다.')
+                uploaded = st.file_uploader('kaggle.json 선택', type=['json'],
+                    key='kaggle_credentials_' + str(st.session_state.get('_kaggle_upload_revision', 0)), disabled=busy)
+            if st.button('🔗 내 캐글 연결', key='kaggle_connect', disabled=busy, type='primary', use_container_width=True):
+                try:
+                    if method == 'API 토큰 붙여넣기':
+                        if not token.strip() or len(token) > 8192 or any(c.isspace() for c in token.strip()):
+                            raise ValueError('명령어 전체가 아니라 발급된 토큰 값만 붙여넣어주세요.')
+                        supplied = {'token': token.strip()}
+                    else:
+                        if uploaded is None or uploaded.size > 16384:
+                            raise ValueError('캐글에서 받은 kaggle.json 파일을 선택해주세요.')
+                        parsed = json.loads(uploaded.getvalue())
+                        if not isinstance(parsed, dict) or not all(isinstance(parsed.get(k), str) and parsed[k].strip() for k in ('username', 'key')):
+                            raise ValueError('username과 key가 들어 있는 kaggle.json 파일이 필요합니다.')
+                        supplied = {k: parsed[k].strip() for k in ('username', 'key')}
+                    with st.spinner('내 캐글 계정 연결 확인 중…'):
+                        st.session_state['_kaggle_credentials'] = kaggle_jobs.authenticate(supplied)
+                except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        st.caption('접속한 사람마다 자신의 캐글 계정을 연결합니다. 입력한 인증정보는 현재 접속에서만 사용합니다.')
+        st.caption('GPU가 잠겨 있으면 캐글 휴대폰 인증과 사용 가능 시간을 확인하세요. 생성 요청은 내 계정의 GPU 시간을 사용합니다.')
+        if credentials:
+            with st.expander('이전 캐글 작업 불러오기'):
+                ref = st.text_input('캐글 작업 주소', key='kaggle_restore_ref',
+                    placeholder='https://www.kaggle.com/code/내아이디/voice-studio-…')
+                if st.button('상태·결과 불러오기', key='kaggle_restore', disabled=busy):
+                    try:
+                        kaggle_jobs.restore(work_dir, ref, credentials)
+                    except (ValueError, OSError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
         guide = ROOT / 'Kaggle_CosyVoice_Guide.txt'
         if guide.is_file():
             st.download_button('⬇️ 캐글 사용법', guide.read_bytes(),
                 file_name=guide.name, mime='text/plain', key='kaggle_guide')
-        st.caption('대본 분석과 화자 설정 후, 3번 생성 영역에서 ‘캐글 GPU 2개’를 선택하세요.')
+        with st.expander('수동 실행용 노트북 · 선택 사항'):
+            st.caption('공유 사이트에서 생성할 때는 이 파일을 받을 필요가 없습니다.')
+            for engine in NOTEBOOKS:
+                notebook_download(engine, 'kaggle_notebook_sidebar_' + engine)
 
 
 def prepare_plan(segments, settings, pause_ms, include_speaker):
@@ -110,38 +179,129 @@ def project_zip(plan, references):
     return out.getvalue()
 
 
-def render_export(segments, settings, pause_ms, include_speaker, force_overwrite, busy):
-    engines = {settings.get(segment.speaker, {}).get('engine') for segment in segments}
-    if not engines or not engines.issubset(MODELS):
-        return False
-    mode = st.radio('코지 전체 생성 위치', ['기존 코랩 연결', '캐글 GPU 2개'],
-        horizontal=True, key='cosy_batch_location', disabled=busy,
-        help='코랩은 기존 사이트 연결로 생성합니다. 캐글은 아래 파일을 받아 캐글 안에서 생성합니다. 화자 설정은 그대로 유지됩니다.')
-    if mode != '캐글 GPU 2개':
-        return False
-    st.info('캐글에서 두 GPU가 각각 대사를 생성하고, 먼저 끝난 GPU가 다음 대사를 바로 이어서 만듭니다. 완료 후 대본 순서대로 MP3 하나로 합칩니다.')
+def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False, preview=False):
+    plan, references = prepare_plan(segments, settings, pause_ms, include_speaker)
+    engines = {row['engine'] for row in plan['items']}
     engine = next(iter(engines)) if len(engines) == 1 else 'auto'
-    if len(engines) > 1:
-        st.caption('혼합 대본은 코지2를 두 GPU로 생성한 다음 코지3를 두 GPU로 생성합니다. 최종 합치기는 원래 대본 순서입니다.')
-    notebook_download(engine, 'kaggle_notebook_selected')
+    state = kaggle_jobs.start_job(work_dir, plan, project_zip(plan, references),
+        st.session_state.get('_kaggle_credentials'), NOTEBOOKS[engine][1], force=force, preview=preview)
+    st.session_state['generation_result'] = None
+    st.session_state['_reset_bulk_overwrite'] = True
+    st.session_state.pop('play_kaggle_result', None)
+    return state
+
+
+def start_preview(work_dir, speaker, text, settings):
     try:
-        plan, references = prepare_plan(segments, settings, pause_ms, include_speaker)
-        signature = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-        identity = (signature, bool(force_overwrite))
-        cached = st.session_state.get('_cosy_kaggle_export', {})
-        if cached.get('identity') != identity:
-            if force_overwrite:
-                plan['generation_nonce'] = secrets.token_hex(16)
-            cached = dict(identity=identity, data=project_zip(plan, references))
-            st.session_state['_cosy_kaggle_export'] = cached
-        st.download_button('⬇️ 캐글용 대본·목소리 받기', cached['data'],
-            file_name='CosyVoice_Kaggle_Project.zip', mime='application/zip',
-            key='kaggle_project', disabled=busy, type='primary')
-        st.caption(f'선택한 대사 {len(segments)}개 · 현재 화자·스타일·속도·참고 녹음 포함')
-    except (OSError, ValueError, TypeError) as exc:
-        st.warning(str(exc))
-    st.markdown('1. [캐글 노트북 만들기](https://www.kaggle.com/code)에서 **Import Notebook**으로 위 노트북을 올립니다.\n'
-                '2. **GPU T4 ×2**, **Internet ON**을 선택하고, **Add Input → Upload**로 대본 ZIP을 **비공개**로 추가합니다.\n'
-                '3. **Run All**로 실행합니다. 완료 후 4번 결과에서 **full_audio.mp3** 또는 **complete_audio.zip**을 받습니다.')
-    st.caption('캐글 작업은 캐글 화면에서 시작하고 확인합니다. 첫 설치·모델 준비 시간이 있으며 실제 처리 속도는 대사 길이와 GPU에 따라 달라집니다. 코랩 미리듣기와 기존 연결은 계속 사용할 수 있습니다.')
+        if not text.strip():
+            raise ValueError('미리듣기에서 읽을 대사를 입력해주세요.')
+        _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text)], settings, 0, False, preview=True)
+    except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
+        st.error(str(exc))
+    else:
+        st.rerun()
+
+
+def render_export(segments, settings, pause_ms, include_speaker, force_overwrite, busy, work_dir):
+    engines = {settings.get(segment.speaker, {}).get('engine') for segment in segments}
+    if not use_kaggle() or not engines.intersection(MODELS):
+        return False
+    if not engines.issubset(MODELS):
+        st.warning('캐글 생성은 코지2·3 화자만 지원합니다. 생성 범위를 코지 화자로 선택하거나, 다른 엔진도 함께 만들려면 왼쪽에서 기존 코랩 연결을 선택해주세요.')
+        return True
+    st.info('이 사이트에서 생성 → 캐글 GPU 2개가 계산 → 완성된 MP3 한 파일을 이 사이트에서 받습니다.')
+    st.caption('캐글 새 작업마다 GPU 배정·설치·모델 준비 시간이 필요합니다. 미리듣기도 같은 준비 과정을 거칩니다.')
+    if len(engines) > 1:
+        st.caption('코지2를 두 GPU로 생성한 다음 코지3를 생성하고, 대본 순번대로 합칩니다.')
+    connected = bool(st.session_state.get('_kaggle_credentials'))
+    if not connected:
+        st.warning('왼쪽 ‘🚀 코지2·3 · 캐글 연결’을 열어 내 캐글 계정을 연결해주세요.')
+    if st.button(f'🚀 이 사이트에서 음성 생성 · 캐글 GPU 2개 ({len(segments)}개 대사)',
+                 key='kaggle_generate', type='primary', use_container_width=True, disabled=busy or not connected):
+        try:
+            _start(work_dir, segments, settings, pause_ms, include_speaker, force_overwrite)
+        except (OSError, ValueError, TypeError, kaggle_jobs.KaggleError) as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+    with st.expander('수동 실행용 대본 받기 · 선택 사항'):
+        st.caption('자동 연결을 이용할 때는 대본 파일을 옮기거나 캐글에서 Run All을 누를 필요가 없습니다.')
+        if st.button('수동 대본 파일 준비', key='kaggle_prepare_manual', disabled=busy):
+            try:
+                plan, references = prepare_plan(segments, settings, pause_ms, include_speaker)
+                if force_overwrite:
+                    plan['generation_nonce'] = secrets.token_hex(16)
+                st.session_state['_cosy_kaggle_manual_zip'] = project_zip(plan, references)
+            except (OSError, ValueError, TypeError) as exc:
+                st.caption(str(exc))
+        if st.session_state.get('_cosy_kaggle_manual_zip'):
+            st.download_button('⬇️ 캐글용 대본·목소리 받기', st.session_state['_cosy_kaggle_manual_zip'],
+                file_name='CosyVoice_Kaggle_Project.zip', mime='application/zip', key='kaggle_project', disabled=busy)
+            st.caption('마지막으로 ‘수동 대본 파일 준비’를 눌렀을 때의 설정입니다. 설정 변경 후에는 파일을 다시 준비하세요.')
     return True
+
+
+def render_status(work_dir):
+    initial = kaggle_jobs.get_job(work_dir)
+    if not initial:
+        return
+    credentials = st.session_state.get('_kaggle_credentials')
+    active = kaggle_jobs.is_running(work_dir)
+    if active and credentials and not kaggle_jobs.monitoring(work_dir):
+        try:
+            kaggle_jobs.reconnect(work_dir, credentials)
+        except ValueError:
+            pass
+
+    @st.fragment(run_every=3 if active else None)
+    def panel():
+        job = kaggle_jobs.get_job(work_dir)
+        if not job:
+            return
+        if active and not kaggle_jobs.is_running(work_dir):
+            st.rerun()
+        st.divider()
+        st.markdown('### 🎧 캐글 미리듣기' if job.get('preview') else '### 🎧 캐글 생성 진행·완성 음성')
+        done, total = job.get('done', 0), job.get('total', 0)
+        if total:
+            st.progress(min(1.0, done / total), text=f'완료 확인 {done} / {total}개 대사')
+        if job['status'] == 'complete':
+            st.success(job['message'])
+            result = job['result']
+            if st.checkbox('완성 음성 들어보기', key='play_kaggle_result'):
+                st.audio(result['full_audio'], format='audio/mp3')
+            st.download_button('⬇️ 전체 대사 MP3 한 파일 받기', Path(result['full_audio']).read_bytes,
+                file_name='preview.mp3' if job.get('preview') else 'full_audio.mp3', mime='audio/mpeg',
+                type='primary', use_container_width=True, key='kaggle_mp3', on_click='ignore')
+            with st.expander('자막·완성본 묶음 받기'):
+                for key, label, name, mime in [('srt', 'SRT 자막 받기', 'subtitles.srt', 'text/plain'),
+                    ('vtt', 'VTT 자막 받기', 'subtitles.vtt', 'text/vtt'),
+                    ('main_zip', 'MP3 + 자막 묶음 받기', 'complete_audio.zip', 'application/zip')]:
+                    st.download_button(label, Path(result[key]).read_bytes, file_name=name, mime=mime,
+                        key='kaggle_result_' + key, on_click='ignore')
+        elif job.get('error'):
+            st.error(job['error'])
+        else:
+            st.info(job.get('message', '캐글에서 작업 중입니다.'))
+        st.markdown('[내 캐글 작업 열기](https://www.kaggle.com/code/' + job['ref'] + ')')
+        st.caption('이 작업 주소를 보관하면 사이트에 다시 접속한 후 왼쪽 ‘이전 캐글 작업 불러오기’에서 결과를 받을 수 있습니다.')
+        if job['status'] in kaggle_jobs.ACTIVE:
+            elapsed = max(0, int(time.time() - job['started']))
+            st.caption(f'경과 {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다. 캐글 기록 반영은 지연될 수 있습니다.')
+            st.caption('중단하려면 ‘내 캐글 작업 열기’에서 실행 중인 작업을 중지하세요. 사이트를 닫아도 제출된 캐글 작업은 계속됩니다.')
+        if job['status'] in ('failed', 'needs_check'):
+            if st.button('상태·결과 다시 확인', key='kaggle_reconnect', disabled=not credentials):
+                try:
+                    kaggle_jobs.reconnect(work_dir, credentials)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+            if job.get('resume'):
+                st.caption('완료된 대사는 저장했습니다. 대본·설정을 그대로 두고 생성 버튼을 누르면 저장된 대사를 이어서 사용합니다.')
+                st.download_button('이어하기 파일 보관', Path(job['resume']).read_bytes,
+                    file_name='resume.zip', mime='application/zip', key='kaggle_resume', on_click='ignore')
+        if job.get('logs'):
+            with st.expander('캐글 실행 기록 보기'):
+                st.code(job['logs'], language=None)
+    panel()

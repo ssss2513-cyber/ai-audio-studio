@@ -36,7 +36,9 @@ from core.cosy3_connection_ui import render_connection as render_cosy3_connectio
 from core.cosy3_ui import (render_voice as render_cosy3_voice,
                           preset as cosy3_preset, sync_widgets as sync_cosy3_widgets)
 from core.cosy3_client import check_connection as cosy3_status, export_plan as export_cosy3_plan
-from core.cosy_kaggle import render_downloads as render_kaggle_downloads, render_export as render_kaggle_export
+from core.cosy_kaggle import (render_downloads as render_kaggle_downloads, render_export as render_kaggle_export,
+    render_status as render_kaggle_status, use_kaggle as use_kaggle_gpu, start_preview as start_kaggle_preview)
+from core.kaggle_jobs import is_running as is_kaggle_running, clear_job as clear_kaggle_job
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
 from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
 from core.qwen_bank_connection import connection_status as qwen_bank_status
@@ -51,7 +53,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.46 · 코지2·3 캐글·코랩 지원"
+APP_VERSION = "v2.9.47 · 공유 사이트에서 캐글 음성 생성"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1057,7 +1059,7 @@ def main():
 
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)
-    generation_active = is_running(work_dir)
+    generation_active = is_running(work_dir) or is_kaggle_running(work_dir)
     correct_legacy_gemini_voices()
     retire_qwen_customvoice(generation_active)
     if st.session_state.get("_qwen_bank_migration_notice"):
@@ -1249,11 +1251,12 @@ def main():
             st.rerun()
         st.caption("기본 엔진을 바꿔도 현재 화자별 설정은 유지됩니다. 모두 바꾸려면 화자 설정 영역의 ‘전체 …’ 버튼을 눌러주세요.")
 
-        render_kaggle_downloads()
+        render_kaggle_downloads(work_dir, generation_active)
 
-        render_cosy3_connection(
-            prominent=st.session_state["active_engine_mode"] in ("cosyvoice3", "custom")
-            or any(config.get("engine") == "cosyvoice3" for config in st.session_state["voice_settings"].values()))
+        if not use_kaggle_gpu():
+            render_cosy3_connection(
+                prominent=st.session_state["active_engine_mode"] in ("cosyvoice3", "custom")
+                or any(config.get("engine") == "cosyvoice3" for config in st.session_state["voice_settings"].values()))
         render_qwen_bank_connection(
             prominent=st.session_state["active_engine_mode"] in ("qwen-bank", "custom")
             or any(config.get("engine") == "qwen-bank" for config in st.session_state["voice_settings"].values()))
@@ -1279,9 +1282,11 @@ def main():
         gemini_model = curr_model
 
         # Visitors connect their own GPU runtime; URLs stay in session state.
-        if st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
+        if use_kaggle_gpu() and st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
+            render_connections("gpt-sovits")
+        elif not use_kaggle_gpu() and st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
             render_connections(st.session_state["active_engine_mode"])
-        elif any(config.get("engine") == "cosyvoice" for config in st.session_state["voice_settings"].values()):
+        elif not use_kaggle_gpu() and any(config.get("engine") == "cosyvoice" for config in st.session_state["voice_settings"].values()):
             render_connections("cosyvoice")
         if generation_active:
             st.caption("음성 생성 중입니다. 작업을 지우려면 먼저 생성을 멈춰주세요.")
@@ -1877,9 +1882,9 @@ def main():
 
                     # 2.6. CosyVoice 2 설정 폼 (구글 코랩 16GB GPU 복제)
                     elif spk_engine == "cosyvoice":
-                        st.markdown("**🔥 CosyVoice 2 목소리 복제 (구글 코랩 GPU)**")
+                        st.markdown("**🔥 CosyVoice 2 목소리 복제**")
                         cosy_url = st.session_state.get("cosyvoice_url", "")
-                        if not cosy_url:
+                        if not cosy_url and not use_kaggle_gpu():
                             st.warning("⚠️ 좌측 사이드바에 **'🔥 CosyVoice 코랩 접속 주소'**를 먼저 입력해주세요!")
 
                         ref_audio_val = current_cfg.get("ref_audio_path", "")
@@ -1998,7 +2003,9 @@ def main():
                         # CosyVoice 미리듣기 버튼
                         if st.button(f"🔊 {spk} CosyVoice 미리듣기", key=f"cosy_preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             cosy_url = st.session_state.get("cosyvoice_url", "")
-                            if not cosy_url:
+                            if use_kaggle_gpu():
+                                start_kaggle_preview(work_dir, spk, sample_text, st.session_state["voice_settings"])
+                            elif not cosy_url:
                                 st.error("⚠️ 먼저 좌측 사이드바에 CosyVoice 코랩 주소를 입력해주세요!")
                             elif not effective_ref_audio:
                                 st.error("참조 오디오 파일을 먼저 업로드해주세요!")
@@ -2398,6 +2405,7 @@ def main():
                                           help="끄면 동일한 대사와 음성 설정으로 완료된 파일을 재사용합니다. 설정을 바꾼 대사는 자동으로 새로 생성됩니다.")
             if st.button("🧹 이전 음성 캐시 완전히 비우기", disabled=generation_active, help="이전에 생성된 오디오 파일을 모두 삭제하여 100% 새 설정으로 깨끗하게 다시 생성합니다."):
                 clear_job(work_dir)
+                clear_kaggle_job(work_dir)
                 shutil.rmtree(os.path.join(work_dir, "results"), ignore_errors=True)
                 for result_key in ("_partial_download", "_generation_result_job"):
                     st.session_state.pop(result_key, None)
@@ -2449,10 +2457,10 @@ def main():
             keys_for_start, key_input_error = [], str(exc)
         selected_segments = st.session_state["parsed_segments"][seg_range[0] - 1 : seg_range[1]]
         use_kaggle = render_kaggle_export(selected_segments, st.session_state["voice_settings"],
-            pause_ms, include_spk_in_sub, force_overwrite, generation_active)
+            pause_ms, include_spk_in_sub, force_overwrite, generation_active, work_dir)
         cosy3_segments = [seg for seg in selected_segments
                           if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "cosyvoice3"]
-        if cosy3_segments and len(cosy3_segments) == len(selected_segments):
+        if not use_kaggle and cosy3_segments and len(cosy3_segments) == len(selected_segments):
             try:
                 st.download_button("⬇️ CosyVoice 3 코랩 대본 받기",
                     export_cosy3_plan(selected_segments, st.session_state["voice_settings"], pause_ms),
@@ -2652,7 +2660,10 @@ def main():
                 st.session_state.pop("play_full_result", None)
                 st.rerun()
 
-        render_generation_status(work_dir, generation_active, pause_ms=pause_ms)
+        if not use_kaggle:
+            render_generation_status(work_dir, is_running(work_dir), pause_ms=pause_ms)
+
+    render_kaggle_status(work_dir)
 
     # Step 4: 결과 화면 및 다운로드
     if st.session_state.get("generation_result"):

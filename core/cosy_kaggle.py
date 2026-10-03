@@ -13,7 +13,7 @@ import streamlit as st
 
 from cosy_kaggle_contract import (FORMAT, VERSION, MODELS, MAX_ITEMS,
     MAX_REFERENCE_BYTES, MAX_REFERENCES_BYTES)
-from cosy3_voicebank_catalog import BANK_REVISION, ATTRIBUTION
+from cosy3_voicebank_catalog import BANK_REVISION, ATTRIBUTION, VOICEBANK
 from .cosy3_client import request_payload
 from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
@@ -42,12 +42,22 @@ def use_kaggle():
 
 
 def _forget_connection():
-    for key in ('_kaggle_credentials', 'kaggle_api_token', '_kaggle_connection_notice'):
+    for key in ('_kaggle_credentials', 'kaggle_api_token', '_kaggle_connection_notice',
+                '_kaggle_activate_after_connect'):
         st.session_state.pop(key, None)
     st.session_state['_kaggle_upload_revision'] = st.session_state.get('_kaggle_upload_revision', 0) + 1
 
 
+def _select_kaggle():
+    # Button callbacks run before the provider radio is rendered again.
+    st.session_state['cosy_compute_provider'] = 'kaggle'
+
+
 def render_downloads(work_dir, busy=False):
+    # Authentication runs below the radio. Apply its change on the next render,
+    # before the widget exists, and never overwrite a later manual Colab choice.
+    if st.session_state.pop('_kaggle_activate_after_connect', False):
+        _select_kaggle()
     with st.expander('🚀 코지2·3 · 캐글 연결', expanded=use_kaggle()):
         if 'cosy_compute_provider' not in st.session_state:
             st.session_state['cosy_compute_provider'] = (
@@ -59,7 +69,15 @@ def render_downloads(work_dir, busy=False):
         st.caption('캐글을 한 번 연결하면 이 사이트의 생성 버튼으로 실행하고 MP3도 여기서 받습니다.')
         credentials = st.session_state.get('_kaggle_credentials')
         if credentials:
-            st.success('캐글 연결됨 · ' + credentials['username'])
+            st.success('캐글 계정 인증 완료 · ' + credentials['username'])
+            if use_kaggle():
+                st.info('현재 생성 위치: 캐글 GPU 2개')
+                st.caption('다음: 본문 2번의 ‘캐글 모델 설정’에서 코지2 또는 코지3를 화자에 적용하세요.')
+            else:
+                st.warning('계정 인증은 완료됐지만 현재 생성 위치는 기존 코랩입니다.')
+                st.button('캐글로 음성 생성하기', key='kaggle_select_provider',
+                          on_click=_select_kaggle, disabled=busy, use_container_width=True)
+            st.caption('API 인증은 계정 연결 단계입니다. GPU 배정과 모델 준비는 음성 생성 버튼을 누른 뒤 시작합니다.')
             if st.session_state.get('_kaggle_connection_notice'):
                 st.info(st.session_state['_kaggle_connection_notice'])
             if st.button('현재 토큰으로 연결 다시 확인', key='kaggle_recheck_connection',
@@ -80,6 +98,7 @@ def render_downloads(work_dir, busy=False):
                 except (ValueError, OSError) as exc:
                     st.error(str(exc))
                 else:
+                    st.session_state['_kaggle_activate_after_connect'] = True
                     st.rerun()
             st.button('캐글 연결 정보 지우기', key='kaggle_disconnect', on_click=_forget_connection, disabled=busy)
         else:
@@ -114,6 +133,7 @@ def render_downloads(work_dir, busy=False):
                 except (ValueError, OSError) as exc:
                     st.error(str(exc))
                 else:
+                    st.session_state['_kaggle_activate_after_connect'] = True
                     st.rerun()
         st.caption('접속한 사람마다 자신의 캐글 계정을 연결합니다. 입력한 인증정보는 현재 접속에서만 사용합니다.')
         st.caption('GPU가 잠겨 있으면 캐글 휴대폰 인증과 사용 가능 시간을 확인하세요. 생성 요청은 내 계정의 GPU 시간을 사용합니다.')
@@ -136,6 +156,58 @@ def render_downloads(work_dir, busy=False):
             st.caption('공유 사이트에서 생성할 때는 이 파일을 받을 필요가 없습니다.')
             for engine in NOTEBOOKS:
                 notebook_download(engine, 'kaggle_notebook_sidebar_' + engine)
+
+
+def render_setup(speakers, apply_preset, busy=False):
+    if not use_kaggle():
+        return
+    with st.container(border=True):
+        st.markdown('### 캐글 모델 설정')
+        st.caption('코지2·3는 캐글에서 자동 설치합니다. 별도 서버 주소를 넣거나 캐글에서 모델을 직접 설정할 필요가 없습니다.')
+        labels = {'cosyvoice3': 'CosyVoice 3 · 기본 목소리 20종 / 내 녹음',
+                  'cosyvoice': 'CosyVoice 2 · 내 참고 음성으로 목소리 복제'}
+        preferred = st.session_state.get('active_engine_mode', 'cosyvoice3')
+        model = st.radio('캐글에서 사용할 음성 모델', list(labels),
+            index=1 if preferred == 'cosyvoice' else 0, format_func=labels.get,
+            key='kaggle_model_choice', disabled=busy)
+        if model == 'cosyvoice3':
+            st.write('1. 아래 버튼으로 코지3를 배정합니다.\n'
+                     '2. 화자 카드에서 성별 → 목소리 → 스타일을 고릅니다. 기본 20종은 참고 녹음이 필요 없습니다.\n'
+                     '3. 본문 3번에서 ‘이 사이트에서 음성 생성 · 캐글 GPU 2개’를 누릅니다.')
+        else:
+            st.write('1. 아래 버튼으로 코지2를 적용합니다.\n'
+                     '2. 각 화자에 참고 음성을 올리고, 그 녹음에서 실제로 말한 대사를 입력합니다.\n'
+                     '3. 스타일을 고른 뒤 본문 3번에서 캐글 음성 생성을 누릅니다.')
+        st.button(f'전체 {len(speakers)}명에 {MODELS[model]["label"]} 적용',
+            key='kaggle_apply_model', type='primary', use_container_width=True,
+            disabled=busy or not speakers, on_click=apply_preset, args=(model,))
+        st.caption('이 적용 버튼을 눌러야 기존 화자의 엔진이 바뀝니다. 화자별로 코지2와 코지3를 섞어서 설정해도 됩니다.')
+        if not st.session_state.get('_kaggle_credentials'):
+            st.warning('모델 설정 후 왼쪽 ‘코지2·3 · 캐글 연결’에서 내 캐글 계정을 연결해주세요.')
+
+
+def _setup_problems(speakers, settings):
+    problems = []
+    for speaker in speakers:
+        config = settings.get(speaker, {})
+        engine = config.get('engine')
+        if engine not in MODELS:
+            problems.append(f'{speaker}: 현재 {engine or "엔진 미선택"} → 코지2 또는 코지3 선택 필요')
+            continue
+        voice = config.get('voice')
+        if engine == 'cosyvoice3' and voice not in VOICEBANK and voice != 'custom':
+            problems.append(f'{speaker}: 코지3 목소리 선택 필요')
+        if engine == 'cosyvoice' or voice == 'custom':
+            ref = config.get('ref_audio_path', '')
+            try:
+                has_reference = bool(ref and Path(ref).is_file())
+            except (OSError, ValueError):
+                has_reference = False
+            if not has_reference:
+                problems.append(f'{speaker}: 참고 음성 등록 필요')
+            if not config.get('prompt_text', '').strip():
+                problems.append(f'{speaker}: 참고 녹음에서 실제로 말한 대사 입력 필요')
+    return problems
 
 
 def prepare_plan(segments, settings, pause_ms, include_speaker):
@@ -217,6 +289,11 @@ def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False,
 
 def start_preview(work_dir, speaker, text, settings):
     try:
+        if not st.session_state.get('_kaggle_credentials'):
+            raise ValueError('왼쪽 ‘코지2·3 · 캐글 연결’에서 내 캐글 계정을 먼저 연결해주세요.')
+        problems = _setup_problems([speaker], settings)
+        if problems:
+            raise ValueError('\n'.join(problems))
         if not text.strip():
             raise ValueError('미리듣기에서 읽을 대사를 입력해주세요.')
         _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text)], settings, 0, False, preview=True)
@@ -227,21 +304,32 @@ def start_preview(work_dir, speaker, text, settings):
 
 
 def render_export(segments, settings, pause_ms, include_speaker, force_overwrite, busy, work_dir):
-    engines = {settings.get(segment.speaker, {}).get('engine') for segment in segments}
-    if not use_kaggle() or not engines.intersection(MODELS):
+    if not use_kaggle():
         return False
-    if not engines.issubset(MODELS):
-        st.warning('캐글 생성은 코지2·3 화자만 지원합니다. 생성 범위를 코지 화자로 선택하거나, 다른 엔진도 함께 만들려면 왼쪽에서 기존 코랩 연결을 선택해주세요.')
+    if not segments:
+        st.warning('생성할 대사를 먼저 선택해주세요.')
         return True
+    speakers = list(dict.fromkeys(segment.speaker for segment in segments))
+    engines = {settings.get(speaker, {}).get('engine') for speaker in speakers}
     st.info('이 사이트에서 생성 → 캐글 GPU 2개가 계산 → 완성된 MP3 한 파일을 이 사이트에서 받습니다.')
     st.caption('캐글 새 작업마다 GPU 배정·설치·모델 준비 시간이 필요합니다. 미리듣기도 같은 준비 과정을 거칩니다.')
-    if len(engines) > 1:
+    if len(engines) > 1 and engines.issubset(MODELS):
         st.caption('코지2를 두 GPU로 생성한 다음 코지3를 생성하고, 대본 순번대로 합칩니다.')
     connected = bool(st.session_state.get('_kaggle_credentials'))
+    problems = _setup_problems(speakers, settings)
     if not connected:
         st.warning('왼쪽 ‘🚀 코지2·3 · 캐글 연결’을 열어 내 캐글 계정을 연결해주세요.')
+    if problems:
+        st.warning('선택한 대사의 화자 설정이 아직 완료되지 않았습니다. 본문 2번 ‘캐글 모델 설정’과 해당 화자 카드를 확인해주세요.')
+        for problem in problems:
+            st.write('• ' + problem)
+    elif connected:
+        selected_models = ' · '.join(MODELS[engine]['label'] for engine in MODELS if engine in engines)
+        st.success(f'생성 요청 준비 완료 · {selected_models} · {len(speakers)}명 / {len(segments)}개 대사')
+        st.caption('아래 버튼을 누르면 캐글에 작업을 제출합니다. 실제 GPU·모델 준비 상태는 생성 진행 화면에 표시됩니다.')
     if st.button(f'🚀 이 사이트에서 음성 생성 · 캐글 GPU 2개 ({len(segments)}개 대사)',
-                 key='kaggle_generate', type='primary', use_container_width=True, disabled=busy or not connected):
+                 key='kaggle_generate', type='primary', use_container_width=True,
+                 disabled=busy or not connected or bool(problems)):
         try:
             _start(work_dir, segments, settings, pause_ms, include_speaker, force_overwrite)
         except (OSError, ValueError, TypeError, kaggle_jobs.KaggleError) as exc:

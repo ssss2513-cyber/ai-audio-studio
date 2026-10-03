@@ -38,7 +38,8 @@ from core.cosy3_ui import (render_voice as render_cosy3_voice,
                           preset as cosy3_preset, sync_widgets as sync_cosy3_widgets)
 from core.cosy3_client import check_connection as cosy3_status, export_plan as export_cosy3_plan
 from core.cosy_kaggle import (render_downloads as render_kaggle_downloads, render_export as render_kaggle_export,
-    render_status as render_kaggle_status, use_kaggle as use_kaggle_gpu, start_preview as start_kaggle_preview)
+    render_status as render_kaggle_status, use_kaggle as use_kaggle_gpu, start_preview as start_kaggle_preview,
+    render_setup as render_kaggle_setup)
 from core.kaggle_jobs import is_running as is_kaggle_running, clear_job as clear_kaggle_job
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
 from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
@@ -54,7 +55,7 @@ from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
 
 
-APP_VERSION = "v2.9.50 · 완성 음성 다운로드 수정"
+APP_VERSION = "v2.9.51 · 캐글 연결·모델 설정 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -387,14 +388,22 @@ def apply_preset_to_speakers(speakers, engine_type):
             used = {row["voice"] for row in new_settings.values() if row.get("engine") == "cosyvoice3"}
             new_settings[spk] = cosy3_character_preset(spk, st.session_state.get("voice_settings", {}).get(spk), used)
         elif engine_type == "cosyvoice":
+            current = st.session_state.get("voice_settings", {}).get(spk, {})
+            ref = current.get("ref_audio_path", "")
+            prompt = current.get("prompt_text", "")
+            if not ref:
+                ref = st.session_state.get(f"cosy_saved_path_{spk}", "")
+                prompt = st.session_state.get(f"cosy_prompt_{spk}", "")
             new_settings[spk] = {
                 "engine": "cosyvoice",
                 "voice": "CosyVoice 2 목소리 복제",
-                "style": def_style,
-                "ref_audio_path": "",
-                "prompt_text": "",
-                "speed": 1.0
+                "style": current.get("style", def_style),
+                "ref_audio_path": ref,
+                "prompt_text": prompt,
+                "speed": current.get("speed", 1.0) if current.get("engine") == "cosyvoice" else 1.0
             }
+            if current.get("gender"):
+                new_settings[spk]["gender"] = current["gender"]
         elif engine_type == "gpt-sovits":
             new_settings[spk] = {
                 "engine": "gpt-sovits",
@@ -460,10 +469,8 @@ def set_speakers_preset(engine_type: str):
             sync_cosy3_widgets(spk, sdata)
         elif eng == "cosyvoice":
             set_state_safe(f"cosy_speed_{spk}", sdata.get("speed", 1.0))
-            if sdata.get("prompt_text"):
-                set_state_safe(f"cosy_prompt_{spk}", sdata.get("prompt_text"))
-            if sdata.get("ref_audio_path"):
-                set_state_safe(f"cosy_saved_path_{spk}", sdata.get("ref_audio_path"))
+            set_state_safe(f"cosy_prompt_{spk}", sdata.get("prompt_text", ""))
+            set_state_safe(f"cosy_saved_path_{spk}", sdata.get("ref_audio_path", ""))
         elif eng == "gemini":
             set_state_safe(f"gemini_voice_{spk}", voice)
             set_state_safe(f"gemini_gender_{spk}", GEMINI_VOICES[voice]["gender"])
@@ -1194,17 +1201,18 @@ def main():
     # 사이드바 설정
     with st.sidebar:
         st.header("⚙️ 엔진 & 환경 설정")
+        render_kaggle_downloads(work_dir, generation_active)
 
         # 1. 엔진 모드 선택
         engine_mode_options = [
             "👑 Supertonic 3 (무료 한국어)",
             "⚡ Gemini Flash TTS (감정 연기)",
-            "🔥 CosyVoice 2 (코랩 목소리 복제)",
+            "🔥 CosyVoice 2 (목소리 복제)",
             "🎙️ GPT-SoVITS v4 (코랩 목소리 복제)",
             "🔀 하이브리드 (인물별 선택)",
             "☁️ Google Chirp 3 HD (월 100만 자 무료)",
             "🎭 Qwen 기본 목소리 20종 (남성 10 · 여성 10)",
-            "🔥 CosyVoice 3 (별도 서버 · 목소리 20종)"
+            "🔥 CosyVoice 3 (목소리 20종)"
         ]
         curr_idx = 0
         if st.session_state["active_engine_mode"] == "gemini":
@@ -1226,7 +1234,7 @@ def main():
             "🎙️ TTS 기본 엔진 선택",
             options=engine_mode_options,
             index=curr_idx,
-            help="새 대본 분석에 사용할 기본 엔진과 왼쪽 설정 화면을 선택합니다. 현재 화자의 엔진·성우·스타일·참조 음성은 바뀌지 않습니다. 목소리 복제는 본인 코랩을 연결해서 사용합니다."
+            help="새 대본 분석에 사용할 기본 엔진을 선택합니다. 현재 화자의 엔진·성우·스타일·참조 음성은 바뀌지 않습니다. 코지2·3는 위에서 선택한 캐글 또는 코랩으로 생성합니다."
         )
 
         new_mode = "supertonic"
@@ -1252,21 +1260,19 @@ def main():
             st.rerun()
         st.caption("기본 엔진을 바꿔도 현재 화자별 설정은 유지됩니다. 모두 바꾸려면 화자 설정 영역의 ‘전체 …’ 버튼을 눌러주세요.")
 
-        render_kaggle_downloads(work_dir, generation_active)
-
         if not use_kaggle_gpu():
             render_cosy3_connection(
                 prominent=st.session_state["active_engine_mode"] in ("cosyvoice3", "custom")
                 or any(config.get("engine") == "cosyvoice3" for config in st.session_state["voice_settings"].values()))
-        render_qwen_bank_connection(
-            prominent=st.session_state["active_engine_mode"] in ("qwen-bank", "custom")
-            or any(config.get("engine") == "qwen-bank" for config in st.session_state["voice_settings"].values()))
+            render_qwen_bank_connection(
+                prominent=st.session_state["active_engine_mode"] in ("qwen-bank", "custom")
+                or any(config.get("engine") == "qwen-bank" for config in st.session_state["voice_settings"].values()))
         chirp_api_key = render_chirp_settings(
-            prominent=st.session_state["active_engine_mode"] in ("chirp", "custom")
-            or any(config.get("engine") == "chirp" for config in st.session_state["voice_settings"].values()))
+            prominent=not use_kaggle_gpu() and (st.session_state["active_engine_mode"] in ("chirp", "custom")
+            or any(config.get("engine") == "chirp" for config in st.session_state["voice_settings"].values())))
 
         # 2. Supertonic 옵션 안내
-        if st.session_state["active_engine_mode"] == "supertonic":
+        if not use_kaggle_gpu() and st.session_state["active_engine_mode"] == "supertonic":
             st.success("✅ Supertonic 3 로컬 엔진 활성화됨 (100% 완전 무료 · API 키 불필요)")
             st.caption("💡 하이브(HYBE) 수퍼톤의 가벼운 고속 ONNX 모델로, 내 컴퓨터에서 완전 무료로 동작합니다.")
 
@@ -1283,9 +1289,7 @@ def main():
         gemini_model = curr_model
 
         # Visitors connect their own GPU runtime; URLs stay in session state.
-        if use_kaggle_gpu() and st.session_state["active_engine_mode"] in ["gpt-sovits", "custom"]:
-            render_connections("gpt-sovits")
-        elif not use_kaggle_gpu() and st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
+        if not use_kaggle_gpu() and st.session_state["active_engine_mode"] in ["cosyvoice", "gpt-sovits", "custom"]:
             render_connections(st.session_state["active_engine_mode"])
         elif not use_kaggle_gpu() and any(config.get("engine") == "cosyvoice" for config in st.session_state["voice_settings"].values()):
             render_connections("cosyvoice")
@@ -1302,16 +1306,21 @@ def main():
         remove_stage = st.checkbox("지문/지시문(괄호 안 텍스트) 자동 제거", value=False)
         include_spk_in_sub = st.checkbox("자막에 화자 이름 표시", value=True)
 
-    # 메인 상단 엔진 상태 안내 바
-    st.info(
-        f"💡 **현재 기본 엔진: {selected_mode_label}**\n"
-        "- **Qwen 기본 목소리 20종**: 남성 10개·여성 10개를 바로 선택 · 처음 한 번 자동 준비 · 녹음 업로드 불필요\n"
-        "- **CosyVoice 3**: 버전 2와 별도 서버 · 남성 10명·여성 10명 선택 · 감정 스타일 · 한국어 참고 음성 등록\n"
-        "- **Google Chirp 3 HD**: 코랩 없이 한국어 음성 생성 · 월 100만 자까지 무료, 초과분 과금\n"
-        "- **Supertonic 3**: 하이브 수퍼톤 한국어 모델로 **완전 무료 + 인터넷/키 없이도 로컬에서 초고속 생성**\n"
-        "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **스튜디오 성우급 감정 연기**\n"
-        "- **AI 목소리 복제 (CosyVoice / GPT-SoVITS)**: 본인 구글 코랩을 연결하고 참조 음성과 실제 대사를 등록해 사용합니다."
-    )
+    # Show the selected compute route, separately from the default engine.
+    if use_kaggle_gpu():
+        st.info("현재 생성 위치: **캐글 GPU 2개** · 지원 모델: **CosyVoice 2 / 3**\n\n"
+                "**대본 분석 → 2번 캐글 모델 설정에서 적용 → 화자별 목소리·스타일 확인 → 3번 캐글 음성 생성**")
+    else:
+        # 메인 상단 엔진 상태 안내 바
+        st.info(
+            f"💡 **현재 기본 엔진: {selected_mode_label}**\n"
+            "- **Qwen 기본 목소리 20종**: 남성 10개·여성 10개를 바로 선택 · 처음 한 번 자동 준비 · 녹음 업로드 불필요\n"
+            "- **CosyVoice 3**: 버전 2와 별도 서버 · 남성 10명·여성 10명 선택 · 감정 스타일 · 한국어 참고 음성 등록\n"
+            "- **Google Chirp 3 HD**: 코랩 없이 한국어 음성 생성 · 월 100만 자까지 무료, 초과분 과금\n"
+            "- **Supertonic 3**: 하이브 수퍼톤 한국어 모델로 **완전 무료 + 인터넷/키 없이도 로컬에서 초고속 생성**\n"
+            "- **Gemini Flash**: 구글 최신 Gemini 멀티모달 오디오 모델 기반의 **스튜디오 성우급 감정 연기**\n"
+            "- **AI 목소리 복제 (CosyVoice / GPT-SoVITS)**: 본인 구글 코랩을 연결하고 참조 음성과 실제 대사를 등록해 사용합니다."
+        )
 
     # Step 1: 대본 입력
     st.subheader("1️⃣ 대본 입력 및 자동 변환")
@@ -1448,74 +1457,77 @@ def main():
                     + " · ".join(st.session_state["_gemini_gender_corrections"])
                     + " · 이미 만든 음성은 다음 생성부터 수정됩니다.")
         
-        # 일괄 변경 원클릭 버튼 바
-        if st.button("🎭 전체 화자에 기본 목소리 20종 배정", use_container_width=True,
-                     disabled=generation_active, key="qwen_bank_cast_all",
-                     help="성별별로 서로 다른 목소리를 우선 배정합니다. 생성 버튼을 누르면 선택한 목소리를 코랩에서 처음 한 번 준비합니다."):
-            set_speakers_preset("qwen-bank")
-            st.toast("새 기본 목소리를 배정했습니다. 성별과 목소리를 확인해주세요.")
-            st.rerun()
-        with st.expander("🎭 새 기본 목소리 20종 목록 보기"):
-            st.caption("남성 10개·여성 10개의 제작 목소리 목록입니다. 선택한 목소리는 첫 생성 때 준비하며, 이후 같은 기준 음성을 재사용합니다.")
-            st.table([{"번호": key, "성별": row["gender"], "목소리": row["name"], "특징": row["description"]}
-                      for key, row in QWEN_BANK_VOICES.items()])
-        if st.button("☁️ 전체 화자를 Google Chirp 3 HD로 변경", use_container_width=True,
-                     disabled=generation_active, key="chirp_cast_all",
-                     help="현재 성별과 호환되는 보이스 이름을 우선 유지합니다. Gemini API 호출 없이 바꾸며, 생성 버튼을 눌러야 음성을 만듭니다."):
-            set_speakers_preset("chirp")
-            st.toast("전체 화자를 Chirp 3 HD로 변경했습니다. 각 화자의 성별과 목소리를 확인해주세요.")
-            st.rerun()
-        col_bar1, col_bar2, col_bar3 = st.columns(3)
-        with col_bar1:
-            if st.button("👑 전체 Supertonic 3 (로컬 무료)", use_container_width=True):
-                set_speakers_preset("supertonic")
-                st.toast("모든 화자가 Supertonic 3 로컬 무료 모델로 일괄 변경되었습니다!")
+        if use_kaggle_gpu():
+            render_kaggle_setup(st.session_state["speakers"], set_speakers_preset, generation_active)
+        else:
+            # 일괄 변경 원클릭 버튼 바
+            if st.button("🎭 전체 화자에 기본 목소리 20종 배정", use_container_width=True,
+                         disabled=generation_active, key="qwen_bank_cast_all",
+                         help="성별별로 서로 다른 목소리를 우선 배정합니다. 생성 버튼을 누르면 선택한 목소리를 코랩에서 처음 한 번 준비합니다."):
+                set_speakers_preset("qwen-bank")
+                st.toast("새 기본 목소리를 배정했습니다. 성별과 목소리를 확인해주세요.")
                 st.rerun()
-        with col_bar2:
-            if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True,
-                         key="gemini_cast_all", disabled=generation_active,
-                         help="현재 대본과 인물 정보를 분석해 성별·나이·역할에 맞는 보이스와 스타일을 함께 설정합니다. Gemini API 키가 필요합니다."):
-                casting_status = st.empty()
-                try:
-                    if not gemini_api_key.strip():
-                        raise CastingError("현재 세션에 등록된 Gemini API 키가 없어 자동 배정을 진행할 수 없습니다.")
-                    # Parse current editor contents, including edits since the
-                    # last analysis, without changing anything until AI succeeds.
-                    pairs = parse_story_precisely(st.session_state.get("script_editor", ""),
-                                                 custom_characters=custom_chars_list)
-                    parser = ScriptParser()
-                    cast_segments = parser.parse("\n".join(f"{s}: {t}" for s, t in pairs),
-                                                 remove_stage_directions=remove_stage)
-                    cast_speakers = parser.extract_speakers(cast_segments)
-                    profiles = {s: st.session_state.get(f"voice_profile_{s}", "") for s in cast_speakers}
-                    existing = {s: gemini_preset(s, st.session_state["voice_settings"].get(s))
-                                for s in cast_speakers}
-                    source_text = casting_source_text()
-                    with st.spinner("대본 전체에서 화자의 성별·나이·관계·말투를 분석하고 보이스와 스타일을 고르는 중..."):
-                        cast = analyze_gemini_casting(
-                            script=source_text, speakers=cast_speakers, profiles=profiles,
-                            existing=existing, voices=GEMINI_VOICES, styles=VOICE_STYLES,
-                            api_key=gemini_api_key, progress=casting_status.caption)
-                    casting_status.empty()
-                    apply_casting_to_state(st.session_state, result=cast, speakers=cast_speakers,
-                                           segments=cast_segments, script=source_text, profiles=profiles)
-                    st.toast(f"{len(cast_speakers)}명 보이스·스타일 자동 설정 완료")
+            with st.expander("🎭 새 기본 목소리 20종 목록 보기"):
+                st.caption("남성 10개·여성 10개의 제작 목소리 목록입니다. 선택한 목소리는 첫 생성 때 준비하며, 이후 같은 기준 음성을 재사용합니다.")
+                st.table([{"번호": key, "성별": row["gender"], "목소리": row["name"], "특징": row["description"]}
+                          for key, row in QWEN_BANK_VOICES.items()])
+            if st.button("☁️ 전체 화자를 Google Chirp 3 HD로 변경", use_container_width=True,
+                         disabled=generation_active, key="chirp_cast_all",
+                         help="현재 성별과 호환되는 보이스 이름을 우선 유지합니다. Gemini API 호출 없이 바꾸며, 생성 버튼을 눌러야 음성을 만듭니다."):
+                set_speakers_preset("chirp")
+                st.toast("전체 화자를 Chirp 3 HD로 변경했습니다. 각 화자의 성별과 목소리를 확인해주세요.")
+                st.rerun()
+            col_bar1, col_bar2, col_bar3 = st.columns(3)
+            with col_bar1:
+                if st.button("👑 전체 Supertonic 3 (로컬 무료)", use_container_width=True):
+                    set_speakers_preset("supertonic")
+                    st.toast("모든 화자가 Supertonic 3 로컬 무료 모델로 일괄 변경되었습니다!")
                     st.rerun()
-                except CastingError as exc:
-                    casting_status.empty()
-                    st.error(str(exc))
-        with col_bar3:
-            if st.button("🎙️ 전체 AI 목소리 복제 (Colab GPU)", use_container_width=True):
-                set_speakers_preset("gpt-sovits")
-                st.toast("모든 화자가 AI 목소리 복제로 일괄 변경되었습니다!")
-                st.rerun()
+            with col_bar2:
+                if st.button("⚡ 전체 Gemini Flash (성우 연기)", use_container_width=True,
+                             key="gemini_cast_all", disabled=generation_active,
+                             help="현재 대본과 인물 정보를 분석해 성별·나이·역할에 맞는 보이스와 스타일을 함께 설정합니다. Gemini API 키가 필요합니다."):
+                    casting_status = st.empty()
+                    try:
+                        if not gemini_api_key.strip():
+                            raise CastingError("현재 세션에 등록된 Gemini API 키가 없어 자동 배정을 진행할 수 없습니다.")
+                        # Parse current editor contents, including edits since the
+                        # last analysis, without changing anything until AI succeeds.
+                        pairs = parse_story_precisely(st.session_state.get("script_editor", ""),
+                                                     custom_characters=custom_chars_list)
+                        parser = ScriptParser()
+                        cast_segments = parser.parse("\n".join(f"{s}: {t}" for s, t in pairs),
+                                                     remove_stage_directions=remove_stage)
+                        cast_speakers = parser.extract_speakers(cast_segments)
+                        profiles = {s: st.session_state.get(f"voice_profile_{s}", "") for s in cast_speakers}
+                        existing = {s: gemini_preset(s, st.session_state["voice_settings"].get(s))
+                                    for s in cast_speakers}
+                        source_text = casting_source_text()
+                        with st.spinner("대본 전체에서 화자의 성별·나이·관계·말투를 분석하고 보이스와 스타일을 고르는 중..."):
+                            cast = analyze_gemini_casting(
+                                script=source_text, speakers=cast_speakers, profiles=profiles,
+                                existing=existing, voices=GEMINI_VOICES, styles=VOICE_STYLES,
+                                api_key=gemini_api_key, progress=casting_status.caption)
+                        casting_status.empty()
+                        apply_casting_to_state(st.session_state, result=cast, speakers=cast_speakers,
+                                               segments=cast_segments, script=source_text, profiles=profiles)
+                        st.toast(f"{len(cast_speakers)}명 보이스·스타일 자동 설정 완료")
+                        st.rerun()
+                    except CastingError as exc:
+                        casting_status.empty()
+                        st.error(str(exc))
+            with col_bar3:
+                if st.button("🎙️ 전체 AI 목소리 복제 (Colab GPU)", use_container_width=True):
+                    set_speakers_preset("gpt-sovits")
+                    st.toast("모든 화자가 AI 목소리 복제로 일괄 변경되었습니다!")
+                    st.rerun()
 
-        if st.button("🔥 전체 CosyVoice 3 목소리 배정", key="assign_all_cosy3",
-                     disabled=generation_active, use_container_width=True):
-            set_speakers_preset("cosyvoice3")
-            st.toast("CosyVoice 3 목소리를 성별에 맞춰 중복을 줄여 배정했습니다.")
-            st.rerun()
-        st.caption("⚡ 전체 Gemini Flash를 누르면 대본을 분석해 화자별 보이스·성별·스타일까지 함께 설정합니다.")
+            if st.button("🔥 전체 CosyVoice 3 목소리 배정", key="assign_all_cosy3",
+                         disabled=generation_active, use_container_width=True):
+                set_speakers_preset("cosyvoice3")
+                st.toast("CosyVoice 3 목소리를 성별에 맞춰 중복을 줄여 배정했습니다.")
+                st.rerun()
+            st.caption("⚡ 전체 Gemini Flash를 누르면 대본을 분석해 화자별 보이스·성별·스타일까지 함께 설정합니다.")
         active_casting = current_casting_report()
         if active_casting:
             st.success(f"대본 맞춤 보이스·스타일 설정 완료 · {len(active_casting)}명")
@@ -1628,6 +1640,11 @@ def main():
                         unsafe_allow_html=True
                     )
                     engine_choices = ["supertonic", "gemini", "cosyvoice", "cosyvoice3", "gpt-sovits", "chirp", "qwen-bank"]
+                    if use_kaggle_gpu():
+                        # Keep the current assignment visible until explicitly changed.
+                        engine_choices = ["cosyvoice", "cosyvoice3"]
+                        if spk_engine not in engine_choices:
+                            engine_choices.insert(0, spk_engine)
                     chosen_engine = st.selectbox(
                         "음성 엔진 선택",
                         options=engine_choices,
@@ -1637,10 +1654,10 @@ def main():
                             "gemini": "⚡ Gemini Flash",
                             "chirp": "☁️ Google Chirp 3 HD",
                             "qwen-bank": "🎭 기본 목소리 20종 (코랩)",
-                            "cosyvoice": "🔥 CosyVoice 2 (코랩 GPU 복제)",
-                            "cosyvoice3": "🔥 CosyVoice 3 (별도 서버 · 목소리 20종)",
+                            "cosyvoice": "🔥 CosyVoice 2 (캐글 목소리 복제)" if use_kaggle_gpu() else "🔥 CosyVoice 2 (코랩 GPU 복제)",
+                            "cosyvoice3": "🔥 CosyVoice 3 (캐글 · 목소리 20종)" if use_kaggle_gpu() else "🔥 CosyVoice 3 (별도 서버 · 목소리 20종)",
                             "gpt-sovits": "🎙️ GPT-SoVITS (복제)",
-                        }[e],
+                        }.get(e, e),
                         key=f"engine_select_{spk}"
                     )
                     
@@ -1737,6 +1754,9 @@ def main():
                     with st.expander("👤 인물 정보 · 추천 조정", expanded=False):
                         st.text_input("나이·역할·성격", key=f"voice_profile_{spk}", max_chars=200,
                                       placeholder="예: 70대 할머니, 다정하고 차분함")
+                    if use_kaggle_gpu() and spk_engine not in ("cosyvoice", "cosyvoice3"):
+                        st.warning("현재 화자는 캐글에서 지원하지 않는 엔진입니다. 위에서 코지2·3를 선택하거나 ‘캐글 모델 설정’에서 전체 화자에 적용해주세요.")
+                        continue
                     recommendation = recommend_style(spk, st.session_state["parsed_segments"],
                                                      st.session_state.get(f"voice_profile_{spk}", ""))
                     cast_info = active_casting.get(spk)
@@ -2444,13 +2464,14 @@ def main():
         previous_job = get_job(work_dir)
         recovery_request = st.session_state.pop("_gemini_recovery_request", None)
         if recovery_request and (
-                generation_active or not previous_job
+                use_kaggle_gpu() or generation_active or not previous_job
                 or previous_job.get("id") != recovery_request.get("job_id")
                 or gemini_model != recovery_request.get("model")
                 or not 1 <= recovery_request.get("first", 0) <= recovery_request.get("last", 0) <= total_segs):
             recovery_request = None
             st.warning("작업 또는 대본이 바뀌어 자동 시작하지 않았습니다. 생성 범위를 확인하고 다시 눌러주세요.")
-        render_gemini_recovery(work_dir, previous_job, generation_active)
+        if not use_kaggle_gpu():
+            render_gemini_recovery(work_dir, previous_job, generation_active)
         try:
             keys_for_start = parse_gemini_keys(gemini_api_key)
             key_input_error = ""
@@ -2470,7 +2491,7 @@ def main():
                 st.caption(str(exc))
         bank_segments = [seg for seg in selected_segments
                          if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "qwen-bank"]
-        if bank_segments and len(bank_segments) == len(selected_segments):
+        if not use_kaggle and bank_segments and len(bank_segments) == len(selected_segments):
             try:
                 bank_plan = export_qwen_bank_plan(selected_segments, st.session_state["voice_settings"], pause_ms, include_spk_in_sub)
                 st.download_button("⬇️ 기본 목소리 20종 코랩 대본 받기", bank_plan,
@@ -2482,10 +2503,10 @@ def main():
                         for seg in selected_segments)
         chirp_characters = sum(len(clean_spoken_text(seg.text)) for seg in selected_segments
                                if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "chirp")
-        if chirp_characters:
+        if not use_kaggle and chirp_characters:
             st.caption(f"선택 범위의 Chirp 대사: {chirp_characters:,}자 · 저장된 음성 재사용분은 다시 요청하지 않습니다.")
             st.caption("월 100만 자 무료 한도는 Google Cloud 사용량 기준입니다. 다른 작업·미리듣기·재생성도 합산되며 초과분은 과금됩니다.")
-        if has_gemini:
+        if not use_kaggle and has_gemini:
             st.caption(f"다음 생성에 사용할 Gemini 키: 서로 다른 {len(keys_for_start)}개 · 모델: {gemini_model}")
             if key_input_error:
                 st.error(key_input_error)
@@ -2497,7 +2518,7 @@ def main():
         if not use_kaggle:
             start_clicked = st.button(btn_label, key="bulk_generation_start", type="primary", use_container_width=True,
                                       disabled=generation_active)
-        if start_clicked or recovery_request:
+        if not use_kaggle and (start_clicked or recovery_request):
             if recovery_request:
                 seg_range = (recovery_request["first"], recovery_request["last"])
                 force_overwrite = False

@@ -111,7 +111,7 @@ def _details(state, key):
         for engine, child in (state.get('children') or {}).items():
             if child:
                 st.write(('코지2' if engine == 'cosyvoice' else '코지3') + ' · '
-                         STATUS.get(child.get('status'), child.get('status', '')))
+                         + STATUS.get(child.get('status'), child.get('status', '')))
                 if child.get('error'):
                     st.error(_clean(child['error']))
                 child_events = _events(child)

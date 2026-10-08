@@ -59,7 +59,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.58 · 캐글 등록 상태·오류 바로 보기"
+APP_VERSION = "v2.9.59 · 캐글 생성 이름 충돌 수정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",

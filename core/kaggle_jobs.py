@@ -162,6 +162,78 @@ def job_registered(state):
                 or state.get('remote_status') or state.get('status') == 'complete')
 
 
+def is_dataset_title_conflict(state):
+    """Recognize only Kaggle's explicit rejection of this exact requested title."""
+    if not state or state.get('kind') == 'parallel_cosy':
+        return False
+    if (state.get('registration_confirmed') or state.get('submission') == 'accepted'
+            or state.get('remote_status') or state.get('version') or state.get('status') == 'complete'):
+        return False
+    detail = state.get('submission_diagnostic') or {}
+    if detail.get('operation') != 'push' or detail.get('http_status') != 409:
+        return False
+    ref = state.get('requested_ref') or state.get('ref', '')
+    if not REF_PATTERN.fullmatch(ref):
+        return False
+    match = re.search(r'The requested title "([^"]+)" is already in use by a dataset\.',
+                      str(detail.get('reason', '')), re.IGNORECASE)
+    return bool(match and match.group(1) == ref.split('/', 1)[1])
+
+
+def _record_title_rejection(work_dir, state):
+    state.update(status='failed', submission='not_created', registration_confirmed=False,
+        failure_kind='dataset_title_conflict',
+        message='데이터셋 이름 충돌로 실행 요청이 거절됐습니다. 생성 제한을 해제했습니다.',
+        error='대본 데이터와 실행 작업의 이름이 겹쳐 캐글이 생성 요청을 거절했습니다. '
+              '이름을 분리하도록 수정했으므로 미리듣기 또는 생성 버튼을 다시 눌러주세요.')
+    state['diagnostic'] = deepcopy(state['submission_diagnostic'])
+    state.pop('verify_registration', None)
+    _save(work_dir, state)
+
+
+def release_title_conflict(work_dir, credentials):
+    """Repair a saved, explicitly rejected request; never submit or query a job."""
+    if not credentials:
+        return False
+    with LOCK:
+        if monitoring(work_dir):
+            return False
+        state = get_job(work_dir)
+        if not state or kaggle_history.owner(state) != credentials['username'].lower():
+            return False
+        if state.get('kind') == 'parallel_cosy':
+            if state.get('status') == 'complete':
+                return False
+            changed = False
+            for engine in ('cosyvoice', 'cosyvoice3'):
+                changed = release_title_conflict(Path(state['folder']) / engine, credentials) or changed
+            children = {engine: get_job(Path(state['folder']) / engine)
+                        for engine in ('cosyvoice', 'cosyvoice3')}
+            live = any(is_running(Path(state['folder']) / engine)
+                       or monitoring(Path(state['folder']) / engine) for engine in children)
+            settled = all(child and child.get('status') in ('complete', 'failed')
+                          for child in children.values())
+            rejected = any(child and child.get('failure_kind') == 'dataset_title_conflict'
+                           and is_dataset_title_conflict(child) for child in children.values())
+            stale_parent = (state.get('status') in ACTIVE or state.get('status') == 'needs_check')
+            changed = changed or (stale_parent and rejected and settled and not live)
+            if changed:
+                state['children'] = children
+                if not live and settled:
+                    state.update(status='failed',
+                        message='이름 충돌로 거절된 작업의 생성 제한을 해제했습니다. 생성 버튼을 다시 누르세요.',
+                        error='\n\n'.join(('코지2' if engine == 'cosyvoice' else '코지3') + ': ' + child['error']
+                                         for engine, child in children.items() if child and child.get('error')))
+                _save(work_dir, state)
+            return changed
+        if not is_dataset_title_conflict(state):
+            return False
+        if state.get('failure_kind') == 'dataset_title_conflict' and state.get('status') == 'failed':
+            return False
+        _record_title_rejection(work_dir, state)
+        return True
+
+
 def _state_path(work_dir):
     return Path(work_dir) / 'kaggle_job.json'
 
@@ -262,8 +334,8 @@ def _launch(work_dir, state, credentials, submit=False):
             return False
         def target():
             try:
-                if submit:
-                    _submit(work_dir, state, credentials)
+                if submit and _submit(work_dir, state, credentials) is False:
+                    return
                 _monitor(work_dir, state, credentials)
             except Exception as exc:
                 # An input-upload error occurred before any GPU request.
@@ -292,6 +364,7 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
     if not credentials:
         raise ValueError('왼쪽 ‘캐글 연결’에서 먼저 내 계정을 연결해주세요.')
     with LOCK:
+        release_title_conflict(work_dir, credentials)
         old = get_job(work_dir)
         if monitoring(work_dir) or is_running(work_dir):
             raise ValueError('현재 캐글 작업이 진행 중입니다. 완료 후 다음 작업을 시작해주세요.')
@@ -304,6 +377,7 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
                 return old
         job_id = time.strftime('%Y%m%d%H%M%S', time.gmtime()) + '-' + secrets.token_hex(4)
         slug = 'voice-studio-' + job_id
+        dataset_slug = 'voice-input-' + job_id
         folder = Path(work_dir) / 'kaggle_jobs' / job_id
         data, code = folder / 'input', folder / 'code'
         data.mkdir(parents=True, mode=0o700)
@@ -316,15 +390,16 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
             input_file.write_bytes(archive)
         input_file.chmod(0o600)
         ref = credentials['username'] + '/' + slug
-        metadata = dict(id=ref, title=slug, licenses=[{'name': 'other'}],
+        dataset_ref = credentials['username'] + '/' + dataset_slug
+        metadata = dict(id=dataset_ref, title=dataset_slug, licenses=[{'name': 'other'}],
             description='Private voice studio input. Reference audio and dialogue for this job only.')
         (data / 'dataset-metadata.json').write_text(json.dumps(metadata), encoding='utf-8')
         (code / 'voice_job.py').write_text(_make_script(notebook_name, job_id, signature), encoding='utf-8')
         metadata = dict(id=ref, title=slug, code_file='voice_job.py', language='python',
             kernel_type='script', is_private=True, enable_gpu=True, enable_internet=True,
-            machine_shape='NvidiaTeslaT4', dataset_sources=[ref], competition_sources=[], kernel_sources=[])
+            machine_shape='NvidiaTeslaT4', dataset_sources=[dataset_ref], competition_sources=[], kernel_sources=[])
         (code / 'kernel-metadata.json').write_text(json.dumps(metadata), encoding='utf-8')
-        state = dict(id=job_id, signature=signature, ref=ref, folder=str(folder),
+        state = dict(id=job_id, signature=signature, ref=ref, dataset_ref=dataset_ref, folder=str(folder),
             status='uploading', message='대본과 목소리 설정을 내 캐글 계정에 비공개로 전송합니다.',
             total=len(plan['items']), done=0, started=time.time(), preview=preview, error='',
             parallel_shard=bool(plan.get('site_parallel_shard')),
@@ -344,7 +419,7 @@ def _submit(work_dir, state, credentials):
     _save(work_dir, state)
     deadline = time.monotonic() + 600
     while True:
-        response = api_call(credentials, 'dataset_status', ref=state['ref'])
+        response = api_call(credentials, 'dataset_status', ref=state.get('dataset_ref') or state['ref'])
         status = response['status'].lower()
         if status == 'ready':
             break
@@ -362,14 +437,19 @@ def _submit(work_dir, state, credentials):
         # A conflict/timeout can follow an accepted push. Reconcile the exact
         # unique job through reads, never repeat the non-idempotent GPU submit.
         _remember_error(state, exc)
-        state.update(status='checking', submission_error=_error_message(exc),
+        state['submission_error'] = _error_message(exc)
+        if is_dataset_title_conflict(state):
+            _record_title_rejection(work_dir, state)
+            return False
+        state.update(status='checking',
             message='생성 요청 응답을 확인 중입니다. 실제 작업이 시작됐는지 자동으로 확인합니다.', error='')
         _save(work_dir, state)
-        return
+        return True
     state.update(status='queued', submission='accepted', version=result.get('version'),
         message='캐글 GPU 배정을 기다리고 있습니다.', error='')
     _adopt_job_ref(state, result.get('url'), credentials['username'])
     _save(work_dir, state)
+    return True
 
 
 def readable_logs(raw):
@@ -383,6 +463,9 @@ def readable_logs(raw):
 
 
 def _monitor(work_dir, state, credentials):
+    if is_dataset_title_conflict(state):
+        _record_title_rejection(work_dir, state)
+        return
     misses = 0
     account_checked = False
     if state.pop('verify_registration', False):
@@ -545,6 +628,7 @@ def _receive(work_dir, state, credentials, remote_status, remote_error, wait_for
 
 
 def reconnect(work_dir, credentials):
+    release_title_conflict(work_dir, credentials)
     state = get_job(work_dir)
     if not state or not credentials:
         return False
@@ -555,6 +639,8 @@ def reconnect(work_dir, credentials):
         raise ValueError('이 작업을 만든 캐글 계정으로 연결해주세요.')
     if monitoring(work_dir):
         return False
+    if state.get('failure_kind') == 'dataset_title_conflict' and state.get('status') == 'failed':
+        return True
     if state.get('submission') == 'not_sent':
         # _submit persists submission='unknown' BEFORE calling kernels_push.
         # A stopped worker still marked not_sent never requested GPU work.

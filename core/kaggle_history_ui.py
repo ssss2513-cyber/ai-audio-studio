@@ -59,6 +59,7 @@ def _report(state):
              '최초 시작 (한국): ' + _time(state.get('started')),
              '등록 확인: ' + ('확인됨' if jobs.job_registered(state) else '미확인'),
              '제출 상태: ' + str(state.get('submission', '이전 기록에 없음')),
+             '대본 데이터 주소: ' + str(state.get('dataset_ref') or state.get('ref', '')),
              '캐글 주소: ' + str(state.get('ref', '')), '안내: ' + _clean(state.get('message')),
              '오류: ' + _clean(state.get('error'))]
     for label, detail in [('현재 오류 상세', state.get('diagnostic')),
@@ -211,6 +212,8 @@ def render_preview_recovery(work_dir, speaker):
 
 def render_history(work_dir, enabled=False):
     credentials = st.session_state.get('_kaggle_credentials')
+    if jobs.release_title_conflict(work_dir, credentials):
+        st.rerun()
     initial = jobs.get_job(work_dir)
     if not enabled and not credentials and not initial:
         return

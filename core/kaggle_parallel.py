@@ -48,6 +48,7 @@ def start(work_dir, plan, archive, credentials, force=False):
     if not credentials:
         raise ValueError('내 캐글 계정을 먼저 연결해주세요.')
     with jobs.LOCK:
+        jobs.release_title_conflict(work_dir, credentials)
         old = jobs.get_job(work_dir)
         if jobs.is_running(work_dir) or jobs.monitoring(work_dir):
             raise ValueError('현재 캐글 작업이 진행 중입니다. 완료 후 다음 작업을 시작해주세요.')

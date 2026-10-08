@@ -57,7 +57,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.52 · 대사별 감정·강도 설정"
+APP_VERSION = "v2.9.53 · 캐글 코지2·3 동시 생성"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",

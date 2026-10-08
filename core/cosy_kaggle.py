@@ -149,6 +149,19 @@ def render_downloads(work_dir, busy=False):
                         st.error(str(exc))
                     else:
                         st.rerun()
+                recovery = st.file_uploader('코지2·3 동시 작업 복구 파일', type=['json'],
+                    key='kaggle_parallel_recovery', disabled=busy)
+                if st.button('두 모델 작업 함께 불러오기', key='kaggle_restore_parallel',
+                             disabled=busy or recovery is None):
+                    try:
+                        if recovery.size > 16 * 1024**2:
+                            raise ValueError('복구 파일이 너무 큽니다.')
+                        from .kaggle_parallel import restore as restore_parallel
+                        restore_parallel(work_dir, json.loads(recovery.getvalue()), credentials)
+                    except (ValueError, TypeError, KeyError, OSError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
         guide = ROOT / 'Kaggle_CosyVoice_Guide.txt'
         if guide.is_file():
             st.download_button('⬇️ 캐글 사용법', guide.read_bytes(),
@@ -280,9 +293,14 @@ def project_zip(plan, references):
 def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False, preview=False):
     plan, references = prepare_plan(segments, settings, pause_ms, include_speaker)
     engines = {row['engine'] for row in plan['items']}
-    engine = next(iter(engines)) if len(engines) == 1 else 'auto'
-    state = kaggle_jobs.start_job(work_dir, plan, project_zip(plan, references),
-        st.session_state.get('_kaggle_credentials'), NOTEBOOKS[engine][1], force=force, preview=preview)
+    if len(engines) == 2:
+        from .kaggle_parallel import start as start_parallel
+        state = start_parallel(work_dir, plan, project_zip(plan, references),
+                               st.session_state.get('_kaggle_credentials'), force=force)
+    else:
+        engine = next(iter(engines))
+        state = kaggle_jobs.start_job(work_dir, plan, project_zip(plan, references),
+            st.session_state.get('_kaggle_credentials'), NOTEBOOKS[engine][1], force=force, preview=preview)
     st.session_state['generation_result'] = None
     st.session_state['_reset_bulk_overwrite'] = True
     st.session_state.pop('play_kaggle_result', None)
@@ -314,10 +332,15 @@ def render_export(segments, settings, pause_ms, include_speaker, force_overwrite
         return True
     speakers = list(dict.fromkeys(segment.speaker for segment in segments))
     engines = {settings.get(speaker, {}).get('engine') for speaker in speakers}
-    st.info('이 사이트에서 생성 → 캐글 GPU 2개가 계산 → 완성된 MP3 한 파일을 이 사이트에서 받습니다.')
+    mixed = len(engines) > 1 and engines.issubset(MODELS)
+    st.info('이 사이트에서 생성 → 코지2·코지3 별도 작업 동시 실행 → 순번대로 MP3 한 파일로 합치기'
+            if mixed else '이 사이트에서 생성 → 캐글 GPU 2개가 계산 → 완성된 MP3 한 파일을 이 사이트에서 받습니다.')
     st.caption('캐글 새 작업마다 GPU 배정·설치·모델 준비 시간이 필요합니다. 미리듣기도 같은 준비 과정을 거칩니다.')
-    if len(engines) > 1 and engines.issubset(MODELS):
-        st.caption('코지2를 두 GPU로 생성한 다음 코지3를 생성하고, 대본 순번대로 합칩니다.')
+    if mixed:
+        st.caption('코지2 작업 1개 + 코지3 작업 1개를 동시에 요청합니다. 각 작업은 T4 GPU 2개를 사용하며, '
+                   '각 GPU는 대사 하나가 끝나면 다음 대사를 바로 처리합니다. 실제 시작은 캐글 자원 배정에 따릅니다.')
+        st.caption('다른 캐글 GPU 작업이 실행 중이면 동시 작업 한도에 걸릴 수 있습니다. '
+                   '한쪽이 실패해도 다른 쪽은 계속 진행하며, 완료 음성은 보관합니다.')
     connected = bool(st.session_state.get('_kaggle_credentials'))
     problems = _setup_problems(speakers, settings)
     if not connected:
@@ -330,7 +353,8 @@ def render_export(segments, settings, pause_ms, include_speaker, force_overwrite
         selected_models = ' · '.join(MODELS[engine]['label'] for engine in MODELS if engine in engines)
         st.success(f'생성 요청 준비 완료 · {selected_models} · {len(speakers)}명 / {len(segments)}개 대사')
         st.caption('아래 버튼을 누르면 캐글에 작업을 제출합니다. 실제 GPU·모델 준비 상태는 생성 진행 화면에 표시됩니다.')
-    if st.button(f'🚀 이 사이트에서 음성 생성 · 캐글 GPU 2개 ({len(segments)}개 대사)',
+    generation_label = '코지2·3 동시 생성' if mixed else '캐글 GPU 2개'
+    if st.button(f'🚀 이 사이트에서 음성 생성 · {generation_label} ({len(segments)}개 대사)',
                  key='kaggle_generate', type='primary', use_container_width=True,
                  disabled=busy or not connected or bool(problems)):
         try:
@@ -341,6 +365,8 @@ def render_export(segments, settings, pause_ms, include_speaker, force_overwrite
             st.rerun()
     with st.expander('수동 실행용 대본 받기 · 선택 사항'):
         st.caption('자동 연결을 이용할 때는 대본 파일을 옮기거나 캐글에서 Run All을 누를 필요가 없습니다.')
+        if mixed:
+            st.caption('위 생성 버튼은 두 캐글 작업을 동시에 실행합니다. 수동 통합 노트북은 한 작업 안에서 코지2 다음 코지3를 처리합니다.')
         if st.button('수동 대본 파일 준비', key='kaggle_prepare_manual', disabled=busy):
             try:
                 plan, references = prepare_plan(segments, settings, pause_ms, include_speaker)
@@ -387,7 +413,11 @@ def render_status(work_dir):
         done, total = job.get('done', 0), job.get('total', 0)
         if total:
             st.progress(min(1.0, done / total), text=f'완료 확인 {done} / {total}개 대사')
-        if job['status'] == 'complete':
+        if job['status'] == 'complete' and job.get('parallel_shard'):
+            st.success('이 모델의 원본 음성을 받았습니다. 두 모델 전체 합치기는 동시 작업 복구 파일로 불러오세요.')
+            saved_file_download('모델별 원본·이어하기 묶음 받기', job['result']['clips_archive'],
+                file_name='resume.zip', mime='application/zip', key='kaggle_shard_result', prepare_large=True)
+        elif job['status'] == 'complete':
             st.success(job['message'])
             result = job['result']
             if st.checkbox('완성 음성 들어보기', key='play_kaggle_result'):
@@ -407,12 +437,37 @@ def render_status(work_dir):
                 st.info('이전 작업 때문에 막혔던 생성 제한을 해제했습니다. 위의 생성 또는 미리듣기 버튼을 다시 누르세요.')
         else:
             st.info(job.get('message', '캐글에서 작업 중입니다.'))
-        st.markdown('[내 캐글 작업 열기](https://www.kaggle.com/code/' + job['ref'] + ')')
-        st.caption('이 작업 주소를 보관하면 사이트에 다시 접속한 후 왼쪽 ‘이전 캐글 작업 불러오기’에서 결과를 받을 수 있습니다.')
+        if job.get('kind') == 'parallel_cosy':
+            for engine, label in (('cosyvoice', '코지2'), ('cosyvoice3', '코지3')):
+                child = (job.get('children') or {}).get(engine) or {}
+                st.markdown('**' + label + '**')
+                if child.get('total'):
+                    st.progress(min(1.0, child.get('done', 0) / child['total']),
+                        text=f"{label} · {child.get('done', 0)} / {child['total']}개 대사")
+                st.caption(child.get('message') or '별도 캐글 작업 준비 중')
+                error = job.get('start_errors', {}).get(engine) or child.get('error')
+                if error:
+                    st.error(error)
+                if child.get('ref'):
+                    st.markdown(f"[{label} 캐글 작업 열기](https://www.kaggle.com/code/{child['ref']})")
+                if child.get('logs'):
+                    with st.expander(label + ' 실행 기록'):
+                        st.code(child['logs'], language=None)
+            if job.get('recovery'):
+                saved_file_download('두 모델 작업 복구 파일 보관', job['recovery'],
+                    file_name='cosy_parallel_recovery.json', mime='application/json', key='kaggle_parallel_backup')
+                st.caption('다시 접속했을 때 왼쪽 ‘이전 캐글 작업 불러오기’에 이 파일을 넣으면 두 작업을 함께 복구합니다. '
+                           'API 키는 들어 있지 않으며 대본·화자 설정과 두 작업 주소가 들어 있습니다.')
+            if job['status'] == 'failed':
+                st.caption('대본과 설정을 그대로 두고 생성 버튼을 다시 누르면 완료된 모델은 재사용하고 실패한 모델만 이어서 생성합니다. '
+                           '‘완료 파일도 새로 만들기’는 끈 상태로 두세요.')
+        elif job.get('ref'):
+            st.markdown('[내 캐글 작업 열기](https://www.kaggle.com/code/' + job['ref'] + ')')
+            st.caption('이 작업 주소를 보관하면 사이트에 다시 접속한 후 왼쪽 ‘이전 캐글 작업 불러오기’에서 결과를 받을 수 있습니다.')
         if job['status'] in kaggle_jobs.ACTIVE:
             elapsed = max(0, int(time.time() - job['started']))
             st.caption(f'경과 {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다. 캐글 기록 반영은 지연될 수 있습니다.')
-            st.caption('중단하려면 ‘내 캐글 작업 열기’에서 실행 중인 작업을 중지하세요. 사이트를 닫아도 제출된 캐글 작업은 계속됩니다.')
+            st.caption('중단하려면 각 캐글 작업 링크에서 실행 중인 작업을 중지하세요. 사이트를 닫아도 제출된 캐글 작업은 계속됩니다.')
         if job['status'] in ('failed', 'needs_check'):
             if job['status'] == 'needs_check':
                 st.caption('아래 버튼으로 기존 작업을 확인합니다. 실제 작업이 있으면 이어받고, 등록되지 않은 것이 확인되면 다시 생성할 수 있습니다.')

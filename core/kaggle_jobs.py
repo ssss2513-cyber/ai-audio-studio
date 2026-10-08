@@ -177,6 +177,10 @@ def get_job(work_dir):
 
 def is_running(work_dir):
     state = get_job(work_dir)
+    if state and state.get('kind') == 'parallel_cosy':
+        return state.get('status') in ACTIVE or any(
+            is_running(Path(state['folder']) / engine) or monitoring(Path(state['folder']) / engine)
+            for engine in ('cosyvoice', 'cosyvoice3'))
     return bool(state and state.get('status') in ACTIVE)
 
 
@@ -218,8 +222,10 @@ finally:
         info = json.loads(latest.read_text())
         folder = Path(info['folder'])
         progress = json.loads((folder / 'progress.json').read_text())
+        plan = json.loads((folder / 'plan.json').read_text())
         result.update(status=info['status'], total=progress['total'], done=progress['done'],
                       folder=folder.relative_to('/kaggle/working').as_posix(),
+                      parallel_shard=bool(plan.get('site_parallel_shard')),
                       errors=progress.get('errors', []))
     Path('/kaggle/working/voice_studio_site_result.json').write_text(
         json.dumps(result, ensure_ascii=False), encoding='utf-8')
@@ -272,7 +278,8 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
             raise ValueError('캐글 작업 상태를 확인해야 합니다. 아래 ‘상태·결과 다시 확인’을 누르면 진행 중인 작업은 이어받고, 등록되지 않은 작업은 생성 제한을 해제합니다.')
         signature = fingerprint(plan)
         if not force and old and old.get('signature') == signature and old.get('status') == 'complete':
-            if Path(old.get('result', {}).get('full_audio', '')).is_file():
+            result_key = 'clips_archive' if plan.get('site_parallel_shard') else 'full_audio'
+            if Path(old.get('result', {}).get(result_key, '')).is_file():
                 return old
         job_id = time.strftime('%Y%m%d%H%M%S', time.gmtime()) + '-' + secrets.token_hex(4)
         slug = 'voice-studio-' + job_id
@@ -299,6 +306,7 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
         state = dict(id=job_id, signature=signature, ref=ref, folder=str(folder),
             status='uploading', message='대본과 목소리 설정을 내 캐글 계정에 비공개로 전송합니다.',
             total=len(plan['items']), done=0, started=time.time(), preview=preview, error='',
+            parallel_shard=bool(plan.get('site_parallel_shard')),
             submission='not_sent')
         _save(work_dir, state)
         _launch(work_dir, state, deepcopy(credentials), submit=True)
@@ -464,6 +472,17 @@ def _receive(work_dir, state, credentials, remote_status, remote_error, wait_for
     if resume.is_file():
         state['resume'] = str(resume)
     state.update(total=info.get('total', state['total']), done=info.get('done', 0))
+    if info.get('status') == 'complete' and info.get('parallel_shard'):
+        if not resume.is_file():
+            raise KaggleOutputPending('모델별 원본 음성 묶음이 아직 준비되지 않았습니다.', operation='pull')
+        with zipfile.ZipFile(resume) as archive:
+            if not {'plan.json', 'clip_index.json'}.issubset(archive.namelist()):
+                raise KaggleError('원본 음성 순번 정보가 누락됐습니다. 결과 다시 확인을 눌러주세요.')
+        state.update(status='complete', error='', parallel_shard=True,
+            message='모델별 원본 음성 생성 완료 · 전체 대본 합치기 준비 완료',
+            result={'clips_archive': str(resume)})
+        _save(work_dir, state)
+        return
     bundle = folder / 'complete_audio.zip'
     if info.get('status') == 'complete' and not bundle.is_file() and wait_for_files:
         raise KaggleOutputPending('캐글에서 완성 음성 파일을 준비할 때까지 기다리고 있습니다.', operation='pull')
@@ -497,6 +516,9 @@ def reconnect(work_dir, credentials):
     state = get_job(work_dir)
     if not state or not credentials:
         return False
+    if state.get('kind') == 'parallel_cosy':
+        from .kaggle_parallel import reconnect as reconnect_parallel
+        return reconnect_parallel(work_dir, state, credentials)
     if state['ref'].split('/')[0].lower() != credentials['username'].lower():
         raise ValueError('이 작업을 만든 캐글 계정으로 연결해주세요.')
     if monitoring(work_dir):

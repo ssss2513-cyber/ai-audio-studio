@@ -548,6 +548,13 @@ def write_resume(folder, keys):
     temp = target.with_suffix('.part.zip')
     with zipfile.ZipFile(temp, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as out:
         out.write(folder / 'plan.json', 'plan.json')
+        plan = json.loads((folder / 'plan.json').read_text())
+        # Original indices survive splitting a mixed script into two GPU jobs.
+        out.writestr('clip_index.json', json.dumps([
+            dict(index=item['index'], file='clips/' + key + '.wav',
+                 sha256=json.loads((folder / 'clips' / (key + '.json')).read_text())['sha256'])
+            for item, key in zip(plan['items'], keys)
+            if cached_clip(folder / 'clips', key)], ensure_ascii=False))
         for path in sorted((folder / 'references').glob('*.audio')):
             out.write(path, 'references/' + path.name)
         for key in dict.fromkeys(keys):
@@ -573,6 +580,11 @@ def merge_complete(plan, folder, keys):
     paths = [cached_clip(folder / 'clips', key) for key in keys]
     if not all(paths):
         raise RuntimeError('누락된 대사가 있어 최종 음성을 만들지 않았습니다. resume.zip으로 이어서 생성하세요.')
+    if plan.get('site_parallel_shard'):
+        # Transfer lossless clips once. The site merges both engines in script
+        # order and encodes the final MP3 only once.
+        say('모델별 생성 완료 · 원본 WAV와 순번을 공유 사이트에 전달합니다.')
+        return
     final_wav = folder / 'full_audio.wav'
     temporary = folder / 'full_audio.part.wav'
     srt, vtt, timings = [], ['WEBVTT\n'], []
@@ -759,7 +771,9 @@ def execute_locked(source, allowed, count):
             say('이어하기 ZIP 저장 실패. Output의 clips 폴더와 plan.json을 보관하세요: ' + redact(exc))
         say('결과 폴더: ' + str(folder))
     if progress['status'] == 'complete':
-        say('✅ 전체 완료: full_audio.mp3 한 파일 + 자막. complete_audio.zip을 받으세요.')
+        say('✅ 모델별 원본 음성 완료: 공유 사이트에서 두 모델을 순번대로 합칩니다.'
+            if plan.get('site_parallel_shard') else
+            '✅ 전체 완료: full_audio.mp3 한 파일 + 자막. complete_audio.zip을 받으세요.')
         return 0
     say('완료된 대사는 보관했습니다. resume.zip을 Add Input에 추가하고 같은 노트북에서 이어서 실행하세요.')
     return 2

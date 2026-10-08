@@ -408,7 +408,7 @@ def install_offline_cache_reuse(model):
     model.model.tts = MethodType(offline_tts, model.model)
 
 
-def configure_fp32_acceleration(model):
+def configure_fp32_acceleration(model, source=None, cosy3=False):
     """Inference-only adapters; retain upstream files, weights and sampling.
 
     Qwen2Encoder.forward_one_step uses only the decoder's hidden state and KV
@@ -430,7 +430,7 @@ def configure_fp32_acceleration(model):
         return result
     try:
         source_revision = subprocess.check_output(
-            ['git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], text=True, timeout=5,
+            ['git', '-C', str(source or SOURCE), 'rev-parse', 'HEAD'], text=True, timeout=5,
             stderr=subprocess.DEVNULL).strip()
         encoder = model.model.llm.llm
         supported = (source_revision == SOURCE_REVISION
@@ -439,8 +439,8 @@ def configure_fp32_acceleration(model):
                      and type(encoder).__module__ == 'cosyvoice.llm.llm'
                      and type(encoder.model).__name__ == 'Qwen2ForCausalLM'
                      and type(encoder.model.model).__name__ == 'Qwen2Model'
-                     and type(model.model).__name__ == 'CosyVoice2Model'
-                     and type(model.model.llm).__name__ == 'Qwen2LM'
+                     and type(model.model).__name__ == ('CosyVoice3Model' if cosy3 else 'CosyVoice2Model')
+                     and type(model.model.llm).__name__ == ('CosyVoice3LM' if cosy3 else 'Qwen2LM')
                      and not hasattr(model.model.llm, 'vllm'))
         if supported:
             def decoder_step(self, xs, masks, cache=None):
@@ -467,19 +467,20 @@ def configure_fp32_acceleration(model):
     except Exception as exc:
         result['notes'].append('발음 계산 최적화 준비 실패: ' + type(exc).__name__)
 
-    original_encoder = model.model.flow.encoder
-    try:
-        print('FP32 음향 인코더 가속 준비 중… 첫 준비에 시간이 조금 더 걸릴 수 있습니다.', flush=True)
-        scripted = torch.jit.script(original_encoder)
-        scripted = torch.jit.freeze(scripted)
-        scripted = torch.jit.optimize_for_inference(scripted)
-        model.model.flow.encoder = scripted
-        result['flow'] = 'jit_fp32'
-        print('FP32 음향 인코더 가속 준비 완료.', flush=True)
-    except Exception as exc:
-        model.model.flow.encoder = original_encoder
-        result['notes'].append('음향 인코더 가속 준비 실패: ' + type(exc).__name__)
-        print('음향 가속을 준비할 수 없어 기존 FP32 방식으로 계속합니다. ' + type(exc).__name__, flush=True)
+    if not cosy3:
+        original_encoder = model.model.flow.encoder
+        try:
+            print('FP32 음향 인코더 가속 준비 중… 첫 준비에 시간이 조금 더 걸릴 수 있습니다.', flush=True)
+            scripted = torch.jit.script(original_encoder)
+            scripted = torch.jit.freeze(scripted)
+            scripted = torch.jit.optimize_for_inference(scripted)
+            model.model.flow.encoder = scripted
+            result['flow'] = 'jit_fp32'
+            print('FP32 음향 인코더 가속 준비 완료.', flush=True)
+        except Exception as exc:
+            model.model.flow.encoder = original_encoder
+            result['notes'].append('음향 인코더 가속 준비 실패: ' + type(exc).__name__)
+            print('음향 가속을 준비할 수 없어 기존 FP32 방식으로 계속합니다. ' + type(exc).__name__, flush=True)
     labels = ['FP32']
     if result['llm'] == 'decoder_only':
         labels.append('불필요 계산 생략')
@@ -1239,6 +1240,11 @@ def serve(port):
     print('[모델 준비 3/4] 음성 모델·토크나이저를 불러옵니다. 세부 기록이 이어집니다.', flush=True)
     model = CosyVoice2(model_dir=str(MODEL), load_jit=False, load_trt=False, fp16=False)
     acceleration = configure_fp32_acceleration(model)
+    if os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3':
+        from cosy_kaggle_acceleration import install as install_kaggle_acceleration
+        acceleration['estimator'] = install_kaggle_acceleration(
+            model, MODEL, SOURCE, MODEL.parent.parent / 'acceleration_cache')
+        acceleration['label'] += ' · ' + acceleration['estimator']['engine']
     acceleration['cpu_threads'] = torch.get_num_threads()
     acceleration['label'] += ' · CPU 중첩 병렬 제한'
     parallel_enabled = install_request_streams(model)

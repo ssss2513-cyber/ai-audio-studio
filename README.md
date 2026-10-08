@@ -1,6 +1,24 @@
 # 🎙️ 대본 기반 화자별 자동 TTS 생성기 (Multi-Speaker Script TTS)
 
-현재 공유 사이트: **v2.9.60 · 미리듣기 진행·작업 목록 바로 표시**. 최근 변경 사항은 아래 버전별 기록에 있습니다.
+현재 공유 사이트: **v2.9.61 · 캐글 FP32 가속·모델별 로그·중지 상태**. 최근 변경 사항은 아래 버전별 기록에 있습니다.
+
+## v2.9.61 — 캐글 FP32 가속·모델별 로그·중지 상태
+
+- 코지2·3 캐글 작업에 같은 고정 모델 리비전의 공식 FP32 ONNX와 TensorRT 10.13.3.9를 사용합니다. FP16/BF16/INT8/TF32 계산을 활성화하지 않으며 가중치·샘플링·flow 단계·화자·읽기 속도는 유지합니다. vLLM의 공식 export는 BF16으로 변환하므로 이번 경로에 사용하지 않습니다.
+- 모델별 남은 대사가 12개 이상일 때 가속 엔진을 준비합니다. 짧은 미리듣기는 최초 변환 대기를 피하고 FP32 최적화로 시작합니다. 12개 기준은 설치 비용을 피하기 위한 정책이며 측정된 최적값이라는 뜻은 아닙니다.
+- 같은 실행 환경의 GPU 두 개가 모델·하드웨어·드라이버·Torch·TensorRT·ONNX 해시가 일치하는 가속 파일을 공유합니다. 가속 준비 실패는 로그에 표시하고 원본 FP32로 진행합니다. 최초 변환에는 추가 시간이 걸리며 새 캐글 배치는 새 환경이므로 다시 준비합니다. 사용자가 노트북이나 모델 파일을 직접 다시 올릴 필요는 없습니다.
+- 음향 변환은 기존 잠금 안에서 호출자의 CUDA 스트림으로 실행합니다. TensorRT 프로파일 범위를 벗어나면 해당 구간을 같은 원본 FP32 estimator로 처리하며 대사를 자르거나 계산 단계를 줄이지 않습니다. 가속 결과가 정상인지 기존 유한값·무음 검사로 확인하며 실제 음질 동일성/속도 향상은 아직 실측하지 않았습니다.
+- 코지3에도 코지2의 불필요한 문자 예측 생략, 동일 규칙 샘플링, 구간별 메모리 재사용을 연결했습니다. 화자 준비·발음 계산·음향 대기·파형 계산 시간을 모델별 로그에 표시합니다. 두 모델의 로그 다운로드와 상태·완료 수를 따로 제공합니다.
+- 작업 목록에 ‘중지 화면 열기’를 넣었습니다. 해당 캐글 작업을 열고 실행 중인 버전을 취소해야 실제 GPU가 멈춥니다. SDK CancelKernelSession은 숫자 session ID가 필요하지만 배치 SaveKernel/GetKernelSessionStatus는 이를 반환하지 않습니다. 노트북 ID나 상대 버전 번호를 session ID로 추측하거나 노트북을 삭제하지 않습니다. 사이트 단독 즉시 중지 API가 구현됐다는 의미가 아닙니다.
+- Kaggle의 실제 CANCEL_REQUESTED/CANCEL_ACKNOWLEDGED 상태를 ‘중지 처리 중/중지 완료’로 처리합니다. 이전에는 이 값들을 GPU 대기로 잘못 분류할 수 있었습니다. 중지 후 실제 제공된 결과만 회수하며 저장 전 음성의 보존을 보장하지 않습니다. 완료와 중지가 겹친 경우 유효한 완료 결과를 우선합니다.
+- 새 가속 코드는 새로 제출하는 작업부터 적용됩니다. 이미 실행 중인 작업의 코드는 교체하지 않습니다. 기존 코랩 실행 경로, GPU당 3개 생성+3개 준비, 최종 순번 합치기, MOV 기능은 유지합니다.
+- 요청에 따라 테스트·컴파일 검사·프로젝트 import·로컬 앱 실행·실제 캐글 API 호출·음성 생성은 하지 않습니다. 배포용 노트북을 작성하는 패키징만 실행합니다.
+
+공식 코드 참고:
+https://github.com/QwenAudio/CosyVoice/blob/074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc/cosyvoice/cli/model.py
+https://github.com/QwenAudio/CosyVoice/blob/074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc/cosyvoice/utils/file_utils.py
+https://github.com/Kaggle/kaggle-sdk-python/blob/main/kagglesdk/kernels/types/kernels_api_service.py
+https://github.com/Kaggle/kaggle-sdk-python/blob/main/kagglesdk/kernels/types/kernels_enums.py
 
 ## v2.9.45 · 코랩 유지 + CosyVoice 2·3 캐글 GPU 2개 옵션
 

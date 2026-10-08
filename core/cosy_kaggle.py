@@ -71,6 +71,10 @@ def render_downloads(work_dir, busy=False):
             key='cosy_compute_provider', disabled=busy,
             help='두 방식 모두 이 공유 사이트에서 생성하고 완성된 음성을 받습니다.')
         st.caption('캐글을 한 번 연결하면 이 사이트의 생성 버튼으로 실행하고 MP3도 여기서 받습니다.')
+        st.caption('코지2·3 혼합 대본은 별도 작업 두 개를 동시에 요청하며 로그도 따로 남습니다. '
+                   '실제 동시 실행은 캐글 GPU 할당에 따릅니다. 새 작업은 새 환경에서 필요한 모델 파일을 자동 준비하므로 직접 다시 올릴 필요는 없습니다.')
+        st.caption('모델별 12개 이상 대사에는 TensorRT FP32 가속을 준비합니다. 최초 변환은 추가 시간이 걸리며 '
+                   '적용 여부는 작업 로그의 ‘가속 상태’에 표시됩니다. 미리듣기·짧은 작업은 변환 대기 없이 FP32 최적화로 시작합니다.')
         credentials = st.session_state.get('_kaggle_credentials')
         if credentials:
             st.success('캐글 계정 인증 완료 · ' + credentials['username'])

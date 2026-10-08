@@ -286,8 +286,11 @@ def install_cosy3(app, authorize, root, model):
     def generate(item):
         started = time.monotonic()
         audio, rate = model.generate(**item)
+        timings = {name: round(model.generation_timer[name], 3) for name in (
+            'reference_seconds', 'llm_seconds', 'sampling_seconds', 'acoustic_seconds',
+            'acoustic_wait_seconds')}
         return audio, dict(synthesis_seconds=time.monotonic() - started,
-                           sample_rate=rate, audio_seconds=len(audio) / rate)
+                           sample_rate=rate, audio_seconds=len(audio) / rate, **timings)
 
     install(app, authorize, root, prepare, generate,
             lambda path, audio, metrics: sf.write(path, audio, metrics['sample_rate'], subtype='PCM_16'))

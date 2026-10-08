@@ -30,6 +30,7 @@ from cosy_kaggle_contract import (FORMAT, VERSION, SOURCE_REVISION, MODELS,
 from cosy3_voicebank_catalog import BANK_REVISION, VOICEBANK, ATTRIBUTION
 from cosy_kaggle_queue import PROTOCOL as QUEUE_PROTOCOL, LANES, PREFETCH, LIVE
 from audio_join import copy_pcm_clip, write_pcm_silence
+from cosy_kaggle_acceleration import TRT_VERSION, ONNX_FILE
 
 CODE = Path(__file__).resolve().parent
 RUNTIME = Path('/tmp/voice_studio_kaggle_v1')
@@ -235,7 +236,7 @@ def discover_plan(allowed='auto', preferred=''):
     return found[0]
 
 
-def setup(engines, count):
+def setup(engines, count, item_counts=None):
     devices = gpu_devices(count)
     say('사용할 GPU: ' + ', '.join(f"{row['index']}번 {row['name']}" for row in devices))
     with runtime_lock():
@@ -280,6 +281,22 @@ def setup(engines, count):
             run_command([PYTHON, '-m', 'pip', 'install', '--no-cache-dir', '-r', req,
                          '--build-constraint', constraints], '음성 라이브러리 설치')
             marker.write_text(stamp)
+        # Additional accelerator packages use the same official pinned source
+        # requirements. Do not replace Torch/transformers or reduce precision.
+        # A one-line preview must not wait for a multi-minute engine build.
+        accelerate_engines = {engine for engine in engines
+                              if (item_counts or {}).get(engine, 12) >= 12}
+        trt_marker = RUNTIME / 'tensorrt.ok'
+        trt_ready = trt_marker.is_file() and trt_marker.read_text() == TRT_VERSION
+        if accelerate_engines and not trt_ready:
+            try:
+                run_command([PYTHON, '-m', 'pip', 'install', '--no-cache-dir', '--no-deps',
+                    'tensorrt-cu12==' + TRT_VERSION, 'tensorrt-cu12-bindings==' + TRT_VERSION,
+                    'tensorrt-cu12-libs==' + TRT_VERSION], 'TensorRT FP32 가속 라이브러리 준비')
+                trt_marker.write_text(TRT_VERSION)
+                trt_ready = True
+            except RuntimeError as exc:
+                say('가속 라이브러리를 준비하지 못해 기존 FP32로 진행합니다: ' + str(exc))
         for engine in engines:
             model = MODELS[engine]
             target = RUNTIME / 'models' / engine
@@ -288,9 +305,26 @@ def setup(engines, count):
             code = ('from huggingface_hub import snapshot_download; '
                     f"snapshot_download({model['repo']!r}, revision={model['revision']!r}, "
                     f"local_dir={str(target)!r}, allow_patterns={patterns!r})")
-            run_command([PYTHON, '-c', code], model['label'] + ' 모델 준비 · 첫 실행 때 다운로드')
+            model_stamp = target / '.voice_studio_revision'
+            required = patterns[:-1]
+            cached = (model_stamp.is_file() and model_stamp.read_text() == model['revision']
+                      and all((target / name).is_file() for name in required)
+                      and (target / 'CosyVoice-BlankEN/config.json').is_file())
+            if cached:
+                say('✅ ' + model['label'] + ' · 같은 실행 환경의 모델 파일 재사용')
+            else:
+                run_command([PYTHON, '-c', code], model['label'] + ' 모델 준비 · 새 실행 환경에서 다운로드')
             if not all((target / filename).is_file() for filename in patterns[:-1]):
                 raise RuntimeError(model['label'] + ' 모델 다운로드가 완전하지 않습니다.')
+            model_stamp.write_text(model['revision'])
+            if engine in accelerate_engines and trt_ready and not (target / ONNX_FILE).is_file():
+                try:
+                    code = ('from huggingface_hub import hf_hub_download; '
+                        f"hf_hub_download({model['repo']!r}, filename={ONNX_FILE!r}, "
+                        f"revision={model['revision']!r}, local_dir={str(target)!r})")
+                    run_command([PYTHON, '-c', code], model['label'] + ' 공식 FP32 가속용 모델 준비')
+                except RuntimeError as exc:
+                    say('가속용 파일 준비 실패 · 원본 FP32 모델로 진행: ' + str(exc))
     say('✅ 설치 완료. 음성 생성은 3번에서 시작합니다.')
 
 
@@ -322,8 +356,9 @@ def worker(engine, directory, port):
 
 
 class LocalWorker:
-    def __init__(self, engine, device, folder):
+    def __init__(self, engine, device, folder, accelerate=True):
         self.engine, self.device = engine, device
+        self.accelerate = accelerate
         # Cosy2's gpu.lock is in ROOT.parent; distinct physical GPUs get
         # distinct parents, so an old cross-engine lock cannot serialize them.
         self.root = folder / ('gpu_' + device['index']) / engine
@@ -351,7 +386,8 @@ class LocalWorker:
             TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1',
             OPENBLAS_NUM_THREADS='1', NUMEXPR_NUM_THREADS='1', OMP_WAIT_POLICY='PASSIVE',
             HF_HOME=str(RUNTIME / 'huggingface'), VOICE_STUDIO_PARENT_PID=str(os.getpid()),
-            VOICE_STUDIO_KAGGLE_QUEUE=str(LANES))
+            VOICE_STUDIO_KAGGLE_QUEUE=str(LANES),
+            VOICE_STUDIO_ACCELERATOR='tensorrt_fp32' if self.accelerate else 'off')
         env['PYTHONPATH'] = os.pathsep.join([str(CODE), str(SOURCE), str(SOURCE / 'third_party/Matcha-TTS')])
         libs = [str(path) for path in (RUNTIME / 'venv/lib/python3.10/site-packages/nvidia').glob('*/lib')]
         env['LD_LIBRARY_PATH'] = os.pathsep.join(libs + [env.get('LD_LIBRARY_PATH', '')])
@@ -378,6 +414,7 @@ class LocalWorker:
                  and (data.get('server_version') if self.engine == 'cosyvoice' else data.get('version')) == expected['version'])
         if not ready:
             return False
+        self.acceleration = data.get('acceleration', {})
         state = self.queue_state()
         if state.get('protocol') != QUEUE_PROTOCOL or state.get('lanes') != LANES or state.get('prefetch') != PREFETCH:
             raise RuntimeError('캐글 실행 파일 버전이 다릅니다. 최신 노트북을 사용해주세요.')
@@ -732,6 +769,16 @@ def execute_locked(source, allowed, count):
                     (local.root / 'kaggle_jobs' / (job_id + '.wav')).unlink(missing_ok=True)
                     seconds = float(row.get('generation_wall_seconds', 0))
                     say(f"✅ {progress['done']}/{len(keys)} · GPU {gpu} · {item['index']}번 · {seconds:.1f}초 · GPU당 생성 3개 + 다음 3개 준비")
+                    metrics = row.get('metrics', {})
+                    values = []
+                    for name, label in (('reference_seconds', '화자 준비'), ('llm_seconds', '발음 계산'),
+                            ('acoustic_wait_seconds', '음향 대기'), ('acoustic_seconds', '파형 계산')):
+                        try:
+                            values.append(f'{label} {float(metrics[name]):.1f}초')
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                    if values:
+                        say(f"  ↳ GPU {gpu} · {item['index']}번 · " + ' / '.join(values))
                 except Exception as exc:
                     record_error(local, exc, item['index'])
                 finally:
@@ -750,7 +797,10 @@ def execute_locked(source, allowed, count):
                 continue
             say('\n▶ ' + MODELS[engine]['label'] + ' · 두 GPU에 독립 모델 준비')
             run_folder = RUNTIME / 'runs' / secrets.token_hex(8)
-            workers = [LocalWorker(engine, device, run_folder) for device in devices]
+            accelerate = len(phase) >= 12
+            if not accelerate:
+                say('짧은 작업: TensorRT 최초 변환을 생략하고 기존 FP32 최적화로 바로 준비합니다.')
+            workers = [LocalWorker(engine, device, run_folder, accelerate=accelerate) for device in devices]
             try:
                 for local in workers:
                     local.start()
@@ -760,6 +810,10 @@ def execute_locked(source, allowed, count):
                         if index not in ready and local.health():
                             ready.add(index)
                             say(f"✅ GPU {local.device['index']} 모델 준비 완료 · FP32 · 동시 {LANES}개 + 다음 {PREFETCH}개 준비")
+                            acceleration = local.acceleration
+                            say('  ↳ 가속 상태: ' + acceleration.get('label', 'FP32 기본 계산'))
+                            if acceleration.get('estimator', {}).get('note'):
+                                say('  ↳ 가속 안내: ' + acceleration['estimator']['note'])
                     if time.monotonic() > deadline:
                         raise RuntimeError('모델 준비가 30분을 초과했습니다.\n' + '\n'.join(w.tail() for w in workers))
                     if time.monotonic() - last_report > 30:
@@ -837,7 +891,9 @@ def main():
     source = discover_plan(args.engine, args.plan)
     if args.command == 'setup':
         plan, _ = read_plan(source, args.engine)
-        setup(sorted({item['engine'] for item in plan['items']}), args.gpus)
+        engines = sorted({item['engine'] for item in plan['items']})
+        setup(engines, args.gpus, {engine: sum(item['engine'] == engine for item in plan['items'])
+                                  for engine in engines})
     else:
         raise SystemExit(execute(source, args.engine, args.gpus))
 

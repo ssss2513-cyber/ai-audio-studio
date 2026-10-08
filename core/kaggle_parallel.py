@@ -176,13 +176,18 @@ def _coordinate(work_dir, state, credentials, archive, submit):
                      message='코지2·코지3 동시 생성 완료 · 대본 순서대로 합친 MP3 한 파일이 준비되었습니다.')
     else:
         uncertain = any(child and child.get('status') == 'needs_check' for child in children.values())
+        cancelled = any(child and child.get('status') == 'cancelled' for child in children.values())
         errors = []
         for engine, (label, _) in ENGINES.items():
             child = children.get(engine) or {}
             if child.get('status') != 'complete':
                 errors.append(label + ': ' + (start_errors.get(engine) or child.get('error') or '작업을 완료하지 못했습니다.'))
-        state.update(status='needs_check' if uncertain else 'failed', error='\n\n'.join(errors),
-            message='완료된 모델의 음성은 보관했습니다. 실패한 작업을 확인한 뒤 이어서 생성할 수 있습니다.')
+        if cancelled and not uncertain:
+            state.update(status='cancelled', error='',
+                message='코지2·3 작업 종료 · 중지된 모델이 있어 전체 합치기를 완료하지 않았습니다. 받은 결과는 보관합니다.')
+        else:
+            state.update(status='needs_check' if uncertain else 'failed', error='\n\n'.join(errors),
+                message='완료된 모델의 음성은 보관했습니다. 실패한 작업을 확인한 뒤 이어서 생성할 수 있습니다.')
     jobs._save(work_dir, state)
 
 

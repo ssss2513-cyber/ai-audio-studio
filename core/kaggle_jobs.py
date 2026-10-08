@@ -23,8 +23,9 @@ from . import kaggle_history
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = threading.RLock()
 WORKERS = {}
-ACTIVE = {'uploading', 'dataset_ready', 'submitting', 'queued', 'running', 'receiving', 'checking'}
-TERMINAL_REMOTE = {'complete', 'error', 'failed', 'canceled', 'cancelled'}
+ACTIVE = {'uploading', 'dataset_ready', 'submitting', 'queued', 'running', 'receiving', 'checking', 'stopping'}
+CANCELED_REMOTE = {'canceled', 'cancelled', 'cancel_acknowledged'}
+TERMINAL_REMOTE = {'complete', 'error', 'failed', *CANCELED_REMOTE}
 REF_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/voice-studio-[a-z0-9-]+$')
 OPERATION_LABELS = {'auth': '계정 연결', 'create_dataset': '대본 전송',
     'dataset_status': '대본 준비 확인', 'push': '생성 요청',
@@ -528,13 +529,20 @@ def _monitor(work_dir, state, credentials):
         if status in TERMINAL_REMOTE:
             state.update(status='receiving', error='', message='캐글 결과를 공유 사이트로 가져오고 있습니다.')
             _save(work_dir, state)
-            for attempt in range(6):
+            attempts = 1 if status in CANCELED_REMOTE else 6
+            for attempt in range(attempts):
                 try:
                     _receive(work_dir, state, credentials, status, response.get('error', ''),
-                        wait_for_files=attempt < 5)
+                        wait_for_files=attempt < attempts - 1)
                     return
                 except KaggleError as exc:
                     _remember_error(state, exc)
+                    if status in CANCELED_REMOTE:
+                        state.update(status='cancelled', error='',
+                            message='캐글에서 중지 완료를 확인했습니다. 종료된 실행의 결과 파일은 받지 못했습니다.',
+                            output_error=_error_message(exc))
+                        _save(work_dir, state)
+                        return
                     # Kaggle can report completion before its output API is
                     # ready. Retry downloading; never rerun synthesis.
                     if not isinstance(exc, KaggleOutputPending) and exc.http_status not in (404, 409, 429, 500, 502, 503, 504):
@@ -550,6 +558,12 @@ def _monitor(work_dir, state, credentials):
                     state.update(message='캐글에서 결과 파일을 정리 중입니다. 결과 수신을 자동으로 다시 확인합니다.')
                     _save(work_dir, state)
                     threading.Event().wait(20)
+        if status == 'cancel_requested':
+            state.update(status='stopping', error='',
+                message='캐글이 중지 요청을 처리 중입니다. 실제 종료 확인을 기다립니다.')
+            _save(work_dir, state)
+            threading.Event().wait(5)
+            continue
         message = '캐글 GPU 배정을 기다리고 있습니다.'
         if status == 'running':
             if 'MP3 하나로 저장' in logs:
@@ -572,8 +586,12 @@ def _receive(work_dir, state, credentials, remote_status, remote_error, wait_for
     if not manifest.is_file():
         if wait_for_files:
             raise KaggleOutputPending('캐글 결과 목록에 완료 정보가 아직 반영되지 않았습니다.', operation='pull')
-        state.update(status='failed', error=remote_error or
-            '캐글 실행이 결과를 저장하기 전에 종료됐습니다. 아래 실행 기록과 캐글 작업 링크를 확인해주세요.')
+        if remote_status in CANCELED_REMOTE:
+            state.update(status='cancelled', error='',
+                message='캐글 중지 완료 · 이 실행은 결과 파일을 저장하기 전에 종료됐습니다.')
+        else:
+            state.update(status='failed', error=remote_error or
+                '캐글 실행이 결과를 저장하기 전에 종료됐습니다. 아래 실행 기록과 캐글 작업 링크를 확인해주세요.')
         _save(work_dir, state)
         return
     info = json.loads(manifest.read_text(encoding='utf-8'))
@@ -625,8 +643,12 @@ def _receive(work_dir, state, credentials, remote_status, remote_error, wait_for
                 ('vtt', 'subtitles.vtt'), ('main_zip', 'complete_audio.zip'))})
     else:
         errors = '; '.join(str(row.get('message', '')) for row in info.get('errors', []) if isinstance(row, dict))
-        state.update(status='failed', error=info.get('error') or errors or remote_error or
-            '캐글 작업이 끝나기 전에 중단됐습니다. 저장된 완료분이 있으면 다음 생성에서 이어서 사용합니다.')
+        if remote_status in CANCELED_REMOTE:
+            state.update(status='cancelled', error='', message='캐글 중지 완료 · '
+                + ('이어하기 파일을 보관했습니다.' if resume.is_file() else '저장된 이어하기 파일이 없습니다.'))
+        else:
+            state.update(status='failed', error=info.get('error') or errors or remote_error or
+                '캐글 작업이 끝나기 전에 중단됐습니다. 저장된 완료분이 있으면 다음 생성에서 이어서 사용합니다.')
     _save(work_dir, state)
 
 

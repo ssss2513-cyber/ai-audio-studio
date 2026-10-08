@@ -299,7 +299,7 @@ def serve():
             model_revision=MODEL_REVISION, bank_revision=BANK_REVISION, ready=True,
             gpu=model.gpu, precision='FP32', sample_rate=model.sample_rate,
             voice_count=len(VOICEBANK), voices=VOICEBANK, gpu_concurrency=3 if kaggle_queue else 1,
-            prefetch=3 if kaggle_queue else 0, acoustic_concurrency=1,
+            prefetch=3 if kaggle_queue else 0, acoustic_concurrency=1, acceleration=model.acceleration,
             queued=pending.qsize(), max_requests=6 if kaggle_queue else 4)
 
     async def body(request, maximum):

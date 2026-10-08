@@ -8,7 +8,7 @@ import zlib
 ROOT = Path(__file__).resolve().parent
 SOURCES = ('cosy_kaggle_runner.py', 'cosy_kaggle_contract.py', 'colab_server.py',
            'cosy3_colab_server.py', 'cosy3_model.py', 'cosy3_voicebank_catalog.py',
-           'cosy_kaggle_queue.py', 'audio_join.py')
+           'cosy_kaggle_queue.py', 'cosy_kaggle_acceleration.py', 'audio_join.py')
 payload = json.dumps({name: (ROOT / name).read_text(encoding='utf-8') for name in SOURCES},
                      ensure_ascii=False).encode()
 encoded = base64.b64encode(zlib.compress(payload, 9)).decode()
@@ -113,7 +113,7 @@ for engine, title, filename in (
     ('cosyvoice3', 'CosyVoice 3', 'CosyVoice3_Kaggle_DualGPU.ipynb'),
     ('auto', 'CosyVoice 2·3 혼합 대본', 'CosyVoice2_3_Kaggle_DualGPU.ipynb'),
 ):
-    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.3
+    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.4
 
 기존 코랩은 계속 사용할 수 있습니다. 이 노트북은 **캐글에서 대본 전체를 생성하는 추가 옵션**입니다.
 
@@ -134,6 +134,11 @@ GPU 2개인 작업 하나에서 최대 **6개 생성 + 다음 6개 준비**입�
 공유 사이트 v2.9.55의 혼합 생성 버튼은 코지2·코지3를 별도 캐글 작업으로 동시에 제출합니다.
 각 작업은 GPU 2개를 요청하고, 원본 WAV를 사이트에서 대본 순번대로 합쳐 MP3를 한 번만 만듭니다.
 화자·스타일·속도·참고 음성과 기존 모델의 FP32 및 생성 설정을 유지합니다.
+모델별 남은 대사 12개 이상은 TensorRT FP32 가속 엔진을 준비합니다. 첫 변환에는 추가 시간이 걸리며 같은 실행 환경의 두 GPU가 가속 파일을 공유합니다.
+미리듣기처럼 남은 대사가 12개 미만인 작업은 엔진 변환을 생략하고 FP32 최적화로 시작합니다.
+가속을 준비할 수 없으면 이유를 표시하고 원본 FP32 계산으로 진행합니다. 로그의 ‘가속 상태’로 실제 적용 여부를 확인하세요.
+대사별로 화자 준비·발음 계산·음향 대기·파형 계산 시간을 따로 표시합니다.
+새 캐글 배치 실행은 별도 환경이므로 모델과 가속 파일을 다시 준비합니다. 파일을 직접 다시 올릴 필요는 없습니다.
 합칠 때 값이 갑자기 끊기는 음성의 시작·끝 최대 2ms만 완만하게 연결합니다.
 원본 대사를 자르거나 겹치지 않고 대사 간격·전체 길이·자막 시간을 유지합니다.
 
@@ -154,7 +159,7 @@ GPU 2개인 작업 하나에서 최대 **6개 생성 + 다음 6개 준비**입�
     notebook = dict(cells=cells, metadata={
         'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
         'language_info': {'name': 'python'},
-        'voice_studio': {'version': '1.0.3', 'engine': engine, 'gpu_count': 2,
+        'voice_studio': {'version': '1.0.4', 'engine': engine, 'gpu_count': 2,
                          'concurrency_per_gpu': 3, 'prefetch_per_gpu': 3}}, nbformat=4, nbformat_minor=4)
     (ROOT / filename).write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
     print('작성: ' + filename)

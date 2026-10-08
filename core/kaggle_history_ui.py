@@ -15,7 +15,9 @@ KST = timezone(timedelta(hours=9))
 STATUS = {'uploading': '대본 전송', 'dataset_ready': '대본 준비', 'submitting': 'GPU 요청',
     'queued': 'GPU 배정 대기', 'running': '캐글 실행 중', 'receiving': '결과 수신·합치기',
     'checking': '기존 작업 확인 중', 'needs_check': '상태 확인 필요', 'failed': '실패·중단',
-    'complete': '완료', 'canceled': '취소', 'cancelled': '취소'}
+    'complete': '완료', 'canceled': '중지 완료', 'cancelled': '중지 완료',
+    'stopping': '캐글 중지 처리 중', 'cancel_requested': '캐글 중지 요청됨',
+    'cancel_acknowledged': '캐글 중지 완료'}
 
 
 def _time(value):
@@ -135,6 +137,36 @@ def render_job_link(state, label='캐글 원본 작업 열기'):
         st.code(ref, language=None)
 
 
+def render_stop_controls(state):
+    """Open the exact job's native stop control; never pretend this cancels it.
+
+    The official SDK's cancel operation requires a numeric kernel_session_id.
+    SaveKernel/GetKernelSessionStatus do not provide that identity for batch
+    pushes. A notebook ID or relative version number is NOT a session ID.
+    Do not guess, delete the notebook, or mark local polling as GPU shutdown.
+    """
+    children = state.get('children') if state.get('kind') == 'parallel_cosy' else None
+    rows = list((children or {}).items()) if children is not None else [('', state)]
+    shown = False
+    credentials = st.session_state.get('_kaggle_credentials') or {}
+    for engine, child in rows:
+        if not child or child.get('status') not in jobs.ACTIVE | {'needs_check'}:
+            continue
+        ref = child.get('ref', '')
+        if not jobs.REF_PATTERN.fullmatch(ref) or child.get('submission') in ('not_sent', 'not_created'):
+            continue
+        if credentials and ref.split('/')[0].lower() != credentials.get('username', '').lower():
+            continue
+        label = {'cosyvoice': '코지2', 'cosyvoice3': '코지3'}.get(engine, '현재 작업')
+        st.link_button('⏹ ' + label + ' 중지 화면 열기', 'https://www.kaggle.com/code/' + ref,
+                       use_container_width=True)
+        shown = True
+    if shown:
+        st.caption('위 버튼으로 해당 캐글 작업을 연 뒤, 실행 중인 버전을 취소하세요. '
+                   '링크를 여는 것만으로는 GPU가 멈추지 않습니다. 두 모델을 모두 멈추려면 각각 취소하세요. '
+                   '사이트는 실제 중지 상태를 확인해 표시합니다. 강제 종료 시 저장 전 음성은 남지 않을 수 있습니다.')
+
+
 def _details(state, key):
     diagnostic = state.get('diagnostic') or {}
     reason = error_text(state)
@@ -147,6 +179,7 @@ def _details(state, key):
             saved_file_download('⬇️ 이 미리듣기 MP3 받기', str(audio_path),
                 file_name='preview.mp3', mime='audio/mpeg', key=key + '_preview_audio')
     render_record_download(state, key)
+    render_stop_controls(state)
     if diagnostic.get('stage') or diagnostic.get('operation'):
         stage = diagnostic.get('stage') or diagnostic['operation']
         code = diagnostic.get('http_status')
@@ -158,6 +191,13 @@ def _details(state, key):
     for engine, child in (state.get('children') or {}).items():
         if child:
             render_job_link(child, ('코지2' if engine == 'cosyvoice' else '코지3') + ' 캐글 작업 열기')
+            render_record_download(child, key + '_' + engine)
+    if state.get('children'):
+        st.dataframe([{'모델': '코지2' if engine == 'cosyvoice' else '코지3',
+            '상태': STATUS.get(child.get('status'), child.get('status', '')),
+            '완료': f"{child.get('done', 0)}/{child.get('total', 0)}개"}
+            for engine, child in state['children'].items() if child],
+            hide_index=True, use_container_width=True)
     with st.expander('단계별 이력·오류·실행 로그'):
         for label, detail in [('현재 오류 응답', diagnostic),
                               ('최초 생성 요청 오류', state.get('submission_diagnostic'))]:

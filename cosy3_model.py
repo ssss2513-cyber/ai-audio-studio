@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 import unicodedata
 
 from cosy3_voicebank_catalog import VOICEBANK, VOICE_REPO, VOICE_REVISION
@@ -69,16 +70,28 @@ class Cosy3Model:
         self.cache = OrderedDict()
         self.gpu = torch.cuda.get_device_name(0)
         self.kaggle_parallel = os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3'
+        self.acceleration = {'label': 'FP32 기본 계산'}
+        self.generation_timer = None
         if self.kaggle_parallel:
             # Same non-streaming tts/token2wav path as the pinned upstream
             # CosyVoice3Model (inherits CosyVoice2Model.tts). Keep the LLM's
             # caches per UUID and protect the shared flow/vocoder until CUDA
             # completes. Each caller owns its own CUDA stream below.
-            from colab_server import install_offline_cache_reuse
+            from colab_server import (install_offline_cache_reuse,
+                                      configure_fp32_acceleration, install_generation_timer)
+            from cosy_kaggle_acceleration import install as install_kaggle_acceleration
+            import inspect
             if (type(self.model.model).__name__ != 'CosyVoice3Model'
                     or self.model.model.fp16 or hasattr(self.model.model.llm, 'vllm')):
                 raise RuntimeError('캐글 병렬 생성은 고정된 CosyVoice 3 FP32 모델이 필요합니다.')
-            install_offline_cache_reuse(self.model)
+            source = Path(inspect.getfile(CosyVoice3)).resolve().parents[2]
+            self.acceleration = configure_fp32_acceleration(self.model, source=source, cosy3=True)
+            if not self.acceleration.get('memory_cache'):
+                install_offline_cache_reuse(self.model)
+            self.acceleration['estimator'] = install_kaggle_acceleration(
+                self.model, model_dir, source, Path(model_dir).parent.parent / 'acceleration_cache')
+            self.acceleration['label'] += ' · ' + self.acceleration['estimator']['engine']
+            self.generation_timer = install_generation_timer(self.model)
             self.model.model.llm_context = nullcontext()
             torch.cuda.synchronize()
 
@@ -119,6 +132,9 @@ class Cosy3Model:
             return self._generate(text, voice, style=style, speed=speed, ref_path=ref_path,
                                   prompt_text=prompt_text, progress=progress)
         import torch
+        for key in ('llm_seconds', 'sampling_seconds', 'acoustic_seconds', 'acoustic_wait_seconds',
+                    'reference_seconds'):
+            self.generation_timer[key] = 0.0
         stream = torch.cuda.Stream(device=0)
         stream.wait_stream(torch.cuda.default_stream(0))
         with torch.cuda.stream(stream), torch.inference_mode():
@@ -145,7 +161,10 @@ class Cosy3Model:
         else:
             reference = self.reference(voice)
             prompt_text = ''  # cross-language: never pair an invented transcript.
+        reference_started = time.monotonic()
         prepared, cached = self.conditioning(reference, prompt_text)
+        if self.generation_timer is not None:
+            self.generation_timer['reference_seconds'] += time.monotonic() - reference_started
         parts = split_text(text, self.model.frontend.tokenizer)
         outputs = []
         with torch.inference_mode():

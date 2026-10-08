@@ -1069,6 +1069,10 @@ def main():
     """, unsafe_allow_html=True)
 
     st.caption("현재 적용 버전: " + APP_VERSION)
+    # A regular button reruns the page while preserving this session. The
+    # hosted viewer menu may not expose Streamlit's developer Rerun command.
+    st.button("🔄 화면·업데이트 새로 표시", key="refresh_app_view",
+              help="현재 대본과 설정을 유지하면서 화면을 다시 표시합니다. 새 음성 생성은 요청하지 않습니다.")
 
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)

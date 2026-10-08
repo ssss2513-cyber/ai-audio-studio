@@ -28,6 +28,7 @@ import zipfile
 from cosy_kaggle_contract import (FORMAT, VERSION, SOURCE_REVISION, MODELS,
     MAX_ITEMS, MAX_REFERENCE_BYTES, MAX_REFERENCES_BYTES, MAX_PLAN_BYTES)
 from cosy3_voicebank_catalog import BANK_REVISION, VOICEBANK, ATTRIBUTION
+from cosy_kaggle_queue import PROTOCOL as QUEUE_PROTOCOL, LANES, PREFETCH, LIVE
 
 CODE = Path(__file__).resolve().parent
 RUNTIME = Path('/tmp/voice_studio_kaggle_v1')
@@ -326,7 +327,8 @@ class LocalWorker:
         # distinct parents, so an old cross-engine lock cannot serialize them.
         self.root = folder / ('gpu_' + device['index']) / engine
         self.root.mkdir(parents=True, exist_ok=True)
-        self.ref_ids, self.uploaded = {}, set()
+        self.uploaded, self.inflight = set(), {}
+        self.stopped = False
         self.process = None
         self.log = None
         self.session = None
@@ -347,7 +349,8 @@ class LocalWorker:
             COSY_ACCESS_TOKEN=token, PYTHONUNBUFFERED='1', MPLBACKEND='Agg',
             TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1',
             OPENBLAS_NUM_THREADS='1', NUMEXPR_NUM_THREADS='1', OMP_WAIT_POLICY='PASSIVE',
-            HF_HOME=str(RUNTIME / 'huggingface'), VOICE_STUDIO_PARENT_PID=str(os.getpid()))
+            HF_HOME=str(RUNTIME / 'huggingface'), VOICE_STUDIO_PARENT_PID=str(os.getpid()),
+            VOICE_STUDIO_KAGGLE_QUEUE=str(LANES))
         env['PYTHONPATH'] = os.pathsep.join([str(CODE), str(SOURCE), str(SOURCE / 'third_party/Matcha-TTS')])
         libs = [str(path) for path in (RUNTIME / 'venv/lib/python3.10/site-packages/nvidia').glob('*/lib')]
         env['LD_LIBRARY_PATH'] = os.pathsep.join(libs + [env.get('LD_LIBRARY_PATH', '')])
@@ -370,8 +373,14 @@ class LocalWorker:
         except Exception:
             return False
         expected = MODELS[self.engine]
-        return (data.get('ready') is True and data.get('service') == expected['service']
-                and (data.get('server_version') if self.engine == 'cosyvoice' else data.get('version')) == expected['version'])
+        ready = (data.get('ready') is True and data.get('service') == expected['service']
+                 and (data.get('server_version') if self.engine == 'cosyvoice' else data.get('version')) == expected['version'])
+        if not ready:
+            return False
+        state = self.queue_state()
+        if state.get('protocol') != QUEUE_PROTOCOL or state.get('lanes') != LANES or state.get('prefetch') != PREFETCH:
+            raise RuntimeError('캐글 실행 파일 버전이 다릅니다. 최신 노트북을 사용해주세요.')
+        return True
 
     def tail(self):
         path = self.root / 'server.log'
@@ -402,80 +411,45 @@ class LocalWorker:
                 raise RuntimeError(f'음성 요청 실패 HTTP {response.status_code}: ' + redact(response.text[:1200]))
             return response.json()
 
-    def generate(self, item, assets, destination):
-        if self.engine == 'cosyvoice':
-            return self.generate_two(item, assets, destination)
-        return self.generate_three(item, assets, destination)
-
-    def generate_two(self, item, assets, destination):
-        fields = {name: item.get(name, '') for name in ('text', 'prompt_text', 'style_instruction')}
-        fields.update(speed=item['speed'], audio_format='wav')
-        reference_key = (item['reference_id'], item['prompt_text'], item.get('style_instruction', ''))
-        cached = self.ref_ids.get(reference_key)
-        def post(with_reference):
-            data = dict(fields)
-            files = None
-            if with_reference:
-                files = {'reference': ('reference.audio', assets[item['reference_id']], 'application/octet-stream')}
-            else:
-                data['reference_id'] = cached
-            return self.session.post(self.base + '/synthesize', data=data, files=files,
-                timeout=(10, 1800), allow_redirects=False, stream=True)
-        response = post(not bool(cached))
-        if cached and response.status_code == 428:
-            with response:
-                detail = response.json().get('detail', {})
-            if (not isinstance(detail, dict) or detail.get('code') != 'reference_required'
-                    or detail.get('synthesis_started') is not False):
-                raise RuntimeError('참고 음성 캐시 상태를 확인할 수 없어 중단했습니다.')
-            response = post(True)  # 428 is explicitly before synthesis.
-        with response:
-            if not response.ok:
-                raise RuntimeError(f'음성 요청 실패 HTTP {response.status_code}: ' + redact(response.text[:1200]))
-            ref = response.headers.get('X-Reference-ID', '')
-            if ref:
-                self.ref_ids[reference_key] = ref
-            temp = destination.with_suffix('.part.wav')
-            size = 0
-            with temp.open('wb') as out:
-                for chunk in response.iter_content(256 * 1024):
-                    size += len(chunk)
-                    if size > 512 * 1024 * 1024:
-                        raise RuntimeError('한 대사의 결과가 비정상적으로 커서 저장을 중단했습니다.')
-                    out.write(chunk)
-            metrics = {key: response.headers.get(header, '') for key, header in
-                (('synthesis_seconds', 'X-Synthesis-Seconds'), ('reference_seconds', 'X-Reference-Seconds'))}
-        wav_info(temp)
-        os.replace(temp, destination)
-        return metrics
-
-    def generate_three(self, item, assets, destination):
+    def submit(self, item, key, assets):
         ref = item.get('reference_id', '')
         if ref and ref not in self.uploaded:
-            self.checked_json(self.session.post(self.base + '/references/' + ref, data=assets[ref],
+            self.checked_json(self.session.post(self.base + '/kaggle/references/' + ref, data=assets[ref],
                 timeout=(10, 90), allow_redirects=False))
             self.uploaded.add(ref)
-        payload = {key: item[key] for key in ('text', 'voice', 'speed', 'style', 'reference_id', 'prompt_text')
-                   if key in item}
         job_id = secrets.token_hex(16)
-        url = self.base + '/jobs/' + job_id
-        status = self.checked_json(self.session.post(url, json=payload, timeout=(10, 30), allow_redirects=False))
-        started = time.monotonic()
-        while status.get('status') != 'done':
-            if status.get('status') in ('error', 'cancelled'):
-                raise RuntimeError(status.get('message', status['status']))
-            if time.monotonic() - started > 1800 or self.process.poll() is not None:
-                raise RuntimeError('음성 계산이 중단되었거나 한 대사가 30분을 초과했습니다.')
-            time.sleep(0.2)
-            status = self.checked_json(self.session.get(url, timeout=(10, 30), allow_redirects=False))
-        # The files are already on this VM; no external upload/download per line.
-        source = self.root / 'jobs' / (job_id + '.wav')
+        # Remember the identity before submission: an ambiguous response must
+        # never resubmit the same line under another ID.
+        self.inflight[job_id] = dict(item=item, key=key, status='queued', submitted=time.monotonic())
+        try:
+            status = self.checked_json(self.session.post(self.base + '/kaggle/jobs/' + job_id,
+                json=item, timeout=(10, 30), allow_redirects=False))
+        except Exception:
+            status = self.queue_state().get('jobs', {}).get(job_id)
+            if status is None:
+                self.inflight.pop(job_id, None)
+                raise
+        self.inflight[job_id]['status'] = status['status']
+
+    def queue_state(self):
+        if self.process.poll() is not None:
+            raise RuntimeError('캐글 음성 서버가 종료됐습니다.\n' + self.tail())
+        return self.checked_json(self.session.get(self.base + '/kaggle/state',
+            params={'ids': ','.join(self.inflight)}, timeout=(5, 30), allow_redirects=False))
+
+    def stop_queue(self):
+        if not self.stopped:
+            self.checked_json(self.session.post(self.base + '/kaggle/stop', timeout=(5, 30), allow_redirects=False))
+            self.stopped = True
+
+    def collect(self, job_id, destination):
+        # The writer has committed a lossless WAV locally. There is no remote
+        # audio transfer or model wait on this path.
+        source = self.root / 'kaggle_jobs' / (job_id + '.wav')
         wav_info(source)
         temp = destination.with_suffix('.part.wav')
         shutil.copyfile(source, temp)
         os.replace(temp, destination)
-        source.unlink(missing_ok=True)
-        return {'synthesis_seconds': status.get('synthesis_seconds', '')}
 
 
 def wav_info(path):
@@ -506,6 +480,10 @@ def sha_file(path):
 def item_key(item, nonce=''):
     source_files = ['cosy_kaggle_contract.py', 'colab_server.py'] if item['engine'] == 'cosyvoice' else [
         'cosy_kaggle_contract.py', 'cosy3_colab_server.py', 'cosy3_model.py', 'cosy3_voicebank_catalog.py']
+    source_files.append('cosy_kaggle_queue.py')
+    # Cosy3's Kaggle-only adapter reuses the protected FP32 offline path.
+    if item['engine'] == 'cosyvoice3':
+        source_files.append('colab_server.py')
     fingerprint = {name: sha_file(CODE / name) for name in source_files}
     return digest(canonical(dict(item=item, model=MODELS[item['engine']], source=SOURCE_REVISION,
         precision='FP32', code=fingerprint, generation_nonce=nonce)))
@@ -655,7 +633,8 @@ def execute_locked(source, allowed, count):
     pending = [(item, key) for item, key in zip(plan['items'], keys) if not results[item['index']]]
     progress_lock, stop = threading.RLock(), threading.Event()
     progress = dict(status='preparing', total=len(keys), done=sum(bool(p) for p in results.values()),
-        gpu_count=len(devices), gpus={}, errors=[], output=str(folder), started=time.time())
+        gpu_count=len(devices), gpu_concurrency=LANES, prefetch_per_gpu=PREFETCH,
+        gpus={}, errors=[], output=str(folder), started=time.time())
     atomic_json(folder / 'progress.json', progress)
     atomic_json(OUTPUTS / 'latest.json', dict(folder=str(folder), status=progress['status']))
     say(f"전체 {len(keys)}개 · 재사용 {progress['done']}개 · 새로 생성 {len(pending)}개 · GPU {len(devices)}개")
@@ -668,41 +647,107 @@ def execute_locked(source, allowed, count):
         stop.set()
         say('중단 요청: 새 대사는 시작하지 않습니다. 계산 중인 대사를 저장한 뒤 이어하기 파일을 만듭니다.')
     signal.signal(signal.SIGINT, interrupt)
-    def process_queue(local, tasks):
-        gpu = local.device['index']
-        while not stop.is_set():
-            try:
-                item, key = tasks.get_nowait()
-            except queue.Empty:
-                return
-            started = time.monotonic()
-            with progress_lock:
-                progress['gpus'][gpu] = dict(status='generating', index=item['index'], speaker=item['speaker'])
-                atomic_json(folder / 'progress.json', progress)
-            say(f"▶ GPU {gpu} · {item['index']}번 · {item['speaker']}")
-            try:
-                path = clips / (key + '.wav')
-                metrics = local.generate(item, assets, path)
-                info = wav_info(path)
-                atomic_json(clips / (key + '.json'), dict(key=key, sha256=sha_file(path), **info,
-                    engine=item['engine'], physical_gpu=gpu, metrics=metrics))
-                with progress_lock:
+    def process_workers(workers, tasks):
+        failed_workers = set()
+
+        def record_error(local, message, index=None):
+            gpu = local.device['index']
+            progress['errors'].append(dict(index=index, gpu=gpu, message=redact(message)))
+            say(f'❌ GPU {gpu} · 중단: {redact(message)}')
+            stop.set()
+
+        while True:
+            finished = []
+            for local in workers:
+                if local in failed_workers:
+                    continue
+                gpu = local.device['index']
+                try:
+                    if stop.is_set():
+                        local.stop_queue()
+                    state = local.queue_state()
+                    progress['gpus'][gpu] = {key: state[key] for key in
+                        ('lanes', 'prefetch', 'generating', 'prepared', 'preparing', 'saving', 'stopping')}
+                    if state['stopping']:
+                        stop.set()
+                    for job_id, task in list(local.inflight.items()):
+                        row = state['jobs'].get(job_id)
+                        if row is None:
+                            raise RuntimeError(f"{task['item']['index']}번 대사의 서버 접수를 확인할 수 없습니다.")
+                        task['status'] = row['status']
+                        if row['status'] == 'done':
+                            finished.append((local, job_id, task, row))
+                        elif row['status'] in ('error', 'cancelled'):
+                            if row['status'] == 'error':
+                                record_error(local, row.get('message', '음성 생성 오류'), task['item']['index'])
+                            local.inflight.pop(job_id)
+                        elif time.monotonic() - task['submitted'] > 1800:
+                            raise RuntimeError(f"{task['item']['index']}번 대사가 30분 동안 완료되지 않았습니다.")
+                except Exception as exc:
+                    record_error(local, exc)
+                    failed_workers.add(local)
+                    # Preserve results already committed by the independent
+                    # writer, even if the private HTTP endpoint has stopped.
+                    seen = {job_id for worker, job_id, _, _ in finished if worker is local}
+                    for job_id, task in list(local.inflight.items()):
+                        try:
+                            saved = json.loads((local.root / 'kaggle_jobs' / (job_id + '.json')).read_text())
+                            if saved.get('status') == 'done' and job_id not in seen:
+                                finished.append((local, job_id, task, saved))
+                        except (OSError, ValueError):
+                            pass
+                    local.inflight.clear()
+
+            # Round-robin admission gives both GPUs work even for a short
+            # script. Keep three executing + three prepared on each server.
+            # Refill BEFORE copying completed WAVs or updating their receipts.
+            if not stop.is_set():
+                while not tasks.empty():
+                    admitted = False
+                    for local in workers:
+                        if stop.is_set():
+                            break
+                        live = sum(task['status'] in LIVE for task in local.inflight.values())
+                        if live >= LANES + PREFETCH or len(local.inflight) >= 24:
+                            continue
+                        try:
+                            item, key = tasks.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            local.submit(item, key, assets)
+                            admitted = True
+                        except Exception as exc:
+                            record_error(local, exc, item['index'])
+                            break
+                    if stop.is_set() or not admitted:
+                        break
+
+            for local, job_id, task, row in finished:
+                item, key = task['item'], task['key']
+                gpu = local.device['index']
+                try:
+                    path = clips / (key + '.wav')
+                    local.collect(job_id, path)
+                    info = wav_info(path)
+                    atomic_json(clips / (key + '.json'), dict(key=key, sha256=sha_file(path), **info,
+                        engine=item['engine'], physical_gpu=gpu, metrics=row.get('metrics', {})))
                     results[item['index']] = path
                     progress['done'] += 1
-                    progress['gpus'][gpu] = dict(status='ready', last_index=item['index'])
-                    atomic_json(folder / 'progress.json', progress)
-                    say(f"✅ {progress['done']}/{len(keys)} · GPU {gpu} · {item['index']}번 · {time.monotonic() - started:.1f}초")
-            except Exception as exc:
-                with progress_lock:
-                    progress['errors'].append(dict(index=item['index'], gpu=gpu, message=redact(exc)))
-                    progress['gpus'][gpu] = dict(status='error', index=item['index'])
-                    atomic_json(folder / 'progress.json', progress)
-                say(f"❌ {item['index']}번 중단: {redact(exc)}")
-                stop.set()
-            finally:
-                tasks.task_done()
-            # Pull again immediately. No fixed chunks, round barriers or
-            # waiting for the other GPU to finish its current line.
+                    (local.root / 'kaggle_jobs' / (job_id + '.wav')).unlink(missing_ok=True)
+                    seconds = float(row.get('generation_wall_seconds', 0))
+                    say(f"✅ {progress['done']}/{len(keys)} · GPU {gpu} · {item['index']}번 · {seconds:.1f}초 · GPU당 생성 3개 + 다음 3개 준비")
+                except Exception as exc:
+                    record_error(local, exc, item['index'])
+                finally:
+                    local.inflight.pop(job_id, None)
+            with progress_lock:
+                atomic_json(folder / 'progress.json', progress)
+            if not any(local.inflight for local in workers) and (stop.is_set() or tasks.empty()):
+                break
+            # Polling reports progress only: the server refills a compute lane
+            # immediately from its ready queue, independently of this interval.
+            time.sleep(0.2)
     try:
         for engine in MODELS:
             phase = [(item, key) for item, key in pending if item['engine'] == engine]
@@ -719,7 +764,7 @@ def execute_locked(source, allowed, count):
                     for index, local in enumerate(workers):
                         if index not in ready and local.health():
                             ready.add(index)
-                            say(f"✅ GPU {local.device['index']} 모델 준비 완료 · FP32")
+                            say(f"✅ GPU {local.device['index']} 모델 준비 완료 · FP32 · 동시 {LANES}개 + 다음 {PREFETCH}개 준비")
                     if time.monotonic() > deadline:
                         raise RuntimeError('모델 준비가 30분을 초과했습니다.\n' + '\n'.join(w.tail() for w in workers))
                     if time.monotonic() - last_report > 30:
@@ -735,12 +780,7 @@ def execute_locked(source, allowed, count):
                 for item in phase:
                     tasks.put_nowait(item)
                 progress['status'] = 'generating'
-                threads = [threading.Thread(target=process_queue, args=(local, tasks), daemon=True) for local in workers]
-                for thread in threads:
-                    thread.start()
-                while any(thread.is_alive() for thread in threads):
-                    for thread in threads:
-                        thread.join(timeout=0.2)
+                process_workers(workers, tasks)
             finally:
                 for local in workers:
                     local.close()

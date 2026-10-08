@@ -1,7 +1,9 @@
 """CosyVoice 3 reference bank and official FP32 inference, used only in Colab."""
 from collections import OrderedDict
+from contextlib import nullcontext
 import hashlib
 import math
+import os
 from pathlib import Path
 import re
 import threading
@@ -66,6 +68,19 @@ class Cosy3Model:
         self.reference_lock = threading.RLock()
         self.cache = OrderedDict()
         self.gpu = torch.cuda.get_device_name(0)
+        self.kaggle_parallel = os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3'
+        if self.kaggle_parallel:
+            # Same non-streaming tts/token2wav path as the pinned upstream
+            # CosyVoice3Model (inherits CosyVoice2Model.tts). Keep the LLM's
+            # caches per UUID and protect the shared flow/vocoder until CUDA
+            # completes. Each caller owns its own CUDA stream below.
+            from colab_server import install_offline_cache_reuse
+            if (type(self.model.model).__name__ != 'CosyVoice3Model'
+                    or self.model.model.fp16 or hasattr(self.model.model.llm, 'vllm')):
+                raise RuntimeError('캐글 병렬 생성은 고정된 CosyVoice 3 FP32 모델이 필요합니다.')
+            install_offline_cache_reuse(self.model)
+            self.model.model.llm_context = nullcontext()
+            torch.cuda.synchronize()
 
     def reference(self, voice):
         from huggingface_hub import hf_hub_download
@@ -100,6 +115,20 @@ class Cosy3Model:
             return prepared, False
 
     def generate(self, text, voice, *, style='', speed=1.0, ref_path='', prompt_text='', progress=None):
+        if not self.kaggle_parallel:
+            return self._generate(text, voice, style=style, speed=speed, ref_path=ref_path,
+                                  prompt_text=prompt_text, progress=progress)
+        import torch
+        stream = torch.cuda.Stream(device=0)
+        stream.wait_stream(torch.cuda.default_stream(0))
+        with torch.cuda.stream(stream), torch.inference_mode():
+            try:
+                return self._generate(text, voice, style=style, speed=speed, ref_path=ref_path,
+                                      prompt_text=prompt_text, progress=progress)
+            finally:
+                stream.synchronize()
+
+    def _generate(self, text, voice, *, style='', speed=1.0, ref_path='', prompt_text='', progress=None):
         import numpy as np
         import torch
         text = spoken(text)

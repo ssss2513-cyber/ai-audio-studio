@@ -7,7 +7,8 @@ import zlib
 
 ROOT = Path(__file__).resolve().parent
 SOURCES = ('cosy_kaggle_runner.py', 'cosy_kaggle_contract.py', 'colab_server.py',
-           'cosy3_colab_server.py', 'cosy3_model.py', 'cosy3_voicebank_catalog.py')
+           'cosy3_colab_server.py', 'cosy3_model.py', 'cosy3_voicebank_catalog.py',
+           'cosy_kaggle_queue.py')
 payload = json.dumps({name: (ROOT / name).read_text(encoding='utf-8') for name in SOURCES},
                      ensure_ascii=False).encode()
 encoded = base64.b64encode(zlib.compress(payload, 9)).decode()
@@ -76,7 +77,7 @@ PLAN_ARGUMENTS = ['--plan', 대본파일경로] if 대본파일경로.strip() el
 run_tool([sys.executable, '-u', RUNNER, 'setup', '--engine', ENGINE,
           '--gpus', GPU_COUNT, *PLAN_ARGUMENTS])
 '''
-generate = '''# GPU마다 한 대사씩 계산합니다. 먼저 끝난 GPU가 다음 번호를 바로 맡습니다.
+generate = '''# GPU마다 3개 생성 + 다음 3개 사전 준비. 하나가 끝나면 바로 다음 대사를 시작합니다.
 # 기존 완료 파일은 재사용합니다. 다른 노트북 탭에서 동시에 실행하지 마세요.
 run_tool([PYTHON, '-u', RUNNER, 'run', '--engine', ENGINE,
           '--gpus', GPU_COUNT, *PLAN_ARGUMENTS], allow_partial=True)
@@ -112,7 +113,7 @@ for engine, title, filename in (
     ('cosyvoice3', 'CosyVoice 3', 'CosyVoice3_Kaggle_DualGPU.ipynb'),
     ('auto', 'CosyVoice 2·3 혼합 대본', 'CosyVoice2_3_Kaggle_DualGPU.ipynb'),
 ):
-    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.1
+    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.2
 
 기존 코랩은 계속 사용할 수 있습니다. 이 노트북은 **캐글에서 대본 전체를 생성하는 추가 옵션**입니다.
 
@@ -123,11 +124,14 @@ for engine, title, filename in (
 3. **Add Input → Upload**로 받은 ZIP을 **비공개**로 추가합니다. ZIP이 자동으로 풀려도 인식합니다.
 4. **Run All**로 아래 1~4번을 순서대로 실행합니다. 설치와 모델 다운로드는 첫 실행에 시간이 걸립니다.
 
-두 GPU에서 각각 독립 모델로 계산하며, 먼저 완료한 GPU가 다음 대사를 바로 맡습니다.
+GPU마다 모델 하나를 공유해 대사 **3개를 동시 처리**하고, 다음 **3개의 대사·화자·스타일·참고 파일**을 미리 준비합니다.
+GPU 2개인 작업 하나에서 최대 **6개 생성 + 다음 6개 준비**입니다. 남은 대사가 적으면 실행 수도 줄어듭니다.
+셋이 모두 끝나기를 기다리지 않고, 하나가 끝나면 준비된 다음 대사를 바로 시작합니다.
+완료 음성의 파일 저장은 별도 작업으로 넘깁니다. 공유 음향·파형 계산은 충돌을 막기 위해 차례로 처리합니다.
 대사마다 사이트로 음성을 전송하지 않고 캐글 안에서 처리한 뒤, 원래 순번대로 **MP3 하나**로 합칩니다.
 혼합 대본은 두 GPU로 코지2를 만든 다음 코지3를 만듭니다. 최종 파일은 대본 순서입니다.
 위 설명은 이 수동 통합 노트북을 직접 실행할 때의 방식입니다.
-공유 사이트 v2.9.53의 혼합 생성 버튼은 코지2·코지3를 별도 캐글 작업으로 동시에 제출합니다.
+공유 사이트 v2.9.54의 혼합 생성 버튼은 코지2·코지3를 별도 캐글 작업으로 동시에 제출합니다.
 각 작업은 GPU 2개를 요청하고, 원본 WAV를 사이트에서 대본 순번대로 합쳐 MP3를 한 번만 만듭니다.
 화자·스타일·속도·참고 음성과 기존 모델의 FP32 및 생성 설정을 유지합니다.
 
@@ -148,6 +152,7 @@ for engine, title, filename in (
     notebook = dict(cells=cells, metadata={
         'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
         'language_info': {'name': 'python'},
-        'voice_studio': {'version': '1.0.1', 'engine': engine, 'gpu_count': 2}}, nbformat=4, nbformat_minor=4)
+        'voice_studio': {'version': '1.0.2', 'engine': engine, 'gpu_count': 2,
+                         'concurrency_per_gpu': 3, 'prefetch_per_gpu': 3}}, nbformat=4, nbformat_minor=4)
     (ROOT / filename).write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
     print('작성: ' + filename)

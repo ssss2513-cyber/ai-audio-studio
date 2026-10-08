@@ -1279,9 +1279,13 @@ def serve(port):
     @app.get('/v1/{token}/health')
     def status(token: str):
         authorize(token)
+        queue_mode = os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3'
+        parallel_status = (dict(mode='fixed', limit=3, target_limit=3, hard_limit=3,
+                               prefetch=3, reason='GPU당 3개 생성 + 다음 대사 3개 준비')
+                           if queue_mode else concurrency.status())
         return {'service': SERVICE, 'api_version': 1, 'ready': True, 'model': LABEL, 'engine': ENGINE, 'cuda': True,
                 'server_version': SERVER_VERSION, 'sample_rate': sample_rate, 'instance_id': instance_id,
-                'gpu_name': gpu_name, 'acceleration': acceleration, 'concurrency': concurrency.status(),
+                'gpu_name': gpu_name, 'acceleration': acceleration, 'concurrency': parallel_status,
                 'acoustic_concurrency': 1,
                 'capabilities': ['style_instruction', GENERATION_CAPABILITY, QUALITY_CAPABILITY, REFERENCE_CACHE_CAPABILITY,
                                  REFERENCE_TRANSPORT_CAPABILITY, DURATION_GUARD_CAPABILITY, PERFORMANCE_CAPABILITY,
@@ -1573,6 +1577,9 @@ def serve(port):
                                 model.frontend.spk2info.pop(oldest, None)
 
     install_batch_routes(app, synthesize, authorize, concurrency, exclusive_gpu_lease)
+    if os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3':
+        from cosy_kaggle_queue import install_cosy2
+        install_cosy2(app, authorize, ROOT, synthesize, access_token)
     uvicorn.run(app, host='127.0.0.1', port=port, access_log=False)
 
 

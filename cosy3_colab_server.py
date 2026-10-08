@@ -288,16 +288,19 @@ def serve():
 
     # One model compute lane; queued next line starts before HTTP download/save.
     # Avoid claiming unmeasured GPU parallelism or changing inference precision.
-    threading.Thread(target=worker, name='cosy3-inference', daemon=True).start()
+    if os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') != '3':
+        threading.Thread(target=worker, name='cosy3-inference', daemon=True).start()
 
     @app.get('/v1/{token}/health')
     def health(token: str):
         authorize(token)
+        kaggle_queue = os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3'
         return dict(service=SERVICE, protocol=PROTOCOL, version=VERSION, model=MODEL_ID,
             model_revision=MODEL_REVISION, bank_revision=BANK_REVISION, ready=True,
             gpu=model.gpu, precision='FP32', sample_rate=model.sample_rate,
-            voice_count=len(VOICEBANK), voices=VOICEBANK, gpu_concurrency=1,
-            queued=pending.qsize(), max_requests=4)
+            voice_count=len(VOICEBANK), voices=VOICEBANK, gpu_concurrency=3 if kaggle_queue else 1,
+            prefetch=3 if kaggle_queue else 0, acoustic_concurrency=1,
+            queued=pending.qsize(), max_requests=6 if kaggle_queue else 4)
 
     async def body(request, maximum):
         data = bytearray()
@@ -347,6 +350,8 @@ def serve():
     @app.post('/v1/{token}/jobs/{job_id}')
     async def submit(token: str, job_id: str, request: Request):
         authorize(token)
+        if os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3':
+            raise HTTPException(409, '캐글 전용 생성 큐를 사용해주세요.')
         if not re.fullmatch(r'[a-f0-9]{32}', job_id):
             raise HTTPException(400, '작업 ID 오류')
         try:
@@ -417,6 +422,9 @@ def serve():
                 raise HTTPException(404, '완료된 음성 파일이 없습니다.')
             return FileResponse(job['file'], media_type='audio/wav', filename=job_id + '.wav')
 
+    if os.environ.get('VOICE_STUDIO_KAGGLE_QUEUE') == '3':
+        from cosy_kaggle_queue import install_cosy3
+        install_cosy3(app, authorize, ROOT, model)
     uvicorn.run(app, host='127.0.0.1', port=state['port'], access_log=False)
 
 

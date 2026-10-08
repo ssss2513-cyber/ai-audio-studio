@@ -13,6 +13,7 @@ import wave
 import requests
 
 from .personal_colab import connection_url
+from .emotion_directing import acting_direction, segment_cue
 from cosy3_voicebank_catalog import MODEL_ID, SERVICE, PROTOCOL, BANK_REVISION, VOICEBANK, ATTRIBUTION
 
 MAX_WORKERS = 4  # HTTP requests queued; server reports actual GPU concurrency.
@@ -49,8 +50,9 @@ def request_payload(text, config):
     if config.voice not in VOICEBANK and config.voice != 'custom':
         raise ValueError('CosyVoice 3 목소리를 다시 선택해주세요.')
     payload = dict(text=text, voice=config.voice, speed=float(config.speed_factor),
-        style=VOICE_STYLES.get(config.style, VOICE_STYLES['🎤 기본'])['gemini_prompt']
-              if config.style != '🎤 기본' else '')
+        style=acting_direction(getattr(config, 'emotion', ''), getattr(config, 'emotion_intensity', '보통'))
+              or (VOICE_STYLES.get(config.style, VOICE_STYLES['🎤 기본'])['gemini_prompt']
+                  if config.style != '🎤 기본' else ''))
     if config.voice == 'custom':
         if not config.prompt_text.strip() or not Path(config.ref_audio_path).is_file():
             raise ValueError('한국어 참고 음성과 그 녹음에서 실제로 말한 대사를 입력해주세요.')
@@ -225,6 +227,7 @@ def export_plan(segments, settings, pause_ms):
         config = VoiceConfig(engine='cosyvoice3', voice=row.get('voice', 'F01'),
             style=row.get('style', '🎤 기본'), speed_factor=float(row.get('speed', 1)),
             ref_audio_path=row.get('ref_audio_path', ''), prompt_text=row.get('prompt_text', ''))
+        config.emotion, config.emotion_intensity = segment_cue(segment)
         payload = request_payload(clean_spoken_text(segment.text), config)
         ref_id = payload.get('reference_id')
         if ref_id and ref_id not in references:

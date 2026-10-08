@@ -53,9 +53,11 @@ from core.generation_jobs import (
 )
 from core.parser import ScriptParser, ScriptSegment
 from core.story_precise_parser import parse_story_precisely, parse_story_with_gemini, is_already_formatted_script
+from core.emotion_directing import segment_cue, tagged_line, require_support
+from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.51 · 캐글 연결·모델 설정 수정"
+APP_VERSION = "v2.9.52 · 대사별 감정·강도 설정"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1573,7 +1575,7 @@ def main():
                         updated_script_lines = []
                         for seg in st.session_state["parsed_segments"]:
                             new_s = target_name if seg.speaker == merge_from else seg.speaker
-                            updated_script_lines.append(f"{new_s}: {seg.text}")
+                            updated_script_lines.append(tagged_line(seg, speaker=new_s))
                         new_script_text = "\n".join(updated_script_lines)
                         st.session_state["pending_script_text"] = new_script_text
                         try:
@@ -2404,6 +2406,9 @@ def main():
                                 except Exception as e:
                                     st.error(f"음성 생성 실패: {str(e)}")
 
+        render_emotions(st.session_state["parsed_segments"], st.session_state["voice_settings"],
+                        work_dir, busy=generation_active, gemini_key=gemini_api_key, gemini_model=gemini_model)
+
         # Step 3: 전체 생성 옵션
         st.divider()
         st.subheader("3️⃣ TTS 오디오 및 자막 생성")
@@ -2493,7 +2498,8 @@ def main():
                 st.caption(str(exc))
         bank_segments = [seg for seg in selected_segments
                          if st.session_state["voice_settings"].get(seg.speaker, {}).get("engine") == "qwen-bank"]
-        if not use_kaggle and bank_segments and len(bank_segments) == len(selected_segments):
+        if (not use_kaggle and bank_segments and len(bank_segments) == len(selected_segments)
+                and not any(segment_cue(seg)[0] for seg in selected_segments)):
             try:
                 bank_plan = export_qwen_bank_plan(selected_segments, st.session_state["voice_settings"], pause_ms, include_spk_in_sub)
                 st.download_button("⬇️ 기본 목소리 20종 코랩 대본 받기", bank_plan,
@@ -2534,6 +2540,12 @@ def main():
                 spk_cfg_data = st.session_state["voice_settings"].get(seg.speaker, {})
                 seg_engine = spk_cfg_data.get("engine", "supertonic")
                 seg_style = spk_cfg_data.get("style", "🎤 기본")
+                emotion, emotion_intensity = segment_cue(seg)
+                try:
+                    require_support(seg_engine, emotion)
+                except ValueError as exc:
+                    st.error(f"{seg.index}번 · {seg.speaker}: {exc}")
+                    return
                 
                 clean_text_to_speak = clean_spoken_text(seg.text)
                 engine_prefix = seg_engine.replace("-", "")
@@ -2547,6 +2559,8 @@ def main():
                                        "chirp": "v1_chirp_native_wav",
                                        "qwen-bank": "v1_qwen_designed_cast_base_17b"}.get(seg_engine, "v6_style_directions")
                 cfg_unique_str = f"{clean_text_to_speak}_{seg_engine}_{sorted(spk_cfg_data.items())}_{generation_revision}"
+                if emotion:
+                    cfg_unique_str += f"_emotion_v1_{emotion}_{emotion_intensity}"
                 cfg_hash = hashlib.md5(cfg_unique_str.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 filename = f"{seg.index:04d}_{engine_prefix}_{safe_spk}_{cfg_hash}.mp3"
                 seg_file_path = os.path.join(segments_dir, filename)
@@ -2624,6 +2638,7 @@ def main():
                         pitch=f"{p_val:+d}Hz"
                     )
 
+                cfg.emotion, cfg.emotion_intensity = emotion, emotion_intensity
                 items.append(GenerationItem(seg.index, seg.speaker, clean_text_to_speak, seg_file_path, cfg))
             pending_items = items if force_overwrite else [item for item in items if not cached_audio_path(item)]
             checked_engines = set()

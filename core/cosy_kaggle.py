@@ -18,6 +18,7 @@ from .cosy3_client import request_payload
 from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
 from .result_downloads import saved_file_download
+from .emotion_directing import segment_cue
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTEBOOKS = {
@@ -227,6 +228,7 @@ def prepare_plan(segments, settings, pause_ms, include_speaker):
         config = VoiceConfig(engine=engine, voice=row.get('voice', ''),
             style=row.get('style', '🎤 기본'), speed_factor=float(row.get('speed', 1)),
             ref_audio_path=row.get('ref_audio_path', ''), prompt_text=row.get('prompt_text', ''))
+        config.emotion, config.emotion_intensity = segment_cue(segment)
         if engine == 'cosyvoice':
             prepared = TTSEngine.cosyvoice_request(segment.text, config)
             payload = {key: prepared[key] for key in ('text', 'prompt_text', 'speed', 'style_instruction')}
@@ -287,7 +289,7 @@ def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False,
     return state
 
 
-def start_preview(work_dir, speaker, text, settings):
+def start_preview(work_dir, speaker, text, settings, *, emotion='', emotion_intensity='보통'):
     try:
         if not st.session_state.get('_kaggle_credentials'):
             raise ValueError('왼쪽 ‘코지2·3 · 캐글 연결’에서 내 캐글 계정을 먼저 연결해주세요.')
@@ -296,7 +298,8 @@ def start_preview(work_dir, speaker, text, settings):
             raise ValueError('\n'.join(problems))
         if not text.strip():
             raise ValueError('미리듣기에서 읽을 대사를 입력해주세요.')
-        _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text)], settings, 0, False, preview=True)
+        _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text,
+            emotion=emotion, emotion_intensity=emotion_intensity)], settings, 0, False, preview=True)
     except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
         st.error(str(exc))
     else:

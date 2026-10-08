@@ -2,6 +2,7 @@
 import re
 import os
 from typing import List, Tuple, Optional, Dict, Set, Any
+from .emotion_directing import parse_marker
 
 INVALID_ACTOR_WORDS = {
     # 신체 부위 및 상태
@@ -160,6 +161,10 @@ def parse_story_precisely(raw_text: str, custom_characters: Optional[List[str]] 
             if not line_str or line_str.startswith(("#", "//")):
                 continue
             m = ALREADY_SCRIPT_LINE_REGEX.match(line_str)
+            if m and parse_marker(m.group('b_spk') or '')[0]:
+                # A cue-only prefix continues the previous speaker, not an actor named "sad".
+                results.append((results[-1][0] if results else '나레이션', line_str))
+                continue
             if m:
                 spk = (m.group("b_spk") or m.group("p_spk") or m.group("plain_spk")).strip()
                 dlg = m.group("text").strip()
@@ -168,7 +173,8 @@ def parse_story_precisely(raw_text: str, custom_characters: Optional[List[str]] 
                     continue
                 # 만약 dlg가 또 다른 화자 콜론으로 시작하면 (예: '송 노인: "대사"')
                 sub_m = ALREADY_SCRIPT_LINE_REGEX.match(dlg)
-                if sub_m and sub_m.group("text").strip():
+                if (sub_m and sub_m.group("text").strip()
+                        and not parse_marker(sub_m.group("b_spk") or '')[0]):
                     spk = (sub_m.group("b_spk") or sub_m.group("p_spk") or sub_m.group("plain_spk")).strip()
                     dlg = sub_m.group("text").strip()
 

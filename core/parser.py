@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 from typing import List, Optional
+from .emotion_directing import extract_emotion, parse_marker
 
 @dataclass
 class ScriptSegment:
@@ -8,6 +9,9 @@ class ScriptSegment:
     speaker: str
     text: str
     raw_line: str = ""
+    emotion: str = ""
+    emotion_intensity: str = "보통"
+    emotion_note: str = ""
 
 class ScriptParser:
     """
@@ -106,7 +110,7 @@ class ScriptParser:
             # 2. 대괄호 패턴 [화자] 대사
             if not speaker:
                 bracket_match = self.BRACKET_PATTERN.match(line_str)
-                if bracket_match and bracket_match.group("text"):
+                if bracket_match and bracket_match.group("text") and not parse_marker(bracket_match.group("spk"))[0]:
                     speaker = bracket_match.group("spk").strip()
                     dialogue_text = bracket_match.group("text")
 
@@ -134,6 +138,7 @@ class ScriptParser:
             else:
                 current_speaker = speaker
 
+            dialogue_text, emotion, intensity, emotion_note = extract_emotion(dialogue_text)
             cleaned_text = self.clean_text(dialogue_text, remove_stage_directions=remove_stage_directions)
             if not cleaned_text:
                 continue
@@ -143,7 +148,10 @@ class ScriptParser:
                     index=segment_index,
                     speaker=speaker,
                     text=cleaned_text,
-                    raw_line=raw_line
+                    raw_line=raw_line,
+                    emotion=emotion,
+                    emotion_intensity=intensity,
+                    emotion_note=emotion_note
                 )
             )
             segment_index += 1

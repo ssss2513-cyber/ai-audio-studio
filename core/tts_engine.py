@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import edge_tts
 
 from .gemini_keys import parse_gemini_keys
+from .emotion_directing import acting_direction
 
 _GEMINI_KEY_LOCK = threading.Lock()
 
@@ -80,6 +81,8 @@ class VoiceConfig:
     cloud_tts_api_key: str = field(default="", repr=False)
     qwen_url: str = field(default="", repr=False)
     qwen_instruction: str = ""
+    emotion: str = ""
+    emotion_intensity: str = "보통"
 
 # 0. 34종 음성 스타일 프리셋 (감정, 어조, 연령대, 성숙도)
 VOICE_STYLES = {
@@ -562,9 +565,10 @@ def get_supertonic_engine():
         _supertonic_instance = supertonic.TTS(auto_download=False)
     return _supertonic_instance
 
-def build_gemini_tts_prompt(text: str, style: str = "🎤 기본", voice: str = "") -> str:
+def build_gemini_tts_prompt(text: str, style: str = "🎤 기본", voice: str = "",
+                           emotion: str = "", emotion_intensity: str = "보통") -> str:
     """Gemini 2.5/3.1 TTS reads performance direction from the content prompt."""
-    direction = VOICE_STYLES.get(style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+    direction = acting_direction(emotion, emotion_intensity) or VOICE_STYLES.get(style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
     gender = {"남성": "male", "여성": "female"}.get(GEMINI_VOICES.get(voice, {}).get("gender"))
     identity = (f"A single native Korean {gender} voice actor using the selected {voice} voice. "
                 if gender else "A single native Korean voice actor. ")
@@ -704,7 +708,8 @@ class TTSEngine:
         if progress:
             progress("Gemini 연결 준비", metrics)
         try:
-            return synthesize(build_gemini_tts_prompt(text, voice_config.style, voice_config.voice),
+            return synthesize(build_gemini_tts_prompt(text, voice_config.style, voice_config.voice,
+                              getattr(voice_config, "emotion", ""), getattr(voice_config, "emotion_intensity", "보통")),
                               output_file, api_key=selected_key, pacing_group=tuple(sorted(keys)), cancel=cancel,
                               model=(voice_config.model or "gemini-3.1-flash-tts-preview").strip(),
                               voice=voice_config.voice, metrics=metrics, progress=progress)
@@ -905,8 +910,10 @@ class TTSEngine:
         return dict(url=getattr(voice_config, "cosyvoice_url", ""), text=text,
                     ref_path=ref_path, prompt_text=prompt,
                     speed=float(getattr(voice_config, "speed_factor", 1.0)),
-                    style_instruction=(VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
-                                       if voice_config.style != "🎤 기본" else ""))
+                    style_instruction=(acting_direction(getattr(voice_config, 'emotion', ''),
+                                                        getattr(voice_config, 'emotion_intensity', '보통'))
+                        or (VOICE_STYLES.get(voice_config.style, VOICE_STYLES["🎤 기본"])["gemini_prompt"]
+                            if voice_config.style != "🎤 기본" else "")))
 
 
     @classmethod

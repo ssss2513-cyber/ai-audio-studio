@@ -132,7 +132,7 @@ def _confirm_job(work_dir, state, credentials):
     state['account_authenticated'] = bool(info.get('account_authenticated'))
     if info.get('exists') is False:
         reason = state.get('submission_error', '')
-        state.update(status='failed', submission='not_created',
+        state.update(status='failed', submission='not_created', registration_confirmed=False,
             message='계정 인증은 정상이며, 캐글에 생성 작업이 등록되지 않은 것을 확인했습니다.',
             error=('토큰 인증은 통과했습니다. 기존 생성 작업이 없어 생성 제한을 해제했습니다. '
                    '위의 생성 또는 미리듣기 버튼을 다시 눌러주세요.'
@@ -141,16 +141,25 @@ def _confirm_job(work_dir, state, credentials):
         return 'missing'
     if info.get('exists'):
         _adopt_job_ref(state, info.get('ref'), credentials['username'])
+        state['registration_confirmed'] = True
         _save(work_dir, state)
         return 'found'
     state.update(status='needs_check',
-        message='계정 인증은 정상입니다. 기존 작업의 접근 상태를 확인해야 합니다.',
-        error='기존 토큰으로 계정 인증은 통과했지만 해당 작업에 접근하지 못했습니다. '
-              '토큰을 다시 발급받지 마세요. 아래 ‘내 캐글 작업 열기’에서 작업 주소를 확인해주세요.')
+        message='계정 인증은 정상입니다. 캐글 작업의 등록·접근 상태는 확인되지 않았습니다.',
+        error='계정 인증은 통과했지만 캐글 작업 조회가 거부되었습니다. '
+              '아래 ‘오류 기록 TXT 받기’에서 최초 생성 요청과 조회 오류를 함께 확인할 수 있습니다.')
     state['diagnostic'] = dict(operation='inspect_job', stage='kernel_info',
         http_status=info.get('http_status'), reason=info.get('reason', ''))
     _save(work_dir, state)
     return 'unknown'
+
+
+def job_registered(state):
+    """A locally prepared reference is not proof of a registered Kaggle job."""
+    if state.get('submission') in ('not_sent', 'not_created'):
+        return False
+    return bool(state.get('registration_confirmed') or state.get('submission') == 'accepted'
+                or state.get('remote_status') or state.get('status') == 'complete')
 
 
 def _state_path(work_dir):

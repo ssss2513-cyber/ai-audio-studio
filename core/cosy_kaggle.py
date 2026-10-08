@@ -19,7 +19,7 @@ from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
 from .result_downloads import saved_file_download
 from .subtitle_mov_ui import render_subtitle_mov
-from .kaggle_history_ui import render_job_blocker
+from .kaggle_history_ui import render_job_blocker, render_record_download, render_job_link, error_text
 from .emotion_directing import segment_cue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -444,7 +444,8 @@ def render_status(work_dir):
                     saved_file_download(label, result[key], file_name=name, mime=mime,
                         key='kaggle_result_' + key, prepare_large=key == 'main_zip')
         elif job.get('error'):
-            st.error(job['error'])
+            st.error(error_text(job))
+            render_record_download(job, 'kaggle_status_error')
             if job.get('submission') == 'not_created':
                 st.info('이전 작업 때문에 막혔던 생성 제한을 해제했습니다. 위의 생성 또는 미리듣기 버튼을 다시 누르세요.')
         else:
@@ -461,7 +462,7 @@ def render_status(work_dir):
                 if error:
                     st.error(error)
                 if child.get('ref'):
-                    st.markdown(f"[{label} 캐글 작업 열기](https://www.kaggle.com/code/{child['ref']})")
+                    render_job_link(child, label + ' 캐글 작업 열기')
                 if child.get('logs'):
                     with st.expander(label + ' 실행 기록'):
                         st.code(child['logs'], language=None)
@@ -474,8 +475,9 @@ def render_status(work_dir):
                 st.caption('대본과 설정을 그대로 두고 생성 버튼을 다시 누르면 완료된 모델은 재사용하고 실패한 모델만 이어서 생성합니다. '
                            '‘완료 파일도 새로 만들기’는 끈 상태로 두세요.')
         elif job.get('ref'):
-            st.markdown('[내 캐글 작업 열기](https://www.kaggle.com/code/' + job['ref'] + ')')
-            st.caption('이 작업 주소를 보관하면 사이트에 다시 접속한 후 왼쪽 ‘이전 캐글 작업 불러오기’에서 결과를 받을 수 있습니다.')
+            render_job_link(job, '내 캐글 작업 열기')
+            if kaggle_jobs.job_registered(job):
+                st.caption('이 작업 주소를 보관하면 사이트에 다시 접속한 후 왼쪽 ‘이전 캐글 작업 불러오기’에서 결과를 받을 수 있습니다.')
         if job['status'] in kaggle_jobs.ACTIVE:
             elapsed = max(0, int(time.time() - job['started']))
             st.caption(f'경과 {elapsed // 60}분 {elapsed % 60}초 · 진행 상황은 자동 갱신됩니다. 캐글 기록 반영은 지연될 수 있습니다.')

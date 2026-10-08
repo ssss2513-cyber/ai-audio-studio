@@ -56,6 +56,9 @@ def _report(state):
     lines = ['Voice Studio 캐글 작업 기록', '시각은 한국 시간입니다.',
              '작업: ' + _label(state), '작업 번호: ' + str(state.get('id', '')),
              '상태: ' + STATUS.get(state.get('status'), str(state.get('status', ''))),
+             '최초 시작 (한국): ' + _time(state.get('started')),
+             '등록 확인: ' + ('확인됨' if jobs.job_registered(state) else '미확인'),
+             '제출 상태: ' + str(state.get('submission', '이전 기록에 없음')),
              '캐글 주소: ' + str(state.get('ref', '')), '안내: ' + _clean(state.get('message')),
              '오류: ' + _clean(state.get('error'))]
     for label, detail in [('현재 오류 상세', state.get('diagnostic')),
@@ -76,11 +79,49 @@ def _report(state):
     return '\n'.join(lines)
 
 
+def error_text(state):
+    diagnostic = state.get('diagnostic') or {}
+    if (state.get('account_authenticated') and state.get('status') == 'needs_check'
+            and diagnostic.get('stage') == 'kernel_info'
+            and diagnostic.get('http_status') in (401, 403)):
+        return ('계정 인증은 통과했지만 캐글 작업의 등록·접근 상태를 확인하지 못했습니다. '
+                '바로 아래 ‘오류 기록 TXT 받기’를 눌러 최초 생성 요청 오류를 확인해주세요.')
+    return _clean(state.get('error') or diagnostic.get('reason'))
+
+
+def render_record_download(state, key):
+    safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', str(state.get('id', 'job')))[:80]
+    failed = state.get('status') in ('failed', 'needs_check')
+    st.download_button('⬇️ 오류 기록 TXT 받기' if failed else '⬇️ 이 작업 기록 TXT 받기',
+        _report(state).encode('utf-8-sig'), file_name='kaggle_job_' + safe_id + '.txt',
+        mime='text/plain', key=key + '_report', on_click='ignore',
+        type='primary' if failed else 'secondary', use_container_width=True)
+    if failed:
+        detail = state.get('submission_diagnostic') or {}
+        original = detail.get('reason') or state.get('submission_error')
+        if original:
+            code = detail.get('http_status')
+            st.caption('최초 생성 요청 오류' + (f' · 응답 코드 {code}' if code else ''))
+            st.code(_clean(original), language=None)
+
+
+def render_job_link(state, label='캐글 원본 작업 열기'):
+    ref = state.get('ref')
+    if not ref or not jobs.REF_PATTERN.fullmatch(ref):
+        return
+    if jobs.job_registered(state):
+        st.link_button(label, 'https://www.kaggle.com/code/' + ref, use_container_width=True)
+    else:
+        st.caption('캐글 작업 등록 미확인 · 아래는 등록 요청에 사용한 주소입니다.')
+        st.code(ref, language=None)
+
+
 def _details(state, key):
     diagnostic = state.get('diagnostic') or {}
-    reason = state.get('error') or diagnostic.get('reason')
+    reason = error_text(state)
     if reason:
-        st.error(_clean(reason))
+        st.error(reason)
+    render_record_download(state, key)
     if diagnostic.get('stage') or diagnostic.get('operation'):
         stage = diagnostic.get('stage') or diagnostic['operation']
         code = diagnostic.get('http_status')
@@ -88,11 +129,10 @@ def _details(state, key):
                    + (f' · 응답 코드 {code}' if code else ''))
     if state.get('history_warning'):
         st.warning(state['history_warning'])
-    refs = [state.get('ref')] + [(child or {}).get('ref') for child in (state.get('children') or {}).values()]
-    for index, ref in enumerate(refs):
-        if ref and jobs.REF_PATTERN.fullmatch(ref):
-            st.link_button('캐글 원본 작업 열기' + (f' · {index}' if index else ''),
-                           'https://www.kaggle.com/code/' + ref, use_container_width=True)
+    render_job_link(state)
+    for engine, child in (state.get('children') or {}).items():
+        if child:
+            render_job_link(child, ('코지2' if engine == 'cosyvoice' else '코지3') + ' 캐글 작업 열기')
     with st.expander('단계별 이력·오류·실행 로그'):
         for label, detail in [('현재 오류 응답', diagnostic),
                               ('최초 생성 요청 오류', state.get('submission_diagnostic'))]:
@@ -119,9 +159,6 @@ def _details(state, key):
                     st.dataframe(child_events, hide_index=True, use_container_width=True, height=180)
                 if child.get('logs'):
                     st.code(_clean(child['logs']), language=None)
-        safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', str(state.get('id', 'job')))[:80]
-        st.download_button('⬇️ 이 작업 기록 TXT 받기', _report(state).encode('utf-8-sig'),
-            file_name='kaggle_job_' + safe_id + '.txt', mime='text/plain', key=key + '_report', on_click='ignore')
 
 
 def _check_current(work_dir, key):

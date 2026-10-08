@@ -19,7 +19,8 @@ from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
 from .result_downloads import saved_file_download
 from .subtitle_mov_ui import render_subtitle_mov
-from .kaggle_history_ui import render_job_blocker, render_record_download, render_job_link, error_text
+from .kaggle_history_ui import (render_job_blocker, render_record_download, render_job_link,
+                               error_text, clean_message)
 from .emotion_directing import segment_cue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -306,11 +307,18 @@ def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False,
     st.session_state['generation_result'] = None
     st.session_state['_reset_bulk_overwrite'] = True
     st.session_state.pop('play_kaggle_result', None)
-    st.session_state.pop('_kaggle_preview_help', None)
+    if not preview:
+        st.session_state.pop('_kaggle_preview_help', None)
+        st.session_state.pop('_kaggle_preview_notice', None)
     return state
 
 
 def start_preview(work_dir, speaker, text, settings, *, emotion='', emotion_intensity='보통'):
+    notice = dict(speaker=speaker, at=time.time(), status='preparing',
+                  message='미리듣기 요청을 받았습니다. 대사와 목소리 설정을 준비합니다.')
+    st.session_state['_kaggle_preview_help'] = speaker
+    st.session_state['_kaggle_preview_notice'] = notice
+    st.info(notice['message'])
     try:
         if not st.session_state.get('_kaggle_credentials'):
             raise ValueError('왼쪽 ‘코지2·3 · 캐글 연결’에서 내 캐글 계정을 먼저 연결해주세요.')
@@ -319,13 +327,20 @@ def start_preview(work_dir, speaker, text, settings, *, emotion='', emotion_inte
             raise ValueError('\n'.join(problems))
         if not text.strip():
             raise ValueError('미리듣기에서 읽을 대사를 입력해주세요.')
-        _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text,
-            emotion=emotion, emotion_intensity=emotion_intensity)], settings, 0, False, preview=True)
-    except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
-        st.error(str(exc))
-        if kaggle_jobs.get_job(work_dir):
-            st.session_state['_kaggle_preview_help'] = speaker
+        with st.spinner('미리듣기 작업을 준비하고 있습니다…'):
+            job = _start(work_dir, [SimpleNamespace(index=1, speaker=speaker, text=text,
+                emotion=emotion, emotion_intensity=emotion_intensity)], settings, 0, False, preview=True)
+    except Exception as exc:
+        # Keep preparation errors visible on the next render too. This catch
+        # does not include Streamlit's BaseException rerun/stop controls.
+        notice.update(status='failed', error=clean_message(
+            kaggle_jobs._error_message(exc) if isinstance(exc, kaggle_jobs.KaggleError) else exc),
+                      message='미리듣기 요청을 시작하지 못했습니다.')
+        st.error(notice['error'])
+        st.rerun()
     else:
+        notice.update(status='submitted', job_id=job['id'],
+                      message='미리듣기 요청을 접수했습니다. 이 버튼 아래에서 진행 상황을 확인하세요.')
         st.rerun()
 
 

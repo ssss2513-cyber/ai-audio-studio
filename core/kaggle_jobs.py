@@ -407,6 +407,9 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
         state['engines'] = sorted({item['engine'] for item in plan['items']})
         state['label'] = ('미리듣기 · ' + str(plan['items'][0].get('speaker', '')) if preview
                           else f"전체 생성 · {len(plan['items'])}개 대사")
+        if preview:
+            state['preview_speaker'] = str(plan['items'][0].get('speaker', ''))
+            state['preview_text'] = plan['items'][0]['text']
         _save(work_dir, state)
         _launch(work_dir, state, deepcopy(credentials), submit=True)
         return state

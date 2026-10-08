@@ -123,9 +123,10 @@ def render_voice(speaker, current, *, work_dir, segments, busy, style_selector):
                   if name != speaker and voice != 'custom' and row.get('engine') == 'cosyvoice3' and row.get('voice') == voice]
     if duplicates:
         st.caption('같은 목소리를 쓰는 화자: ' + ', '.join(duplicates))
+    from .cosy_kaggle import use_kaggle, start_preview
+    st.caption('미리듣기 실행 위치: 캐글 GPU' if use_kaggle() else '미리듣기 실행 위치: 코랩·별도 서버')
     if st.button(f'🔊 {speaker} CosyVoice 3 미리듣기', key=f'preview_btn_{speaker}',
                  disabled=busy, use_container_width=True):
-        from .cosy_kaggle import use_kaggle, start_preview
         if use_kaggle():
             start_preview(work_dir, speaker, preview_text(speaker, segments), st.session_state['voice_settings'])
             return

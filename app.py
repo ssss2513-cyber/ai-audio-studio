@@ -42,7 +42,8 @@ from core.cosy3_client import check_connection as cosy3_status, export_plan as e
 from core.cosy_kaggle import (render_downloads as render_kaggle_downloads, render_export as render_kaggle_export,
     render_status as render_kaggle_status, use_kaggle as use_kaggle_gpu, start_preview as start_kaggle_preview,
     render_setup as render_kaggle_setup)
-from core.kaggle_jobs import is_running as is_kaggle_running, clear_job as clear_kaggle_job
+from core.kaggle_jobs import (is_running as is_kaggle_running, clear_job as clear_kaggle_job,
+                             monitoring as kaggle_monitoring, release_title_conflict)
 from qwen_voicebank_catalog import VOICEBANK as QWEN_BANK_VOICES
 from core.qwen_voicebank_client import export_plan as export_qwen_bank_plan
 from core.qwen_bank_connection import connection_status as qwen_bank_status
@@ -59,7 +60,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.59 · 캐글 생성 이름 충돌 수정"
+APP_VERSION = "v2.9.60 · 미리듣기 진행·작업 목록 바로 표시"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1071,7 +1072,13 @@ def main():
 
     # 작업 디렉토리 설정
     work_dir = session_workspace(st.session_state)
-    generation_active = is_running(work_dir) or is_kaggle_running(work_dir)
+    # Repair the rejected request before deciding button availability. A rerun
+    # here would consume the user's click before reaching the preview button.
+    try:
+        release_title_conflict(work_dir, st.session_state.get('_kaggle_credentials'))
+    except (OSError, ValueError, TypeError):
+        st.warning("이전 캐글 기록을 정리하지 못했습니다. 아래 작업 목록에서 현재 상태를 확인해주세요.")
+    generation_active = is_running(work_dir) or is_kaggle_running(work_dir) or kaggle_monitoring(work_dir)
     correct_legacy_gemini_voices()
     retire_qwen_customvoice(generation_active)
     if st.session_state.get("_qwen_bank_migration_notice"):
@@ -2028,6 +2035,8 @@ def main():
                             st.caption("참고 대사에 비해 미리듣기 문장이 짧습니다. 가능하면 문장 1~2개로 들어보세요.")
 
                         # CosyVoice 미리듣기 버튼
+                        if use_kaggle_gpu():
+                            st.caption("미리듣기 실행 위치: 캐글 GPU")
                         if st.button(f"🔊 {spk} CosyVoice 미리듣기", key=f"cosy_preview_btn_{spk}", use_container_width=True, disabled=generation_active):
                             cosy_url = st.session_state.get("cosyvoice_url", "")
                             if use_kaggle_gpu():

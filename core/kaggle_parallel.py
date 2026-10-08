@@ -52,7 +52,7 @@ def start(work_dir, plan, archive, credentials, force=False):
         if jobs.is_running(work_dir) or jobs.monitoring(work_dir):
             raise ValueError('현재 캐글 작업이 진행 중입니다. 완료 후 다음 작업을 시작해주세요.')
         if old and old.get('status') == 'needs_check':
-            raise ValueError('기존 작업의 상태·결과를 먼저 확인해주세요. 확인 전에는 중복 생성하지 않습니다.')
+            raise ValueError('이전 캐글 작업의 상태 확인이 필요합니다. ‘이전 작업 상태 확인·결과 받기’를 눌러주세요.')
         plan = deepcopy(plan)
         request_signature = jobs.fingerprint(plan)
         reuse = (not force and old and old.get('kind') == 'parallel_cosy'

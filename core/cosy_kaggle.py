@@ -19,6 +19,7 @@ from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
 from .result_downloads import saved_file_download
 from .subtitle_mov_ui import render_subtitle_mov
+from .kaggle_history_ui import render_job_blocker
 from .emotion_directing import segment_cue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -305,6 +306,7 @@ def _start(work_dir, segments, settings, pause_ms, include_speaker, force=False,
     st.session_state['generation_result'] = None
     st.session_state['_reset_bulk_overwrite'] = True
     st.session_state.pop('play_kaggle_result', None)
+    st.session_state.pop('_kaggle_preview_help', None)
     return state
 
 
@@ -321,6 +323,8 @@ def start_preview(work_dir, speaker, text, settings, *, emotion='', emotion_inte
             emotion=emotion, emotion_intensity=emotion_intensity)], settings, 0, False, preview=True)
     except (ValueError, OSError, kaggle_jobs.KaggleError) as exc:
         st.error(str(exc))
+        if kaggle_jobs.get_job(work_dir):
+            st.session_state['_kaggle_preview_help'] = speaker
     else:
         st.rerun()
 
@@ -368,6 +372,9 @@ def render_export(segments, settings, pause_ms, include_speaker, force_overwrite
             st.error(str(exc))
         else:
             st.rerun()
+    current = kaggle_jobs.get_job(work_dir)
+    if current and current.get('status') == 'needs_check':
+        render_job_blocker(work_dir, 'generation_recovery')
     with st.expander('수동 실행용 대본 받기 · 선택 사항'):
         st.caption('자동 연결을 이용할 때는 대본 파일을 옮기거나 캐글에서 Run All을 누를 필요가 없습니다.')
         if mixed:

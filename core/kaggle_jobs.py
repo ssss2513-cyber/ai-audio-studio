@@ -18,6 +18,7 @@ import threading
 import time
 import zipfile
 from urllib.parse import urlparse
+from . import kaggle_history
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = threading.RLock()
@@ -29,7 +30,8 @@ OPERATION_LABELS = {'auth': '계정 연결', 'create_dataset': '대본 전송',
     'dataset_status': '대본 준비 확인', 'push': '생성 요청',
     'status': '실행 상태 확인', 'kernel_info': '작업 등록 확인', 'pull': '결과 받기',
     'inspect_job': '기존 계정·작업 확인', 'authentication': '인증정보 확인',
-    'account_check': '내 계정 접근 확인', 'job_lookup': '내 작업 주소 확인'}
+    'account_check': '내 계정 접근 확인', 'job_lookup': '내 작업 주소 확인',
+    'list_jobs': '내 캐글 작업 목록 조회'}
 
 
 class KaggleError(RuntimeError):
@@ -156,15 +158,25 @@ def _state_path(work_dir):
 
 
 def _save(work_dir, state):
-    state['updated'] = time.time()
-    target = _state_path(work_dir)
-    # If the user cleared their workspace, never recreate it from a worker.
-    if not target.parent.is_dir():
-        raise RuntimeError('현재 접속의 작업 공간이 지워졌습니다.')
-    temp = target.with_name('kaggle_job.' + secrets.token_hex(4) + '.tmp')
-    temp.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
-    temp.chmod(0o600)
-    os.replace(temp, target)
+    with LOCK:
+        state['updated'] = time.time()
+        target = _state_path(work_dir)
+        # If the user cleared their workspace, never recreate it from a worker.
+        if not target.parent.is_dir():
+            raise RuntimeError('현재 접속의 작업 공간이 지워졌습니다.')
+        previous = get_job(work_dir)
+        try:
+            if previous and previous.get('folder') != state.get('folder'):
+                kaggle_history.remember(work_dir, previous)
+            kaggle_history.remember(work_dir, state)
+            state.pop('history_warning', None)
+        except (OSError, ValueError, TypeError):
+            # A history-write problem must not discard a submitted GPU job.
+            state['history_warning'] = '작업 이력 저장을 완료하지 못했습니다. 현재 작업 주소를 보관해주세요.'
+        temp = target.with_name('kaggle_job.' + secrets.token_hex(4) + '.tmp')
+        temp.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+        temp.chmod(0o600)
+        os.replace(temp, target)
 
 
 def get_job(work_dir):
@@ -275,7 +287,7 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
         if monitoring(work_dir) or is_running(work_dir):
             raise ValueError('현재 캐글 작업이 진행 중입니다. 완료 후 다음 작업을 시작해주세요.')
         if old and old.get('status') == 'needs_check':
-            raise ValueError('캐글 작업 상태를 확인해야 합니다. 아래 ‘상태·결과 다시 확인’을 누르면 진행 중인 작업은 이어받고, 등록되지 않은 작업은 생성 제한을 해제합니다.')
+            raise ValueError('이전 캐글 작업의 상태 확인이 필요합니다. ‘이전 작업 상태 확인·결과 받기’를 눌러주세요.')
         signature = fingerprint(plan)
         if not force and old and old.get('signature') == signature and old.get('status') == 'complete':
             result_key = 'clips_archive' if plan.get('site_parallel_shard') else 'full_audio'
@@ -308,6 +320,9 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
             total=len(plan['items']), done=0, started=time.time(), preview=preview, error='',
             parallel_shard=bool(plan.get('site_parallel_shard')),
             submission='not_sent')
+        state['engines'] = sorted({item['engine'] for item in plan['items']})
+        state['label'] = ('미리듣기 · ' + str(plan['items'][0].get('speaker', '')) if preview
+                          else f"전체 생성 · {len(plan['items'])}개 대사")
         _save(work_dir, state)
         _launch(work_dir, state, deepcopy(credentials), submit=True)
         return state
@@ -361,6 +376,12 @@ def readable_logs(raw):
 def _monitor(work_dir, state, credentials):
     misses = 0
     account_checked = False
+    if state.pop('verify_registration', False):
+        _save(work_dir, state)
+        outcome = _confirm_job(work_dir, state, credentials)
+        if outcome != 'found':
+            return
+        account_checked = True
     while True:
         try:
             response = api_call(credentials, 'status', ref=state['ref'])
@@ -406,7 +427,9 @@ def _monitor(work_dir, state, credentials):
         counts = re.findall(r'✅\s+(\d+)/(\d+)\s+·\s+GPU', logs)
         if counts:
             state['done'], state['total'] = map(int, counts[-1])
-        state['logs'] = logs[-10000:]
+        if logs:
+            state['logs'] = logs[-10000:]
+        state['log_error'] = response.get('log_error', '')
         if status in TERMINAL_REMOTE:
             state.update(status='receiving', error='', message='캐글 결과를 공유 사이트로 가져오고 있습니다.')
             _save(work_dir, state)
@@ -523,6 +546,17 @@ def reconnect(work_dir, credentials):
         raise ValueError('이 작업을 만든 캐글 계정으로 연결해주세요.')
     if monitoring(work_dir):
         return False
+    if state.get('submission') == 'not_sent':
+        # _submit persists submission='unknown' BEFORE calling kernels_push.
+        # A stopped worker still marked not_sent never requested GPU work.
+        state.update(status='failed', submission='not_sent',
+            message='GPU 생성 요청 전 단계에서 중단됐습니다. 미리듣기 또는 생성 버튼을 다시 누를 수 있습니다.')
+        _save(work_dir, state)
+        return True
+    diagnostic = state.get('diagnostic') or {}
+    state['verify_registration'] = (
+        state.get('status') == 'needs_check'
+        and (state.get('submission') != 'accepted' or diagnostic.get('http_status') in (401, 403, 404, 409)))
     # Reconnect only polls/downloads. It NEVER repeats a dataset or kernel push.
     state.update(status='checking', error='', conflict_recovery_version=1, access_recovery_version=1,
         message='기존 캐글 작업 상태와 결과를 확인합니다.')
@@ -531,18 +565,52 @@ def reconnect(work_dir, credentials):
     return _launch(work_dir, state, deepcopy(credentials))
 
 
+def recent_jobs(credentials, page_token=None):
+    if not credentials:
+        raise ValueError('내 캐글 계정을 먼저 연결해주세요.')
+    return api_call(credentials, 'list_jobs', timeout=45, page_token=page_token)
+
+
+def restore_saved(work_dir, key, credentials):
+    """Select a preserved local result or resume reads; never submit GPU work."""
+    if not credentials:
+        raise ValueError('내 캐글 계정을 먼저 연결해주세요.')
+    with LOCK:
+        if is_running(work_dir) or monitoring(work_dir):
+            raise ValueError('현재 작업 상태 확인이 끝난 뒤 다른 기록을 열어주세요.')
+        state = kaggle_history.read(work_dir, key, credentials['username'])
+        _save(work_dir, state)
+        result_key = 'clips_archive' if state.get('parallel_shard') else 'full_audio'
+        result = Path(state.get('result', {}).get(result_key, '')).resolve()
+        if (state.get('status') == 'complete' and result.is_relative_to(Path(work_dir).resolve())
+                and result.is_file()):
+            return state
+        reconnect(work_dir, credentials)
+        return get_job(work_dir)
+
+
 def restore(work_dir, reference, credentials):
-    reference = reference.strip().removeprefix('https://www.kaggle.com/code/').strip('/')
+    reference = reference.strip()
+    if reference.startswith('https://'):
+        parsed = urlparse(reference)
+        if parsed.hostname not in ('www.kaggle.com', 'kaggle.com') or not parsed.path.startswith('/code/'):
+            raise ValueError('내 캐글 작업 주소를 입력해주세요.')
+        reference = parsed.path.removeprefix('/code/').strip('/')
     reference = reference.split('?')[0].rstrip('/')
     if not REF_PATTERN.fullmatch(reference):
         raise ValueError('이 사이트에서 만든 캐글 작업 주소를 입력해주세요. /code/사용자/voice-studio-… 형식입니다.')
     if reference.split('/')[0].lower() != credentials['username'].lower():
         raise ValueError('연결한 내 캐글 계정의 작업만 불러올 수 있습니다.')
+    current = get_job(work_dir)
+    if current and current.get('ref') == reference:
+        return reconnect(work_dir, credentials)
     if is_running(work_dir) or monitoring(work_dir):
         raise ValueError('현재 캐글 작업이 끝난 뒤 불러와주세요.')
     job_id = reference.split('/voice-studio-', 1)[1]
     folder = Path(work_dir) / 'kaggle_jobs' / job_id
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if (folder / 'site_job_state.json').is_file():
+        return restore_saved(work_dir, job_id, credentials)
     state = dict(id=job_id, ref=reference, folder=str(folder), signature='', total=0,
         done=0, status='checking', started=time.time(), error='', message='이전 캐글 작업을 불러옵니다.')
     _save(work_dir, state)

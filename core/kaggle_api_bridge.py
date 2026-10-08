@@ -168,6 +168,23 @@ def operate(api, request):
         return {'username': api.get_config_value(api.CONFIG_NAME_USER)}
     if operation == 'inspect_job':
         return inspect_job(api, request['ref'])
+    if operation == 'list_jobs':
+        owner = api.get_config_value(api.CONFIG_NAME_USER)
+        token = request.get('page_token')
+        if token is not None and (not isinstance(token, str) or len(token) > 16384):
+            raise ValueError('작업 목록 페이지 정보가 올바르지 않습니다.')
+        page = api.kernels_list_with_response(mine=True, page_size=100,
+            sort_by='dateCreated', page_token=token)
+        rows = []
+        for item in page.kernels or []:
+            ref = getattr(item, 'ref', '') or ''
+            if (not re.fullmatch(r'[a-zA-Z0-9_-]+/voice-studio-[a-z0-9-]+', ref)
+                    or ref.split('/')[0].lower() != owner.lower()):
+                continue
+            last_run = field(item, 'last_run_time', 'lastRunTime', '')
+            rows.append(dict(ref=ref, title=str(getattr(item, 'title', '') or ref),
+                last_run=last_run.isoformat() if hasattr(last_run, 'isoformat') else str(last_run or '')))
+        return dict(jobs=rows, next_page_token=page.next_page_token or None)
     if operation == 'create_dataset':
         result = api.dataset_create_new(request['folder'], public=False, quiet=True, convert_to_csv=False)
         if result is None or result.error:
@@ -206,6 +223,7 @@ def operate(api, request):
             result = client.kernels.kernels_api_client.get_kernel_session_status(query)
         status = getattr(result.status, 'name', str(result.status)).lower().rsplit('.', 1)[-1]
         logs = ''
+        log_error = ''
         try:
             logs = api.kernels_logs(request['ref']) or ''
             try:
@@ -214,9 +232,14 @@ def operate(api, request):
                     logs = ''.join(str(row.get('data', row.get('text', ''))) if isinstance(row, dict) else str(row) for row in entries)
             except (TypeError, ValueError):
                 pass
-        except Exception:
-            pass  # A temporary log failure must not submit a second GPU job.
-        return {'status': status, 'error': result.failure_message or '', 'logs': logs[-48000:]}
+        except Exception as exc:
+            log_error = safe_error(exc)
+        for name in ('KAGGLE_API_TOKEN', 'KAGGLE_KEY'):
+            secret = os.environ.get(name, '')
+            if secret:
+                logs = logs.replace(secret, '[인증정보]')
+        return {'status': status, 'error': result.failure_message or '',
+                'logs': logs[-48000:], 'log_error': log_error}
     if operation == 'pull':
         return download_results(api, request['ref'], request['folder'])
     raise ValueError('알 수 없는 캐글 작업입니다.')

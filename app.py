@@ -24,6 +24,7 @@ from core.tts_engine import (
 from core.personal_colab import session_workspace, upload_name
 from core.result_downloads import saved_file_download
 from core.subtitle_mov_ui import render_subtitle_mov
+from core.kaggle_history_ui import render_history as render_kaggle_history, render_preview_recovery
 from core.colab_session_ui import render_connections, render_reset, render_qwen_bank_connection
 from core.voice_recommendations import (
     recommend_style, preview_text, style_note, speaker_gender,
@@ -58,7 +59,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.56 · 투명 자막 MOV"
+APP_VERSION = "v2.9.57 · 캐글 작업 이력·바로 복구"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1325,6 +1326,8 @@ def main():
             "- **AI 목소리 복제 (CosyVoice / GPT-SoVITS)**: 본인 구글 코랩을 연결하고 참조 음성과 실제 대사를 등록해 사용합니다."
         )
 
+    render_kaggle_history(work_dir, enabled=use_kaggle_gpu())
+
     # Step 1: 대본 입력
     st.subheader("1️⃣ 대본 입력 및 자동 변환")
     custom_chars_str = st.text_input(
@@ -2406,6 +2409,9 @@ def main():
                                         st.caption(f'💬 샘플: "{sample_text}" [{selected_style}]')
                                 except Exception as e:
                                     st.error(f"음성 생성 실패: {str(e)}")
+
+                    if use_kaggle_gpu():
+                        render_preview_recovery(work_dir, spk)
 
         render_emotions(st.session_state["parsed_segments"], st.session_state["voice_settings"],
                         work_dir, busy=generation_active, gemini_key=gemini_api_key, gemini_model=gemini_model)

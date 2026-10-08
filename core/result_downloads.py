@@ -29,10 +29,10 @@ def saved_file_download(label, path, *, file_name, mime, key, primary=False,
         if st.session_state.get(ready_key) != identity:
             if not st.button(label + ' 준비', key=widget_key + '_prepare',
                              use_container_width=True,
-                             help='묶음 파일을 준비한 다음 나타나는 저장 버튼을 누르세요.'):
+                             help='파일을 준비한 다음 나타나는 저장 버튼을 누르세요.'):
                 return
             st.session_state[ready_key] = identity
-        st.caption('묶음 파일이 준비되었습니다. 아래 버튼으로 저장하세요.')
+        st.caption('파일이 준비되었습니다. 아래 버튼으로 저장하세요.')
 
     try:
         with source.open('rb') as handle:

@@ -18,6 +18,7 @@ from .cosy3_client import request_payload
 from .tts_engine import TTSEngine, VoiceConfig, clean_spoken_text
 from . import kaggle_jobs
 from .result_downloads import saved_file_download
+from .subtitle_mov_ui import render_subtitle_mov
 from .emotion_directing import segment_cue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -505,3 +506,6 @@ def render_status(work_dir):
             with st.expander('캐글 실행 기록 보기'):
                 st.code(job['logs'], language=None)
     panel()
+    completed = kaggle_jobs.get_job(work_dir)
+    if completed and completed.get('status') == 'complete' and not completed.get('parallel_shard'):
+        render_subtitle_mov(work_dir, completed['result'], 'kaggle')

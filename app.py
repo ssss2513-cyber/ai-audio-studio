@@ -23,6 +23,7 @@ from core.tts_engine import (
 )
 from core.personal_colab import session_workspace, upload_name
 from core.result_downloads import saved_file_download
+from core.subtitle_mov_ui import render_subtitle_mov
 from core.colab_session_ui import render_connections, render_reset, render_qwen_bank_connection
 from core.voice_recommendations import (
     recommend_style, preview_text, style_note, speaker_gender,
@@ -57,7 +58,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.55 · 음성 연결 잡음 방지"
+APP_VERSION = "v2.9.56 · 투명 자막 MOV"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",
@@ -1051,13 +1052,13 @@ def main():
         <p class="hero-subtitle">
             소설 및 시나리오 속 <b>실제 등장인물과 대사</b>를 AI가 스마트하게 자동 분석하고, 
             <b>초고속 로컬 무료 AI(Supertonic 3)</b> · <b>성우급 감정 연기(Gemini Flash)</b> · <b>AI 목소리 복제(Colab GPU)</b>로 
-            생생한 멀티 보이스 낭독 오디오와 싱크 자막(SRT/VTT)을 원클릭으로 제작합니다.
+            생생한 멀티 보이스 낭독 오디오와 싱크 자막(SRT/VTT), 투명 자막 영상(MOV)을 제작합니다.
         </p>
         <div class="tag-row">
             <span class="tag-chip tag-chip-super">☁️ Chirp 3 HD (월 100만 자 무료)</span>
             <span class="tag-chip tag-chip-gemini">⚡ Gemini 3.1 / 3.8 Flash 감정 연기</span>
             <span class="tag-chip tag-chip-sovits">🎙️ AI 제로샷 목소리 복제 (Colab 16GB GPU)</span>
-            <span class="tag-chip tag-chip-sub">📝 싱크 정밀 자막(SRT/VTT)</span>
+            <span class="tag-chip tag-chip-sub">📝 싱크 자막(SRT/VTT) · 투명 MOV</span>
         </div>
         <div style="background: rgba(34, 197, 94, 0.15); border: 1px solid #22c55e; border-radius: 8px; padding: 8px 14px; margin: 12px auto 0 auto; max-width: 650px; color: #86efac; font-size: 13px; font-weight: 600; text-align: center;">
             ☁️ 개인 코랩 연결 · 본인 구글 계정으로 실행 · 접속별 작업 공간
@@ -2737,6 +2738,8 @@ def main():
                                             mime=mime, key="result_download_" + result_key,
                                             prepare_large=result_key == "main_zip")
             st.caption("현재 접속에서 생성한 파일입니다. 창을 닫거나 작업을 지우기 전에 다운로드해주세요.")
+
+        render_subtitle_mov(work_dir, res, 'normal')
 
         # 개별 대사별 타임라인 및 재생 목록
         with st.expander("🔍 세부 대사별 타임라인 및 개별 음성 확인", expanded=False):

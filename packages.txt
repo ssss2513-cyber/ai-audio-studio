@@ -1,2 +1,4 @@
 ffmpeg
 libsndfile1
+fontconfig
+fonts-noto-cjk

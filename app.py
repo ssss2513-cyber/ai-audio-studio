@@ -60,7 +60,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.61 · 캐글 FP32 가속·모델별 로그·중지 상태"
+APP_VERSION = "v2.9.62 · 캐글 대본 준비 403 처리"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",

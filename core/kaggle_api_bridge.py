@@ -186,10 +186,18 @@ def operate(api, request):
                 last_run=last_run.isoformat() if hasattr(last_run, 'isoformat') else str(last_run or '')))
         return dict(jobs=rows, next_page_token=page.next_page_token or None)
     if operation == 'create_dataset':
+        metadata = json.loads((Path(request['folder']) / 'dataset-metadata.json').read_text(encoding='utf-8'))
+        expected_owner = str(metadata.get('id', '')).split('/')[0]
+        if expected_owner.lower() != str(api.get_config_value(api.CONFIG_NAME_USER) or '').lower():
+            raise ValueError('연결한 계정과 대본 업로드 계정이 다릅니다. 현재 작업을 만든 계정으로 연결해주세요.')
         result = api.dataset_create_new(request['folder'], public=False, quiet=True, convert_to_csv=False)
         if result is None or result.error:
             raise ValueError(result.error if result else '캐글이 업로드 결과를 반환하지 않았습니다.')
-        return {'created': True}
+        status = str(getattr(result, 'status', '') or '').lower()
+        if status != 'ok':
+            raise ValueError('캐글이 대본 생성 접수를 확인하지 않았습니다. 응답 상태: ' + (status or '없음'))
+        return {'created': True, 'status': status,
+                'ref': getattr(result, 'ref', '') or '', 'url': getattr(result, 'url', '') or ''}
     if operation == 'dataset_status':
         return {'status': api.dataset_status(request['ref'])}
     if operation == 'push':

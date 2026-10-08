@@ -82,6 +82,16 @@ def _report(state):
              '대본 데이터 주소: ' + str(state.get('dataset_ref') or state.get('ref', '')),
              '캐글 주소: ' + str(state.get('ref', '')), '안내: ' + _clean(state.get('message')),
              '오류: ' + _clean(state.get('error'))]
+    if state.get('dataset_created'):
+        lines.extend(['', '[대본 업로드 확인]',
+            '생성 접수 응답: ' + str(state.get('dataset_create_status', '')),
+            '요청한 데이터 주소: ' + str(state.get('dataset_requested_ref', '')),
+            '조회한 데이터 주소: ' + str(state.get('dataset_ref', '')),
+            '주소 출처: ' + {'create_response': '캐글 생성 응답', 'request_metadata': '업로드 요청 정보'}.get(
+                state.get('dataset_address_source'), '확인 중'),
+            '준비 확인 횟수: ' + str(state.get('dataset_check_attempts', 0)),
+            '확인 경과 시간: ' + str(state.get('dataset_wait_seconds', 0)) + '초',
+            '마지막 준비 상태: ' + str(state.get('dataset_remote_status', '응답 없음'))])
     for label, detail in [('현재 오류 상세', state.get('diagnostic')),
                           ('최초 생성 요청 오류', state.get('submission_diagnostic'))]:
         if detail:
@@ -127,6 +137,13 @@ def render_record_download(state, key):
 
 
 def render_job_link(state, label='캐글 원본 작업 열기'):
+    dataset_ref = state.get('dataset_ref', '')
+    if (state.get('status') in ('failed', 'needs_check')
+            and jobs.DATASET_REF_PATTERN.fullmatch(dataset_ref)
+            and dataset_ref.split('/')[0].lower() == history.owner(state)):
+        st.link_button('대본 데이터 열기', 'https://www.kaggle.com/datasets/' + dataset_ref,
+                       use_container_width=True)
+        st.caption('작업을 만든 ' + dataset_ref.split('/')[0] + ' 계정으로 캐글에 로그인해 확인하세요.')
     ref = state.get('ref')
     if not ref or not jobs.REF_PATTERN.fullmatch(ref):
         return

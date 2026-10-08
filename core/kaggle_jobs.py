@@ -27,6 +27,7 @@ ACTIVE = {'uploading', 'dataset_ready', 'submitting', 'queued', 'running', 'rece
 CANCELED_REMOTE = {'canceled', 'cancelled', 'cancel_acknowledged'}
 TERMINAL_REMOTE = {'complete', 'error', 'failed', *CANCELED_REMOTE}
 REF_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/voice-studio-[a-z0-9-]+$')
+DATASET_REF_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+/voice-input-[a-z0-9-]+$')
 OPERATION_LABELS = {'auth': '계정 연결', 'create_dataset': '대본 전송',
     'dataset_status': '대본 준비 확인', 'push': '생성 요청',
     'status': '실행 상태 확인', 'kernel_info': '작업 등록 확인', 'pull': '결과 받기',
@@ -418,20 +419,19 @@ def start_job(work_dir, plan, archive, credentials, notebook_name, force=False, 
 
 def _submit(work_dir, state, credentials):
     folder = Path(state['folder'])
-    api_call(credentials, 'create_dataset', timeout=600, folder=str(folder / 'input'))
-    state.update(status='dataset_ready', message='캐글에서 대본 업로드를 마무리하고 있습니다.')
+    result = api_call(credentials, 'create_dataset', timeout=600, folder=str(folder / 'input'))
+    state.update(status='dataset_ready', dataset_created=True,
+        dataset_create_status=result.get('status', ''),
+        dataset_requested_ref=state['dataset_ref'],
+        message='캐글이 대본 생성 요청을 접수했습니다. 실제 데이터 주소와 준비 상태를 확인합니다.')
     _save(work_dir, state)
-    deadline = time.monotonic() + 600
-    while True:
-        response = api_call(credentials, 'dataset_status', ref=state.get('dataset_ref') or state['ref'])
-        status = response['status'].lower()
-        if status == 'ready':
-            break
-        if status in ('error', 'failed') or time.monotonic() > deadline:
-            state.update(status='failed', error='캐글 대본 업로드가 완료되지 않았습니다: ' + status)
-            _save(work_dir, state)
-            raise KaggleError(state['error'])
-        threading.Event().wait(8)
+    _adopt_dataset_ref(state, result, credentials['username'])
+    metadata_path = folder / 'code' / 'kernel-metadata.json'
+    metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+    metadata['dataset_sources'] = [state['dataset_ref']]
+    metadata_path.write_text(json.dumps(metadata), encoding='utf-8')
+    _save(work_dir, state)
+    _wait_for_dataset(work_dir, state, credentials)
     # Persist the expected reference BEFORE the one non-idempotent GPU submit.
     state.update(status='submitting', submission='unknown', message='캐글 GPU 2개에 생성 작업을 요청합니다.')
     _save(work_dir, state)
@@ -454,6 +454,108 @@ def _submit(work_dir, state, credentials):
     _adopt_job_ref(state, result.get('url'), credentials['username'])
     _save(work_dir, state)
     return True
+
+
+def _adopt_dataset_ref(state, result, username):
+    """Keep Kaggle's creation reference, restricted to this user's unique input."""
+    expected = state['dataset_requested_ref']
+    expected_slug = expected.split('/')[-1]
+    candidates = []
+    for name in ('ref', 'url'):
+        candidate = result.get(name)
+        if not candidate:
+            continue
+        if not isinstance(candidate, str):
+            raise KaggleError('캐글이 반환한 대본 주소 형식이 올바르지 않습니다.', operation='create_dataset')
+        if candidate.startswith('https://'):
+            parsed = urlparse(candidate)
+            if (parsed.hostname not in ('www.kaggle.com', 'kaggle.com')
+                    or not parsed.path.startswith('/datasets/')):
+                raise KaggleError('캐글이 반환한 대본 주소를 확인하지 못했습니다.', operation='create_dataset')
+            candidate = parsed.path.removeprefix('/datasets/').strip('/')
+        if (not DATASET_REF_PATTERN.fullmatch(candidate)
+                or candidate.split('/')[0].lower() != username.lower()
+                or not re.fullmatch(re.escape(expected_slug) + r'(?:-\d+)?', candidate.split('/')[1])):
+            raise KaggleError('캐글이 반환한 대본 주소가 현재 계정·작업과 다릅니다. GPU 요청을 보내지 않았습니다.',
+                              operation='create_dataset')
+        candidates.append(candidate)
+    if len({candidate.lower() for candidate in candidates}) > 1:
+        raise KaggleError('캐글이 반환한 두 대본 주소가 서로 다릅니다. GPU 요청을 보내지 않았습니다.',
+                          operation='create_dataset')
+    state['dataset_ref'] = candidates[0] if candidates else expected
+    state['dataset_address_source'] = 'create_response' if candidates else 'request_metadata'
+
+
+def _wait_for_dataset(work_dir, state, credentials):
+    """Poll only the just-created dataset; a denied read never counts as ready.
+
+    Creating a private dataset is asynchronous. One immediate 403/404 does not
+    distinguish an unavailable dataset from a permanent access problem. Allow
+    at most 120 seconds for these reads, within the existing 600-second upload
+    deadline. Never recreate the dataset or submit a GPU job from recovery.
+    """
+    started = time.monotonic()
+    deadline, access_deadline = started + 600, started + 120
+    request_deadline = deadline
+    last_error = None
+    attempt = 0
+
+    def expired():
+        state['dataset_wait_seconds'] = elapsed = int(time.monotonic() - started)
+        return KaggleError(
+            f'대본 생성 접수 후 {elapsed}초 동안 {attempt}회 조회했지만 준비 상태를 확인하지 못했습니다. '
+            f'대본 주소: {state["dataset_ref"]}. GPU 요청은 보내지 않았습니다. '
+            '작업 기록의 ‘대본 데이터 열기’에서 같은 계정의 접근 가능 여부를 확인해주세요. '
+            f'마지막 캐글 응답: {last_error or state.get("dataset_remote_status", "응답 없음")}',
+            http_status=getattr(last_error, 'http_status', None), operation='dataset_status')
+
+    while True:
+        remaining = request_deadline - time.monotonic()
+        if remaining <= 0:
+            raise expired()
+        attempt += 1
+        state['dataset_check_attempts'] = attempt
+        try:
+            response = api_call(credentials, 'dataset_status', ref=state['dataset_ref'],
+                timeout=min(60, remaining))
+        except KaggleError as exc:
+            now = time.monotonic()
+            elapsed = int(now - started)
+            state['dataset_wait_seconds'] = elapsed
+            if last_error and now >= request_deadline:
+                raise expired() from None
+            retryable = (exc.stage == 'dataset_status'
+                         and exc.http_status in (403, 404, 409, 429, 500, 502, 503, 504))
+            if not retryable:
+                raise
+            last_error = exc
+            if exc.http_status in (403, 404):
+                request_deadline = min(request_deadline, access_deadline)
+            if now >= request_deadline:
+                raise expired() from None
+            _remember_error(state, exc)
+            state.update(error='', message=
+                f'대본 생성 접수 완료 · 준비 상태 {attempt}회 확인 중 ({elapsed}초, 응답 {exc.http_status}). '
+                + ('최대 120초 동안 접근 상태를 다시 확인합니다.' if exc.http_status in (403, 404)
+                   else '대본을 다시 올리지 않고 잠시 후 조회합니다.'))
+            _save(work_dir, state)
+            threading.Event().wait(max(0, min(8, request_deadline - time.monotonic())))
+            continue
+        request_deadline, last_error = deadline, None
+        state['dataset_wait_seconds'] = int(time.monotonic() - started)
+        state['dataset_remote_status'] = status = str(response.get('status', '')).lower()
+        state.pop('diagnostic', None)
+        if status == 'ready':
+            state.update(message='대본 준비 완료 · 캐글 GPU 요청을 준비합니다.', error='')
+            _save(work_dir, state)
+            return
+        if status in ('error', 'failed') or time.monotonic() >= deadline:
+            raise KaggleError('캐글 대본 업로드가 완료되지 않았습니다. 마지막 상태: ' + (status or '없음'),
+                              operation='dataset_status')
+        state.update(error='', message=
+            f'캐글이 대본을 준비 중입니다 · {state["dataset_wait_seconds"]}초 · 상태: {status or "확인 중"}')
+        _save(work_dir, state)
+        threading.Event().wait(max(0, min(8, deadline - time.monotonic())))
 
 
 def readable_logs(raw):

@@ -289,7 +289,7 @@ def render_preview_recovery(work_dir, speaker):
                     st.caption('요청 대사: ' + _clean(job['preview_text']))
             elif job:
                 st.info('현재 확인할 작업: ' + _label(job) + ' · '
-                        STATUS.get(job.get('status'), '상태 확인 중'))
+                        + STATUS.get(job.get('status'), '상태 확인 중'))
                 _check_current(work_dir, key)
             elif not request.get('error'):
                 st.warning('아직 등록된 미리듣기 작업이 없습니다. 위 버튼을 눌러 요청해주세요.')

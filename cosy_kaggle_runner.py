@@ -29,6 +29,7 @@ from cosy_kaggle_contract import (FORMAT, VERSION, SOURCE_REVISION, MODELS,
     MAX_ITEMS, MAX_REFERENCE_BYTES, MAX_REFERENCES_BYTES, MAX_PLAN_BYTES)
 from cosy3_voicebank_catalog import BANK_REVISION, VOICEBANK, ATTRIBUTION
 from cosy_kaggle_queue import PROTOCOL as QUEUE_PROTOCOL, LANES, PREFETCH, LIVE
+from audio_join import copy_pcm_clip, write_pcm_silence
 
 CODE = Path(__file__).resolve().parent
 RUNTIME = Path('/tmp/voice_studio_kaggle_v1')
@@ -580,15 +581,9 @@ def merge_complete(plan, folder, keys):
                     raise RuntimeError('대사별 오디오 형식이 달라 합치기를 중단했습니다.')
                 if index > 1:
                     pause_frames = round(rate * plan.get('pause_ms', 500) / 1000)
-                    dst.writeframes(b'\0' * (pause_frames * 2))
-                    elapsed += pause_frames
+                    elapsed += write_pcm_silence(dst, pause_frames)
                 start = elapsed * 1000 / rate
-                while True:
-                    block = src.readframes(65536)
-                    if not block:
-                        break
-                    dst.writeframes(block)
-                elapsed += src.getnframes()
+                elapsed += copy_pcm_clip(src, dst)
                 end = elapsed * 1000 / rate
             text = item['text'].replace('\r', ' ').replace('\n', ' ')
             if plan.get('include_speaker', True):

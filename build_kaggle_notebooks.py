@@ -8,7 +8,7 @@ import zlib
 ROOT = Path(__file__).resolve().parent
 SOURCES = ('cosy_kaggle_runner.py', 'cosy_kaggle_contract.py', 'colab_server.py',
            'cosy3_colab_server.py', 'cosy3_model.py', 'cosy3_voicebank_catalog.py',
-           'cosy_kaggle_queue.py')
+           'cosy_kaggle_queue.py', 'audio_join.py')
 payload = json.dumps({name: (ROOT / name).read_text(encoding='utf-8') for name in SOURCES},
                      ensure_ascii=False).encode()
 encoded = base64.b64encode(zlib.compress(payload, 9)).decode()
@@ -113,7 +113,7 @@ for engine, title, filename in (
     ('cosyvoice3', 'CosyVoice 3', 'CosyVoice3_Kaggle_DualGPU.ipynb'),
     ('auto', 'CosyVoice 2·3 혼합 대본', 'CosyVoice2_3_Kaggle_DualGPU.ipynb'),
 ):
-    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.2
+    intro = f'''# {title} · 캐글 GPU 2개 · v1.0.3
 
 기존 코랩은 계속 사용할 수 있습니다. 이 노트북은 **캐글에서 대본 전체를 생성하는 추가 옵션**입니다.
 
@@ -131,9 +131,11 @@ GPU 2개인 작업 하나에서 최대 **6개 생성 + 다음 6개 준비**입�
 대사마다 사이트로 음성을 전송하지 않고 캐글 안에서 처리한 뒤, 원래 순번대로 **MP3 하나**로 합칩니다.
 혼합 대본은 두 GPU로 코지2를 만든 다음 코지3를 만듭니다. 최종 파일은 대본 순서입니다.
 위 설명은 이 수동 통합 노트북을 직접 실행할 때의 방식입니다.
-공유 사이트 v2.9.54의 혼합 생성 버튼은 코지2·코지3를 별도 캐글 작업으로 동시에 제출합니다.
+공유 사이트 v2.9.55의 혼합 생성 버튼은 코지2·코지3를 별도 캐글 작업으로 동시에 제출합니다.
 각 작업은 GPU 2개를 요청하고, 원본 WAV를 사이트에서 대본 순번대로 합쳐 MP3를 한 번만 만듭니다.
 화자·스타일·속도·참고 음성과 기존 모델의 FP32 및 생성 설정을 유지합니다.
+합칠 때 값이 갑자기 끊기는 음성의 시작·끝 최대 2ms만 완만하게 연결합니다.
+원본 대사를 자르거나 겹치지 않고 대사 간격·전체 길이·자막 시간을 유지합니다.
 
 브라우저를 닫고 배치 실행하려면 Input과 설정을 저장한 뒤 **Save Version → Save & Run All**을 사용하세요.
 이 모드는 깨끗한 세션에서 1번부터 다시 실행합니다. 실행 시간·GPU 할당량은 Kaggle 계정 제한을 따릅니다.
@@ -152,7 +154,7 @@ GPU 2개인 작업 하나에서 최대 **6개 생성 + 다음 6개 준비**입�
     notebook = dict(cells=cells, metadata={
         'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
         'language_info': {'name': 'python'},
-        'voice_studio': {'version': '1.0.2', 'engine': engine, 'gpu_count': 2,
+        'voice_studio': {'version': '1.0.3', 'engine': engine, 'gpu_count': 2,
                          'concurrency_per_gpu': 3, 'prefetch_per_gpu': 3}}, nbformat=4, nbformat_minor=4)
     (ROOT / filename).write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
     print('작성: ' + filename)

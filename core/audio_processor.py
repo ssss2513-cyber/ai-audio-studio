@@ -1,7 +1,9 @@
 import os
+import math
 import subprocess
 import tempfile
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Tuple
 try:
@@ -9,6 +11,7 @@ try:
 except Exception:
     AudioSegment = None
 import mutagen.mp3
+from audio_join import copy_pcm_clip, wrap_pcm32, write_pcm_silence
 
 @dataclass
 class AudioTiming:
@@ -62,6 +65,8 @@ class AudioProcessor:
         """
         if not segment_info_list:
             raise ValueError("병합할 오디오 세그먼트가 없습니다.")
+        if not isinstance(pause_ms, (int, float)) or not math.isfinite(pause_ms) or pause_ms < 0:
+            raise ValueError("대사 사이 간격은 0 이상의 숫자여야 합니다.")
 
         indices = [segment.get("index") for segment in segment_info_list]
         if any(type(index) is not int or index <= 0 for index in indices) or len(set(indices)) != len(indices):
@@ -73,39 +78,19 @@ class AudioProcessor:
 
         timings: List[AudioTiming] = []
         valid_segments: List[dict] = []
-        current_ms = 0
 
-        # 1. 고속 타임스탬프 계산 (mutagen 기반)
         for i, seg in enumerate(segment_info_list):
             audio_path = seg['file_path']
             if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 100:
                 raise ValueError(f"대사 {seg.get('index', i + 1)}번의 저장된 음성 파일을 찾을 수 없습니다.")
 
-            duration_ms = self.get_audio_duration_ms(audio_path)
-            if duration_ms <= 0:
-                raise ValueError(f"대사 {seg.get('index', i + 1)}번의 음성 길이를 읽을 수 없습니다.")
-            start_ms = current_ms
-            end_ms = start_ms + duration_ms
-
-            timings.append(AudioTiming(
-                segment_index=seg.get('index', i + 1),
-                speaker=seg.get('speaker', ''),
-                text=seg.get('text', ''),
-                file_path=audio_path,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                duration_ms=duration_ms
-            ))
-
             valid_segments.append(seg)
-            current_ms += duration_ms + pause_ms
 
         if not valid_segments:
             raise ValueError("병합할 수 있는 유효한 오디오 파일이 없습니다.")
 
-        # Match silence and clip sample rates/channels. The concat demuxer
-        # requires compatible streams; mismatches can distort timing or pitch.
-        # Normalize mixed-engine clips to lossless PCM on disk, never in RAM.
+        # Decode compressed clips separately so each decoder can honor its own
+        # encoder delay/padding. Join PCM samples, never MP3 packet boundaries.
         profiles = []
         for seg in valid_segments:
             if str(seg["file_path"]).lower().endswith(".wav"):
@@ -116,6 +101,10 @@ class AudioProcessor:
                 profiles.append(("mp3", info.sample_rate, info.channels, 0))
         sample_rate = max(profile[1] for profile in profiles)
         channels = max(profile[2] for profile in profiles)
+        if channels not in (1, 2) or sample_rate <= 0:
+            raise ValueError("음성의 샘플레이트 또는 채널 형식이 올바르지 않습니다.")
+        identical_pcm = len(set(profiles)) == 1 and profiles[0][0] == 'wav' and profiles[0][3] in (2, 4)
+        width = profiles[0][3] if identical_pcm else 4
 
         def ffmpeg(arguments, timeout):
             result = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y"] + arguments,
@@ -127,39 +116,43 @@ class AudioProcessor:
         try:
             with tempfile.TemporaryDirectory(prefix=".audio_merge_", dir=out_dir) as temporary:
                 paths = [seg["file_path"] for seg in valid_segments]
-                mixed_profiles = len(set(profiles)) > 1 or (profiles[0][0] == "wav" and profiles[0][3] != 2)
-                use_pcm = mixed_profiles or profiles[0][0] == "wav"
-                if mixed_profiles:
-                    normalized = []
-                    for index, source in enumerate(paths):
-                        if profiles[index] == ("wav", sample_rate, channels, 2):
-                            normalized.append(source)
-                            continue
+                if not identical_pcm:
+                    def normalize(index):
+                        source = paths[index]
+                        if profiles[index] == ("wav", sample_rate, channels, 4):
+                            return source
+                        raw = os.path.join(temporary, f"{index:06d}.pcm")
                         target = os.path.join(temporary, f"{index:06d}.wav")
+                        # Keep high-resolution decoded PCM until the one final
+                        # MP3 encode; don't quantize mixed input to 16 bit first.
                         ffmpeg(["-i", source, "-map", "0:a:0", "-vn", "-ar", str(sample_rate),
-                                "-ac", str(channels), "-c:a", "pcm_s16le", "-threads", "2", target], 120)
-                        normalized.append(target)
-                    paths = normalized
+                                "-ac", str(channels), "-c:a", "pcm_s32le", "-f", "s32le",
+                                "-threads", "1", raw], 120)
+                        wrap_pcm32(raw, target, sample_rate, channels)
+                        os.unlink(raw)
+                        return target
 
-                silence_file = None
-                if pause_ms > 0 and len(paths) > 1:
-                    silence_file = os.path.join(temporary, "silence.wav" if use_pcm else "silence.mp3")
-                    codec_args = ["-c:a", "pcm_s16le"] if use_pcm else ["-c:a", "libmp3lame", "-b:a", "192k"]
-                    ffmpeg(["-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl={'mono' if channels == 1 else 'stereo'}",
-                            "-t", str(pause_ms / 1000.0), "-ar", str(sample_rate), "-ac", str(channels)]
-                           + codec_args + [silence_file], 30)
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        paths = list(pool.map(normalize, range(len(paths))))
 
-                concat_list_path = os.path.join(temporary, "concat.txt")
-                with open(concat_list_path, "w", encoding="utf-8") as handle:
-                    for index, source in enumerate(paths):
-                        entries = [source]
-                        if silence_file and index < len(paths) - 1:
-                            entries.append(silence_file)
-                        for entry in entries:
-                            safe_path = os.path.abspath(entry).replace('\\', '/').replace("'", "'\\''")
-                            handle.write(f"file '{safe_path}'\n")
+                joined = os.path.join(temporary, "joined.wav")
+                elapsed = 0
+                pause_frames = round(sample_rate * pause_ms / 1000)
+                with wave.open(joined, "wb") as destination:
+                    destination.setparams((channels, width, sample_rate, 0, 'NONE', 'not compressed'))
+                    for index, (source, seg) in enumerate(zip(paths, valid_segments)):
+                        if index and pause_frames:
+                            elapsed += write_pcm_silence(destination, pause_frames)
+                        start_ms = round(elapsed * 1000 / sample_rate)
+                        with wave.open(str(source), "rb") as audio:
+                            elapsed += copy_pcm_clip(audio, destination)
+                        end_ms = round(elapsed * 1000 / sample_rate)
+                        timings.append(AudioTiming(
+                            segment_index=seg['index'], speaker=seg.get('speaker', ''),
+                            text=seg.get('text', ''), file_path=seg['file_path'],
+                            start_ms=start_ms, end_ms=end_ms, duration_ms=end_ms - start_ms))
                 merged = os.path.join(temporary, "merged.mp3")
-                ffmpeg(["-f", "concat", "-safe", "0", "-i", concat_list_path, "-map", "0:a:0",
+                ffmpeg(["-i", joined, "-map", "0:a:0",
                         "-ar", str(sample_rate), "-ac", str(channels), "-c:a", "libmp3lame",
                         "-b:a", "192k", "-threads", "2", merged], 600)
                 if not os.path.isfile(merged) or os.path.getsize(merged) < 100 or self.get_audio_duration_ms(merged) <= 0:

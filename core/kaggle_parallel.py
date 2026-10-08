@@ -18,6 +18,7 @@ import zipfile
 
 from . import kaggle_jobs as jobs
 from cosy3_voicebank_catalog import ATTRIBUTION
+from audio_join import copy_pcm_clip, write_pcm_silence
 
 ENGINES = {'cosyvoice': ('코지2', 'CosyVoice2_Kaggle_DualGPU.ipynb'),
            'cosyvoice3': ('코지3', 'CosyVoice3_Kaggle_DualGPU.ipynb')}
@@ -285,7 +286,8 @@ def merge(plan, state):
     elapsed, rate = 0, None
     srt, vtt, timings = [], ['WEBVTT\n'], []
     wav_path = folder / 'full_audio.wav'
-    with wave.open(str(wav_path), 'wb') as dst:
+    wav_temporary = folder / 'full_audio.part.wav'
+    with wave.open(str(wav_temporary), 'wb') as dst:
         for ordinal, item in enumerate(items, 1):
             with wave.open(str(clips[item['index']]), 'rb') as src:
                 if src.getnchannels() != 1 or src.getsampwidth() != 2 or src.getcomptype() != 'NONE' or not src.getnframes():
@@ -297,16 +299,9 @@ def merge(plan, state):
                     raise ValueError('두 모델의 원본 샘플레이트가 달라 합치기를 중단했습니다.')
                 if ordinal > 1:
                     silence = round(rate * max(0, min(10000, int(plan.get('pause_ms', 500)))) / 1000)
-                    dst.writeframes(b'\0' * (silence * 2))
-                    elapsed += silence
+                    elapsed += write_pcm_silence(dst, silence)
                 begin = elapsed * 1000 / rate
-                received = 0
-                while block := src.readframes(65536):
-                    received += len(block)
-                    dst.writeframes(block)
-                if received != src.getnframes() * 2:
-                    raise ValueError('잘린 원본 음성이 있어 합치기를 중단했습니다.')
-                elapsed += src.getnframes()
+                elapsed += copy_pcm_clip(src, dst)
             end = elapsed * 1000 / rate
             text = item['text'].replace('\r', ' ').replace('\n', ' ')
             if plan.get('include_speaker'):
@@ -315,6 +310,7 @@ def merge(plan, state):
             vtt.append(f'{ordinal}\n{_timestamp(begin, False)} --> {_timestamp(end, False)}\n{text}\n')
             timings.append(dict(index=item['index'], speaker=item['speaker'], engine=item['engine'],
                                 start_ms=round(begin), end_ms=round(end)))
+    os.replace(wav_temporary, wav_path)
     temporary = folder / 'full_audio.part.mp3'
     subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
                     '-i', str(wav_path), '-codec:a', 'libmp3lame', '-b:a', '192k', str(temporary)],

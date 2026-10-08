@@ -57,7 +57,7 @@ from core.emotion_directing import segment_cue, tagged_line, require_support
 from core.emotion_ui import render_emotions
 
 
-APP_VERSION = "v2.9.54 · GPU당 3개 생성·다음 3개 준비"
+APP_VERSION = "v2.9.55 · 음성 연결 잡음 방지"
 
 st.set_page_config(
     page_title=f"화자별 자동 TTS 생성기 (CosyVoice 2·3 · Qwen · Gemini) - {APP_VERSION}",

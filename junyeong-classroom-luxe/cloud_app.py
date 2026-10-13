@@ -57,7 +57,7 @@ def recover_page():
 @app.post('/api/recover')
 def recover_admin(body: Recover, req: Request):
  core.rate(req,'owner-recovery',6)
- if not token_matches('LUMIEL_RECOVERY_HASH',body.token): core.fail(403,'운영자 전용 복구 링크가 필요합니다.')
+ if not token_matches('LUMIEL_SETUP_HASH',body.token): core.fail(403,'운영자 전용 복구 링크가 필요합니다.')
  if body.password!=body.confirmation: core.fail(422,'비밀번호가 서로 다릅니다.')
  email=os.getenv('ADMIN_OWNER_EMAIL','ssss2513@gmail.com').strip().lower()
  hp=core.hash_password(body.password)

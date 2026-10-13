@@ -272,39 +272,73 @@ def logout(req: Request):
 
 
 class SmsCode(BaseModel):
-    code: str=Field(min_length=6,max_length=6,pattern=r'^\d{6}
-    identityVerificationId: str=Field(min_length=1,max_length=80)
+    code: str=Field(min_length=6,max_length=6,pattern='^[0-9]{6}$')
 
-@app.get('/api/identity/config')
-def identity_config(req: Request):
+def _sms_ready():
+    return all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER'))
+
+def _otp_hash(member_id: str, code: str):
+    return hmac.new(KEY, f'sms:{member_id}:{code}'.encode(), hashlib.sha256).hexdigest()
+
+def _send_solapi_sms(to_phone: str, message: str):
+    if not _sms_ready(): fail(503,'문자 인증 서비스가 아직 연결되지 않았습니다.')
+    import requests as _requests, datetime as _datetime
+    api_key=os.getenv('SOLAPI_API_KEY','').strip()
+    api_secret=os.getenv('SOLAPI_API_SECRET','').strip()
+    sender=os.getenv('SOLAPI_SENDER','').strip()
+    salt=secrets.token_hex(16)
+    date=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+    signature=hmac.new(api_secret.encode(), (date+salt).encode(), hashlib.sha256).hexdigest()
+    auth=f'HMAC-SHA256 apiKey={api_key}, date={date}, salt={salt}, signature={signature}'
+    payload={'message':{'to':to_phone,'from':sender,'text':message}}
+    r=_requests.post('https://api.solapi.com/messages/v4/send',json=payload,headers={'Authorization':auth,'Content-Type':'application/json'},timeout=15)
+    if r.status_code not in (200,201): fail(502,'인증 문자를 보내지 못했습니다. 잠시 후 다시 시도해 주세요.')
+
+@app.get('/api/sms/status')
+def sms_status(req: Request):
     m=require(req)
-    ready=all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET'))
-    return {'ready':ready,'verified':bool(m['verified']),'storeId':os.getenv('PORTONE_STORE_ID','') if ready else '','channelKey':os.getenv('PORTONE_CHANNEL_KEY','') if ready else ''}
+    return {'ready':_sms_ready(),'verified':bool(m['phone_verified'])}
 
-@app.post('/api/identity/complete')
-def identity_complete(body: IdentityComplete, req: Request):
+@app.post('/api/sms/send')
+def sms_send(req: Request):
     m=require(req,write=True)
-    secret=os.getenv('PORTONE_API_SECRET','').strip()
-    if not secret: fail(503,'본인인증 서비스가 아직 연결되지 않았습니다.')
-    import requests
-    r=requests.get('https://api.portone.io/identity-verifications/'+requests.utils.quote(body.identityVerificationId,safe=''),headers={'Authorization':'PortOne '+secret},timeout=20)
-    if r.status_code!=200: fail(502,'본인인증 결과를 확인하지 못했습니다.')
-    info=r.json()
-    if info.get('status')!='VERIFIED': fail(409,'본인인증이 완료되지 않았습니다.')
-    customer=info.get('verifiedCustomer') or {}
-    verified_name=(customer.get('name') or '').strip()
-    verified_phone=re.sub(r'\D','',customer.get('phoneNumber') or '')
-    member_name=dec(m['name']).strip()
-    member_phone=re.sub(r'\D','',dec(m['phone']))
-    if verified_name and verified_name!=member_name: fail(409,'회원가입 이름과 본인인증 이름이 다릅니다.')
-    if verified_phone and verified_phone!=member_phone: fail(409,'회원가입 휴대폰 번호와 본인인증 번호가 다릅니다.')
-    di=(customer.get('di') or '')[:255]
+    if m['phone_verified']: return {'ok':True,'alreadyVerified':True}
+    rate(req,'sms-send',8)
+    now=time.time()
     with db() as c:
-        if di:
-            dup=c.execute("SELECT id FROM members WHERE verification_di=? AND id<>?",(digest(di),m['id'])).fetchone()
-            if dup: fail(409,'이미 다른 회원 계정에서 사용된 본인정보입니다.')
-        c.execute('UPDATE members SET verified=1,verified_at=?,verification_id=?,verification_di=?,revision=revision+1 WHERE id=?',(time.time(),body.identityVerificationId,digest(di) if di else '',m['id']))
-        audit(c,m['id'],m['id'],'identity_verified')
+        old=c.execute('SELECT * FROM sms_otps WHERE member=?',(m['id'],)).fetchone()
+        if old and now-old['last_sent']<60: fail(429,'인증 문자는 1분 후 다시 요청할 수 있습니다.')
+        if old and old['sends']>=5 and now-old['last_sent']<3600: fail(429,'문자 요청 횟수가 많습니다. 1시간 뒤 다시 시도해 주세요.')
+    code=f'{secrets.randbelow(1000000):06d}'
+    _send_solapi_sms(dec(m['phone']),f'[메종 루미엘] 인증번호는 {code} 입니다. 5분 안에 입력해 주세요.')
+    with db() as c:
+        sends=(old['sends']+1) if old and now-old['last_sent']<3600 else 1
+        c.execute("""INSERT INTO sms_otps(member,code_hash,expires,attempts,sends,last_sent)
+          VALUES(?,?,?,?,?,?) ON CONFLICT(member) DO UPDATE SET
+          code_hash=excluded.code_hash,expires=excluded.expires,attempts=0,sends=excluded.sends,last_sent=excluded.last_sent""",
+          (m['id'],_otp_hash(m['id'],code),now+300,0,sends,now))
+        audit(c,m['id'],m['id'],'sms_code_sent')
+    return {'ok':True,'expiresIn':300}
+
+@app.post('/api/sms/verify')
+def sms_verify(body: SmsCode, req: Request):
+    m=require(req,write=True)
+    rate(req,'sms-verify',20)
+    now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT * FROM sms_otps WHERE member=?',(m['id'],)).fetchone()
+        if not row: fail(404,'먼저 인증번호를 요청해 주세요.')
+        if row['expires']<now:
+            c.execute('DELETE FROM sms_otps WHERE member=?',(m['id'],))
+            fail(410,'인증번호가 만료되었습니다. 새 인증번호를 요청해 주세요.')
+        if row['attempts']>=5: fail(429,'인증번호 입력 횟수를 초과했습니다. 새 인증번호를 요청해 주세요.')
+        if not secrets.compare_digest(row['code_hash'],_otp_hash(m['id'],body.code)):
+            c.execute('UPDATE sms_otps SET attempts=attempts+1 WHERE member=?',(m['id'],))
+            fail(422,'인증번호가 일치하지 않습니다.')
+        c.execute('UPDATE members SET phone_verified=1,phone_verified_at=?,revision=revision+1 WHERE id=?',(now,m['id']))
+        c.execute('DELETE FROM sms_otps WHERE member=?',(m['id'],))
+        audit(c,m['id'],m['id'],'phone_verified')
         fresh=c.execute('SELECT * FROM members WHERE id=?',(m['id'],)).fetchone()
     return {'ok':True,'member':present(fresh,True)}
 

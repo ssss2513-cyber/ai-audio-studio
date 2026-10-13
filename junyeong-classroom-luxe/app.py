@@ -196,7 +196,7 @@ async def security(req: Request, call_next):
     response.headers['Referrer-Policy']='same-origin'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' https://cdn.portone.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     if req.url.path.startswith('/api/'): response.headers['Cache-Control']='private, no-store, max-age=0'
     if SECURE: response.headers['Strict-Transport-Security']='max-age=31536000'
     return response

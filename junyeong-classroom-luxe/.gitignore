@@ -1,0 +1,14 @@
+data/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.sqlite*
+*.db
+*.key
+*.mp4
+*.webm
+*.mov

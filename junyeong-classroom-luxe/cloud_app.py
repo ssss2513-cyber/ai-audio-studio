@@ -78,3 +78,98 @@ def health():
 if os.getenv('S3_BUCKET'):
  import cloud_storage
  cloud_storage.install(core)
+
+
+# ---- Private Google Drive video library ---------------------------------
+DRIVE_FOLDER_ID=os.getenv('GOOGLE_DRIVE_FOLDER_ID','').strip()
+_drive_credentials=None
+
+def _drive_creds():
+ global _drive_credentials
+ raw=os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON','').strip()
+ if not raw: core.fail(503,'Google Drive 서비스 계정 연결이 아직 완료되지 않았습니다.')
+ try:
+  from google.oauth2 import service_account
+  from google.auth.transport.requests import Request as GoogleAuthRequest
+  if _drive_credentials is None:
+   _drive_credentials=service_account.Credentials.from_service_account_info(json.loads(raw),scopes=['https://www.googleapis.com/auth/drive.readonly'])
+  if not _drive_credentials.valid:
+   _drive_credentials.refresh(GoogleAuthRequest())
+  return _drive_credentials
+ except Exception:
+  core.fail(503,'Google Drive 인증 정보를 확인해 주세요.')
+
+def _drive_auth_headers():
+ creds=_drive_creds()
+ return {'Authorization':'Bearer '+creds.token}
+
+@app.get('/api/admin/drive/status')
+def drive_status(req: Request):
+ core.require(req,admin=True)
+ return {'connected':bool(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON','').strip() and DRIVE_FOLDER_ID),'folderId':DRIVE_FOLDER_ID}
+
+@app.post('/api/admin/drive/sync')
+def drive_sync(req: Request):
+ a=core.require(req,admin=True,write=True)
+ if not DRIVE_FOLDER_ID: core.fail(503,'Google Drive 폴더 ID가 설정되지 않았습니다.')
+ import requests
+ params={
+  'q':f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+  'fields':'files(id,name,mimeType,size,modifiedTime,videoMediaMetadata)',
+  'pageSize':'1000',
+  'orderBy':'name'
+ }
+ r=requests.get('https://www.googleapis.com/drive/v3/files',headers=_drive_auth_headers(),params=params,timeout=30)
+ if r.status_code!=200: core.fail(502,'Google Drive 영상 목록을 읽지 못했습니다. 폴더 공유와 Drive API 설정을 확인해 주세요.')
+ files=r.json().get('files',[])
+ added=0; updated=0
+ with core.db() as c:
+  for f in files:
+   mime=f.get('mimeType','')
+   if mime not in ('video/mp4','video/webm'): continue
+   drive_id=f['id']; name=f.get('name') or 'Drive 영상'
+   size=int(f.get('size') or 0)
+   duration_ms=((f.get('videoMediaMetadata') or {}).get('durationMillis') or '0')
+   try: duration=float(duration_ms)/1000
+   except Exception: duration=0
+   old=c.execute("SELECT * FROM videos WHERE source='drive' AND external_id=?",(drive_id,)).fetchone()
+   if old:
+    c.execute('UPDATE videos SET title=?,size=?,mime=?,duration=?,revision=revision+1 WHERE id=?',(name,size,mime,duration,old['id']))
+    updated+=1
+   else:
+    ident=core.uid()
+    c.execute("""INSERT INTO videos(id,title,description,size,mime,duration,theme,state,position,revision,poster,created,source,external_id)
+      VALUES(?,?,?,?,?,?,'rose','private',0,1,0,?,'drive',?)""",(ident,name,'Google Drive에서 연결된 영상',size,mime,duration,time.time(),drive_id))
+    core.audit(c,a['id'],ident,'drive_video_add')
+    added+=1
+ return {'ok':True,'added':added,'updated':updated,'found':len(files)}
+
+def _drive_stream(req: Request,v):
+ import requests
+ file_id=v['external_id']
+ if not file_id: core.fail(404,'Google Drive 파일 ID가 없습니다.')
+ headers=_drive_auth_headers()
+ if req.headers.get('range'): headers['Range']=req.headers['range']
+ upstream=requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}',params={'alt':'media'},headers=headers,stream=True,timeout=60)
+ if upstream.status_code not in (200,206):
+  upstream.close()
+  core.fail(502,'Google Drive에서 영상을 불러오지 못했습니다.')
+ out_headers={'Accept-Ranges':'bytes','Cache-Control':'private, no-store','Content-Disposition':'inline','X-Accel-Buffering':'no'}
+ for k in ('Content-Length','Content-Range'):
+  if upstream.headers.get(k): out_headers[k]=upstream.headers[k]
+ if req.method=='HEAD':
+  upstream.close()
+  return core.Response(status_code=upstream.status_code,media_type=v['mime'],headers=out_headers)
+ def chunks():
+  try:
+   for block in upstream.iter_content(256*1024):
+    if not block: continue
+    # Every block re-checks the member state; restriction/removal stops the stream.
+    try: core.watch(req,v['id'])
+    except core.HTTPException: return
+    yield block
+  finally:
+   upstream.close()
+ return core.StreamingResponse(chunks(),status_code=upstream.status_code,media_type=v['mime'],headers=out_headers)
+
+core.EXTERNAL_STREAMER=_drive_stream

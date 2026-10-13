@@ -1,0 +1,10 @@
+data
+.venv
+.env
+.env.*
+__pycache__
+.git
+*.mp4
+*.webm
+*.key
+*.sqlite*

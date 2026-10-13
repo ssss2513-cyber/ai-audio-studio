@@ -1,0 +1,7 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+argon2-cffi>=25.1,<26
+cryptography>=46,<49
+pydantic>=2.11,<3
+Pillow>=12,<13
+boto3>=1.40,<2

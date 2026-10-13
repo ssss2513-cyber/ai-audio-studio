@@ -1,0 +1,6 @@
+'use strict';
+const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';
+history.replaceState(null,'',location.pathname);
+const form=document.querySelector('#recover-form'),error=document.querySelector('#recover-error');
+if(!token){error.textContent='운영자 전용 복구 링크로 들어와 주세요.';form.querySelector('button').disabled=true;}
+form.onsubmit=async e=>{e.preventDefault();const b=form.querySelector('button'),d=new FormData(form);if(d.get('password')!==d.get('confirmation')){error.textContent='비밀번호가 서로 다릅니다.';return;}b.disabled=true;error.textContent='비밀번호를 변경하고 있습니다…';try{const r=await fetch('/api/recover',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,password:d.get('password'),confirmation:d.get('confirmation')})});const v=await r.json();if(!r.ok)throw new Error(typeof v.detail==='string'?v.detail:'입력한 정보를 확인해 주세요.');form.reset();location.replace('/admin#admin');}catch(err){error.textContent=err.message;b.disabled=false;}};

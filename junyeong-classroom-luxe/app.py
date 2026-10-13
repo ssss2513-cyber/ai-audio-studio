@@ -93,6 +93,13 @@ with db() as c:
     if 'verified_at' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified_at REAL")
     if 'verification_id' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verification_id TEXT NOT NULL DEFAULT ''")
     if 'verification_di' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verification_di TEXT NOT NULL DEFAULT ''")
+    if 'phone_verified' not in mcols: c.execute("ALTER TABLE members ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0")
+    if 'phone_verified_at' not in mcols: c.execute("ALTER TABLE members ADD COLUMN phone_verified_at REAL")
+    c.execute("""CREATE TABLE IF NOT EXISTS sms_otps(
+      member TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL, expires REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+      sends INTEGER NOT NULL DEFAULT 1, last_sent REAL NOT NULL
+    )""")
     # A single worker is required. Interrupted assembly can be safely repeated from intact parts.
 
 
@@ -161,7 +168,7 @@ def require(req, admin=False, watch=False, write=False):
 def present(m, full=False):
     p=dec(m['phone']); n=dec(m['name'])
     return dict(id=m['id'],name=n,phone=p if full else (p[:3]+'-****-'+p[-4:] if '@' not in p else '운영자'),
-                state=m['state'],role=m['role'],revision=m['revision'],created=m['created'],consent=m['consent'],verified=bool(m['verified']),verifiedAt=m['verified_at'])
+                state=m['state'],role=m['role'],revision=m['revision'],created=m['created'],consent=m['consent'],verified=bool(m['verified']),verifiedAt=m['verified_at'],phoneVerified=bool(m['phone_verified']),phoneVerifiedAt=m['phone_verified_at'])
 
 def session_response(m, remember=False):
     raw=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24); ttl=(30 if remember else 1)*86400
@@ -217,8 +224,8 @@ class Login(BaseModel):
 def meta():
     s=settings()
     with db() as c: ready=bool(c.execute("SELECT 1 FROM members WHERE role='admin'").fetchone())
-    identity_ready=all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET'))
-    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.0.0','identityReady':identity_ready,'identityRequired':identity_ready,'portoneStoreId':os.getenv('PORTONE_STORE_ID','') if identity_ready else '','portoneChannelKey':os.getenv('PORTONE_CHANNEL_KEY','') if identity_ready else ''}
+    sms_ready=all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER'))
+    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.1.0','smsReady':sms_ready,'phoneVerificationRequired':sms_ready}
 @app.post('/api/join')
 def join(body: Join, req: Request):
     rate(req,'signup',8)
@@ -262,6 +269,469 @@ def logout(req: Request):
     with db() as c: c.execute('DELETE FROM sessions WHERE token=?',(m['token'],))
     r=JSONResponse({'ok':True}); r.delete_cookie(COOKIE,path='/',secure=SECURE,httponly=True,samesite='lax'); return r
 
+
+
+class SmsCode(BaseModel):
+    code: str=Field(min_length=6,max_length=6,pattern=r'^\d{6}
+    identityVerificationId: str=Field(min_length=1,max_length=80)
+
+@app.get('/api/identity/config')
+def identity_config(req: Request):
+    m=require(req)
+    ready=all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET'))
+    return {'ready':ready,'verified':bool(m['verified']),'storeId':os.getenv('PORTONE_STORE_ID','') if ready else '','channelKey':os.getenv('PORTONE_CHANNEL_KEY','') if ready else ''}
+
+@app.post('/api/identity/complete')
+def identity_complete(body: IdentityComplete, req: Request):
+    m=require(req,write=True)
+    secret=os.getenv('PORTONE_API_SECRET','').strip()
+    if not secret: fail(503,'본인인증 서비스가 아직 연결되지 않았습니다.')
+    import requests
+    r=requests.get('https://api.portone.io/identity-verifications/'+requests.utils.quote(body.identityVerificationId,safe=''),headers={'Authorization':'PortOne '+secret},timeout=20)
+    if r.status_code!=200: fail(502,'본인인증 결과를 확인하지 못했습니다.')
+    info=r.json()
+    if info.get('status')!='VERIFIED': fail(409,'본인인증이 완료되지 않았습니다.')
+    customer=info.get('verifiedCustomer') or {}
+    verified_name=(customer.get('name') or '').strip()
+    verified_phone=re.sub(r'\D','',customer.get('phoneNumber') or '')
+    member_name=dec(m['name']).strip()
+    member_phone=re.sub(r'\D','',dec(m['phone']))
+    if verified_name and verified_name!=member_name: fail(409,'회원가입 이름과 본인인증 이름이 다릅니다.')
+    if verified_phone and verified_phone!=member_phone: fail(409,'회원가입 휴대폰 번호와 본인인증 번호가 다릅니다.')
+    di=(customer.get('di') or '')[:255]
+    with db() as c:
+        if di:
+            dup=c.execute("SELECT id FROM members WHERE verification_di=? AND id<>?",(digest(di),m['id'])).fetchone()
+            if dup: fail(409,'이미 다른 회원 계정에서 사용된 본인정보입니다.')
+        c.execute('UPDATE members SET verified=1,verified_at=?,verification_id=?,verification_di=?,revision=revision+1 WHERE id=?',(time.time(),body.identityVerificationId,digest(di) if di else '',m['id']))
+        audit(c,m['id'],m['id'],'identity_verified')
+        fresh=c.execute('SELECT * FROM members WHERE id=?',(m['id'],)).fetchone()
+    return {'ok':True,'member':present(fresh,True)}
+
+TRANSITIONS={'approve':({'pending'},'approved'),'revoke':({'approved'},'pending'),
+ 'block':({'pending','approved'},'blocked'),'unblock':({'blocked'},'pending'),
+ 'remove':({'pending','approved','blocked'},'removed'),'restore':({'removed'},'pending')}
+class Change(BaseModel):
+    action: str=Field(max_length=25)
+    revision: int
+    reason: str=Field(default='',max_length=300)
+    confirmation: str=Field(default='',max_length=120)
+@app.get('/api/admin/members')
+def members(req: Request,q: str='',state: str='',page: int=1):
+    require(req,admin=True)
+    page=max(1,page); q=q[:60].lower()
+    with db() as c: rows=c.execute("SELECT * FROM members WHERE role='member' ORDER BY created DESC").fetchall()
+    result=[present(m) for m in rows if (not state or m['state']==state) and (not q or q in dec(m['name']).lower() or q in dec(m['phone']))]
+    return {'items':result[(page-1)*30:page*30],'total':len(result),'page':page}
+@app.get('/api/admin/members/{ident}')
+def member_detail(ident: str,req: Request):
+    a=require(req,admin=True)
+    with db() as c:
+        m=c.execute("SELECT * FROM members WHERE id=? AND role='member'",(ident,)).fetchone()
+        if not m: fail(404,'회원을 찾을 수 없습니다.')
+        audit(c,a['id'],ident,'view_contact')
+    return {**present(m,True),'consentText':json.loads(m['consent_text'])}
+@app.post('/api/admin/members/{ident}')
+def change_member(ident: str,body: Change,req: Request):
+    a=require(req,admin=True,write=True)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        m=c.execute("SELECT * FROM members WHERE id=? AND role='member'",(ident,)).fetchone()
+        if not m: fail(404,'회원을 찾을 수 없습니다.')
+        if m['revision']!=body.revision: fail(409,'다른 화면에서 변경되었습니다. 새로고침 후 다시 확인해 주세요.')
+        if body.action=='erase':
+            if m['state']!='removed' or body.confirmation!=dec(m['name']): fail(422,'먼저 멤버 해제 후 이름을 정확히 입력해 주세요.')
+            c.execute('DELETE FROM members WHERE id=?',(ident,))
+            c.execute("UPDATE audits SET reason='' WHERE subject=?",(ident,))
+            audit(c,a['id'],ident,'erase')
+            return {'ok':True}
+        if body.action not in TRANSITIONS: fail(422,'지원하지 않는 동작입니다.')
+        if body.action=='approve' and all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER')) and not m['phone_verified']:
+            fail(409,'휴대폰 번호 인증을 완료한 회원만 시청 승인할 수 있습니다.')
+        allowed,target=TRANSITIONS[body.action]
+        if m['state'] not in allowed: fail(409,'현재 회원 상태에서는 처리할 수 없습니다.')
+        if body.action in ('block','remove') and not body.reason.strip(): fail(422,'처리 사유를 입력해 주세요.')
+        if body.action=='remove' and body.confirmation!=dec(m['name']): fail(422,'해제할 회원 이름을 정확히 입력해 주세요.')
+        revoke=target!='approved'
+        c.execute('UPDATE members SET state=?,revision=revision+1,epoch=epoch+? WHERE id=?',(target,int(revoke),ident))
+        if revoke: c.execute('DELETE FROM sessions WHERE member=?',(ident,))
+        audit(c,a['id'],ident,body.action,body.reason)
+        out=present(c.execute('SELECT * FROM members WHERE id=?',(ident,)).fetchone())
+    return {'ok':True,'member':out}
+@app.get('/api/admin/overview')
+def overview(req: Request):
+    require(req,admin=True)
+    with db() as c:
+        counts={m['state']:m['n'] for m in c.execute("SELECT state,COUNT(*) n FROM members WHERE role='member' GROUP BY state")}
+        videos=c.execute("SELECT COUNT(*) FROM videos WHERE state!='trash'").fetchone()[0]
+        recent=[dict(x) for x in c.execute('SELECT action,created FROM audits ORDER BY id DESC LIMIT 8')]
+    return {'counts':counts,'videos':videos,'recent':recent}
+@app.get('/api/admin/audits')
+def audits(req: Request,page: int=1):
+    require(req,admin=True)
+    with db() as c:
+        rows=[dict(x) for x in c.execute('SELECT * FROM audits ORDER BY id DESC LIMIT 50 OFFSET ?',((max(1,page)-1)*50,))]
+    return {'items':rows}
+@app.post('/api/admin/export')
+def export(req: Request):
+    a=require(req,admin=True,write=True); out=io.StringIO(); w=csv.writer(out)
+    w.writerow(['이름','휴대폰 번호','상태','가입 시각(UTC)','본인인증'])
+    with db() as c:
+        for m in c.execute("SELECT * FROM members WHERE role='member'"):
+            values=[dec(m['name']),dec(m['phone']),m['state'],time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(m['created'])),'안 함']
+            w.writerow(["'"+v if v.startswith(('=','+','-','@','\t','\r','\n')) else v for v in values])
+        audit(c,a['id'],'members','export_csv')
+    return Response('\ufeff'+out.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="members.csv"'})
+class SettingsChange(BaseModel):
+    title: str=Field(min_length=1,max_length=50)
+    contact: str=Field(min_length=3,max_length=200)
+    retention: str=Field(min_length=5,max_length=300)
+    autoApprove: bool
+    open: bool
+    revision: int
+@app.post('/api/admin/settings')
+def update_settings(body: SettingsChange,req: Request):
+    a=require(req,admin=True,write=True)
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',body.contact): fail(422,'문의 이메일을 확인해 주세요.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE'); s=json.loads(c.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
+        if s['revision']!=body.revision: fail(409,'설정이 변경되었습니다. 화면을 새로고침해 주세요.')
+        value=body.model_dump(); value['revision']+=1
+        c.execute('UPDATE settings SET value=? WHERE id=1',(json.dumps(value,ensure_ascii=False),))
+        audit(c,a['id'],'settings','update_settings')
+    return {'ok':True,**value}
+
+class UploadStart(BaseModel):
+    title: str=Field(min_length=1,max_length=120)
+    description: str=Field(default='',max_length=1000)
+    filename: str=Field(min_length=1,max_length=200)
+    size: int=Field(ge=32,le=MAX_SIZE)
+    mime: str
+    fingerprint: str=Field(pattern=r'^[0-9a-f]{64}$')
+    duration: float=Field(default=0,ge=0,le=86400,allow_inf_nan=False)
+    rights: bool
+
+def upload_lock(ident):
+    with LOCK_GUARD:
+        lock=LOCKS.get(ident)
+        if lock is None: lock=threading.Lock(); LOCKS[ident]=lock
+        return lock
+
+def get_upload(ident,owner):
+    with db() as c: row=c.execute('SELECT * FROM uploads WHERE id=? AND owner=?',(ident,owner)).fetchone()
+    if not row: fail(404,'업로드 작업을 찾을 수 없습니다.')
+    return row
+@app.post('/api/admin/uploads')
+def start_upload(body: UploadStart,req: Request):
+    a=require(req,admin=True,write=True)
+    if not body.rights: fail(422,'영상 제공 권한 확인이 필요합니다.')
+    if body.mime not in ('video/mp4','video/webm'): fail(422,'MP4 또는 WebM을 선택해 주세요.')
+    with db() as c:
+        active=c.execute("SELECT COUNT(*) FROM uploads WHERE state IN ('uploading','assembling')").fetchone()[0]
+    if active>=20: fail(409,'미완료 업로드가 많습니다. 먼저 취소하거나 완료해 주세요.')
+    if shutil.disk_usage(DATA).free<body.size*2+128*1024**2: fail(507,'저장 공간이 부족합니다. 영상 용량의 두 배 이상이 필요합니다.')
+    ident=uid()
+    with db() as c:
+        c.execute('INSERT INTO uploads(id,owner,title,description,filename,fingerprint,size,mime,duration,created) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                  (ident,a['id'],body.title,body.description,body.filename,body.fingerprint,body.size,body.mime,body.duration,time.time()))
+        audit(c,a['id'],ident,'upload_start')
+    (DATA/'parts'/ident).mkdir()
+    return {'id':ident,'chunkSize':CHUNK,'completed':[],'fingerprint':body.fingerprint,'size':body.size}
+@app.get('/api/admin/uploads')
+def active_uploads(req: Request):
+    a=require(req,admin=True)
+    with db() as c: items=[dict(x) for x in c.execute("SELECT id,title,filename,size,fingerprint,state,created FROM uploads WHERE owner=? AND state!='complete' ORDER BY created DESC",(a['id'],))]
+    return {'items':items}
+@app.get('/api/admin/uploads/{ident}')
+def upload_status(ident: str,req: Request):
+    a=require(req,admin=True); u=get_upload(ident,a['id'])
+    with db() as c: completed=[x[0] for x in c.execute('SELECT number FROM parts WHERE upload=? ORDER BY number',(ident,))]
+    return {**dict(u),'chunkSize':CHUNK,'completed':completed}
+@app.put('/api/admin/uploads/{ident}/parts/{number}')
+async def put_part(ident: str,number: int,req: Request):
+    a=require(req,admin=True,write=True); u=get_upload(ident,a['id']); lock=upload_lock(ident)
+    if not lock.acquire(False): fail(409,'같은 업로드가 처리 중입니다. 잠시 뒤 재시도해 주세요.')
+    tmp=None
+    try:
+        u=get_upload(ident,a['id'])
+        if u['state']!='uploading': fail(409,'업로드할 수 없는 작업 상태입니다.')
+        if not 0<=number<math.ceil(u['size']/CHUNK): fail(422,'잘못된 조각 번호입니다.')
+        expected=min(CHUNK,u['size']-number*CHUNK)
+        if req.headers.get('content-length')!=str(expected): fail(422,'전송 조각 크기가 다릅니다.')
+        expected_hash=req.headers.get('x-part-sha256','')
+        if not re.fullmatch('[0-9a-f]{64}',expected_hash): fail(422,'조각 검증값이 필요합니다.')
+        with db() as c: old=c.execute('SELECT sha FROM parts WHERE upload=? AND number=?',(ident,number)).fetchone()
+        if old:
+            if old[0]!=expected_hash: fail(409,'기존 조각과 다른 파일입니다. 같은 원본 파일을 선택해 주세요.')
+            return {'ok':True,'alreadyUploaded':True}
+        folder=DATA/'parts'/ident; folder.mkdir(exist_ok=True)
+        tmp=folder/(str(number)+'.'+uid()+'.tmp'); total=0; h=hashlib.sha256()
+        with tmp.open('wb') as f:
+            async for chunk in req.stream():
+                total+=len(chunk)
+                if total>expected: fail(413,'조각 용량이 초과되었습니다.')
+                h.update(chunk); f.write(chunk)
+            f.flush(); os.fsync(f.fileno())
+        if total!=expected or h.hexdigest()!=expected_hash: fail(422,'전송 검증에 실패했습니다. 해당 조각을 재시도해 주세요.')
+        os.replace(tmp,folder/str(number)); tmp=None
+        with db() as c: c.execute('INSERT INTO parts VALUES(?,?,?,?)',(ident,number,total,expected_hash))
+        return {'ok':True}
+    finally:
+        if tmp: tmp.unlink(missing_ok=True)
+        lock.release()
+@app.post('/api/admin/uploads/{ident}/finish')
+def finish_upload(ident: str,req: Request):
+    a=require(req,admin=True,write=True); u=get_upload(ident,a['id']); lock=upload_lock(ident)
+    if not lock.acquire(False): fail(409,'업로드가 처리 중입니다. 잠시 뒤 재시도해 주세요.')
+    temp=DATA/'media'/(ident+'.assembling')
+    try:
+        u=get_upload(ident,a['id'])
+        if u['state']=='complete': return {'ok':True,'id':ident}
+        with db() as c:
+            parts=c.execute('SELECT * FROM parts WHERE upload=? ORDER BY number',(ident,)).fetchall()
+            if [p['number'] for p in parts]!=list(range(math.ceil(u['size']/CHUNK))): fail(409,'아직 전송하지 않은 조각이 있습니다.')
+            if sum(p['size'] for p in parts)!=u['size']: fail(409,'업로드 크기를 다시 확인해 주세요.')
+            c.execute("UPDATE uploads SET state='assembling' WHERE id=?",(ident,))
+        with (DATA/'parts'/ident/'0').open('rb') as first: header=first.read(16)
+        if (u['mime']=='video/mp4' and header[4:8]!=b'ftyp') or (u['mime']=='video/webm' and not header.startswith(b'\x1a\x45\xdf\xa3')):
+            fail(422,'선택한 파일이 지원하는 영상 컨테이너가 아닙니다.')
+        if shutil.disk_usage(DATA).free<u['size']+64*1024**2: fail(507,'마무리에 필요한 저장 공간이 부족합니다.')
+        with temp.open('wb') as out:
+            for p in parts:
+                h=hashlib.sha256()
+                with (DATA/'parts'/ident/str(p['number'])).open('rb') as f:
+                    while chunk:=f.read(1024*1024): h.update(chunk); out.write(chunk)
+                if h.hexdigest()!=p['sha']: fail(409,'저장된 조각 검증에 실패했습니다. 업로드를 취소 후 다시 시작해 주세요.')
+            out.flush(); os.fsync(out.fileno())
+        os.replace(temp,DATA/'media'/ident)
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO videos(id,title,description,size,mime,duration,created) VALUES(?,?,?,?,?,?,?)',
+                      (ident,u['title'],u['description'],u['size'],u['mime'],u['duration'],time.time()))
+            c.execute("UPDATE uploads SET state='complete' WHERE id=?",(ident,)); audit(c,a['id'],ident,'upload_finish')
+        shutil.rmtree(DATA/'parts'/ident,ignore_errors=True)
+        return {'ok':True,'id':ident}
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        with db() as c: c.execute("UPDATE uploads SET state='uploading' WHERE id=? AND state!='complete'",(ident,))
+        raise
+    finally: lock.release()
+@app.delete('/api/admin/uploads/{ident}')
+def cancel_upload(ident: str,req: Request):
+    a=require(req,admin=True,write=True); u=get_upload(ident,a['id']); lock=upload_lock(ident)
+    if not lock.acquire(False): fail(409,'전송 처리가 끝난 후 다시 취소해 주세요.')
+    try:
+        if u['state']=='complete': fail(409,'완료된 영상은 영상 관리에서 삭제해 주세요.')
+        with db() as c: c.execute('DELETE FROM uploads WHERE id=?',(ident,)); audit(c,a['id'],ident,'upload_cancel')
+        shutil.rmtree(DATA/'parts'/ident,ignore_errors=True)
+        (DATA/'media'/(ident+'.assembling')).unlink(missing_ok=True)
+        return {'ok':True}
+    finally: lock.release()
+
+def video_row(ident):
+    with db() as c: v=c.execute('SELECT * FROM videos WHERE id=?',(ident,)).fetchone()
+    if not v: fail(404,'영상을 찾을 수 없습니다.')
+    return v
+
+def watch(req,ident):
+    m=require(req,watch=True); v=video_row(ident)
+    if v['state'] in ('trash','purging') or (m['role']!='admin' and v['state']!='public'): fail(403,'현재 시청할 수 없는 영상입니다.')
+    return m,v
+@app.get('/api/catalogue')
+def catalogue():
+    if not settings()['open']: return {'items':[]}
+    with db() as c: return {'items':[dict(v) for v in c.execute("SELECT id,title,description,duration,theme,poster,created FROM videos WHERE state='public' ORDER BY position,created DESC")]}
+@app.get('/api/videos')
+def videos(req: Request):
+    m=require(req,watch=True)
+    with db() as c:
+        rows=c.execute("SELECT v.*,COALESCE(p.seconds,0) seconds FROM videos v LEFT JOIN progress p ON p.video=v.id AND p.member=? WHERE v.state='public' ORDER BY v.position,v.created DESC",(m['id'],)).fetchall()
+    return {'items':[dict(x) for x in rows]}
+@app.get('/api/admin/videos')
+def admin_videos(req: Request):
+    require(req,admin=True)
+    with db() as c: return {'items':[dict(v) for v in c.execute('SELECT * FROM videos ORDER BY position,created DESC')]}
+class VideoChange(BaseModel):
+    action: str
+    revision: int
+    title: str=Field(default='',max_length=120)
+    description: str=Field(default='',max_length=1000)
+    theme: str='rose'
+    position: int=Field(default=0,ge=-100000,le=100000)
+    confirmation: str=Field(default='',max_length=120)
+@app.post('/api/admin/videos/{ident}')
+def edit_video(ident: str,body: VideoChange,req: Request):
+    a=require(req,admin=True,write=True)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE'); v=c.execute('SELECT * FROM videos WHERE id=?',(ident,)).fetchone()
+        if not v: fail(404,'영상을 찾을 수 없습니다.')
+        if v['revision']!=body.revision: fail(409,'영상 정보가 변경되었습니다. 다시 확인해 주세요.')
+        if body.action=='edit':
+            if not body.title.strip() or body.theme not in ('rose','lilac','sage'): fail(422,'제목과 테마를 확인해 주세요.')
+            c.execute('UPDATE videos SET title=?,description=?,theme=?,position=?,revision=revision+1 WHERE id=?',(body.title,body.description,body.theme,body.position,ident))
+        else:
+            states={'publish':'public','private':'private','trash':'trash','restore':'private','purge':'purging'}
+            if body.action not in states: fail(422,'지원하지 않는 동작입니다.')
+            if body.action in ('restore','purge') and v['state'] not in ('trash','purging'): fail(409,'휴지통의 영상만 처리할 수 있습니다.')
+            if body.action in ('publish','private') and v['state'] in ('trash','purging'): fail(409,'먼저 영상을 복원해 주세요.')
+            if body.action=='purge' and body.confirmation!=v['title']: fail(422,'영구 삭제할 영상 제목을 정확히 입력해 주세요.')
+            c.execute('UPDATE videos SET state=?,revision=revision+1 WHERE id=?',(states[body.action],ident))
+        audit(c,a['id'],ident,'video_'+body.action)
+    if body.action=='purge':
+        # Removing a Drive-backed video only removes it from this site; the original Drive file stays untouched.
+        if v['source']=='local':
+            (DATA/'media'/ident).unlink(missing_ok=True)
+        (DATA/'posters'/(ident+'.jpg')).unlink(missing_ok=True)
+        with db() as c:
+            c.execute('DELETE FROM videos WHERE id=?',(ident,))
+            c.execute('DELETE FROM uploads WHERE id=?',(ident,))
+    return {'ok':True}
+@app.post('/api/admin/videos/{ident}/poster')
+async def poster_upload(ident: str,req: Request):
+    a=require(req,admin=True,write=True); video_row(ident)
+    buf=bytearray()
+    async for chunk in req.stream():
+        buf.extend(chunk)
+        if len(buf)>2*1024**2: fail(413,'썸네일은 2MB 이하로 선택해 주세요.')
+    try:
+        with Image.open(io.BytesIO(buf)) as image:
+            if image.width*image.height>20_000_000: fail(422,'썸네일 해상도가 너무 큽니다.')
+            image=image.convert('RGB'); image.thumbnail((1280,720))
+            image.save(DATA/'posters'/(ident+'.jpg'),'JPEG',quality=85)
+    except (UnidentifiedImageError,OSError,Image.DecompressionBombError): fail(422,'지원하는 그림 파일이 아닙니다.')
+    with db() as c: c.execute('UPDATE videos SET poster=1,revision=revision+1 WHERE id=?',(ident,)); audit(c,a['id'],ident,'poster')
+    return {'ok':True}
+@app.get('/api/posters/{ident}')
+def poster(ident: str,req: Request):
+    v=video_row(ident)
+    if v['state']!='public' or not settings()['open']: require(req,admin=True)
+    p=DATA/'posters'/(v['id']+'.jpg')
+    if not p.exists(): fail(404,'썸네일이 없습니다.')
+    return FileResponse(p,media_type='image/jpeg')
+@app.get('/api/videos/{ident}/access')
+def access(ident: str,req: Request):
+    watch(req,ident); return {'ok':True}
+class Position(BaseModel):
+    seconds: float=Field(ge=0,le=86400,allow_inf_nan=False)
+@app.post('/api/videos/{ident}/progress')
+def progress(ident: str,body: Position,req: Request):
+    require(req,write=True); m,v=watch(req,ident)
+    with db() as c: c.execute('INSERT INTO progress VALUES(?,?,?,?) ON CONFLICT(member,video) DO UPDATE SET seconds=excluded.seconds,updated=excluded.updated',(m['id'],ident,min(body.seconds,v['duration'] or 86400),time.time()))
+    return {'ok':True}
+
+def byte_range(value,size):
+    if not value: return 0,size-1,200
+    match=re.fullmatch(r'bytes=(\d*)-(\d*)',value)
+    if not match or not any(match.groups()): raise ValueError()
+    a,b=match.groups()
+    if not a:
+        suffix=int(b)
+        if suffix<=0: raise ValueError()
+        start=max(0,size-suffix); end=size-1
+    else:
+        start=int(a); end=min(int(b) if b else size-1,size-1)
+    if start>=size or end<start: raise ValueError()
+    return start,end,206
+@app.api_route('/api/videos/{ident}/stream',methods=['GET','HEAD'])
+def stream(ident: str,req: Request):
+    m,v=watch(req,ident)
+    if v['source']!='local':
+        if EXTERNAL_STREAMER is None: fail(503,'외부 영상 저장소 연결을 확인해 주세요.')
+        return EXTERNAL_STREAMER(req,v)
+    path=DATA/'media'/v['id']
+    if not path.exists(): fail(404,'영상 원본을 찾을 수 없습니다.')
+    size=path.stat().st_size
+    try: start,end,status=byte_range(req.headers.get('range',''),size)
+    except ValueError: return Response(status_code=416,headers={'Content-Range':f'bytes */{size}'})
+    headers={'Accept-Ranges':'bytes','Content-Length':str(end-start+1),'Cache-Control':'private, no-store','Content-Disposition':'inline','X-Accel-Buffering':'no'}
+    if status==206: headers['Content-Range']=f'bytes {start}-{end}/{size}'
+    if req.method=='HEAD': return Response(status_code=status,media_type=v['mime'],headers=headers)
+    def chunks():
+        with path.open('rb') as f:
+            f.seek(start); remaining=end-start+1
+            while remaining>0:
+                # Check the live DB and session on every emitted block, not only at player launch.
+                try: watch(req,ident)
+                except HTTPException: return
+                block=f.read(min(256*1024,remaining))
+                if not block: return
+                remaining-=len(block); yield block
+    return StreamingResponse(chunks(),status_code=status,media_type=v['mime'],headers=headers)
+
+app.mount('/assets',StaticFiles(directory=ROOT/'web'),name='assets')
+@app.get('/')
+@app.get('/admin')
+def index(): return FileResponse(ROOT/'web'/'index.html',headers={'Cache-Control':'no-cache'})
+)
+
+def _sms_ready():
+    return all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER'))
+
+def _otp_hash(member_id: str, code: str):
+    return hmac.new(KEY, f'sms:{member_id}:{code}'.encode(), hashlib.sha256).hexdigest()
+
+def _send_solapi_sms(to_phone: str, message: str):
+    if not _sms_ready(): fail(503,'문자 인증 서비스가 아직 연결되지 않았습니다.')
+    # SOLAPI HMAC auth. Secret values stay only in Railway variables.
+    import requests as _requests, datetime as _datetime
+    api_key=os.getenv('SOLAPI_API_KEY','').strip()
+    api_secret=os.getenv('SOLAPI_API_SECRET','').strip()
+    sender=os.getenv('SOLAPI_SENDER','').strip()
+    salt=secrets.token_hex(16)
+    date=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+    signature=hmac.new(api_secret.encode(), (date+salt).encode(), hashlib.sha256).hexdigest()
+    auth=f'HMAC-SHA256 apiKey={api_key}, date={date}, salt={salt}, signature={signature}'
+    payload={'message':{'to':to_phone,'from':sender,'text':message}}
+    r=_requests.post('https://api.solapi.com/messages/v4/send',json=payload,headers={'Authorization':auth,'Content-Type':'application/json'},timeout=15)
+    if r.status_code not in (200,201): fail(502,'인증 문자를 보내지 못했습니다. 잠시 후 다시 시도해 주세요.')
+
+@app.get('/api/sms/status')
+def sms_status(req: Request):
+    m=require(req)
+    return {'ready':_sms_ready(),'verified':bool(m['phone_verified'])}
+
+@app.post('/api/sms/send')
+def sms_send(req: Request):
+    m=require(req,write=True)
+    if m['phone_verified']: return {'ok':True,'alreadyVerified':True}
+    rate(req,'sms-send',8)
+    now=time.time()
+    with db() as c:
+        old=c.execute('SELECT * FROM sms_otps WHERE member=?',(m['id'],)).fetchone()
+        if old and now-old['last_sent']<60: fail(429,'인증 문자는 1분 후 다시 요청할 수 있습니다.')
+        if old and old['sends']>=5 and now-old['last_sent']<3600: fail(429,'문자 요청 횟수가 많습니다. 1시간 뒤 다시 시도해 주세요.')
+    code=f'{secrets.randbelow(1000000):06d}'
+    _send_solapi_sms(dec(m['phone']),f'[메종 루미엘] 인증번호는 {code} 입니다. 5분 안에 입력해 주세요.')
+    with db() as c:
+        if old and now-old['last_sent']<3600: sends=old['sends']+1
+        else: sends=1
+        c.execute("""INSERT INTO sms_otps(member,code_hash,expires,attempts,sends,last_sent)
+          VALUES(?,?,?,?,?,?) ON CONFLICT(member) DO UPDATE SET
+          code_hash=excluded.code_hash,expires=excluded.expires,attempts=0,sends=excluded.sends,last_sent=excluded.last_sent""",
+          (m['id'],_otp_hash(m['id'],code),now+300,0,sends,now))
+        audit(c,m['id'],m['id'],'sms_code_sent')
+    return {'ok':True,'expiresIn':300}
+
+@app.post('/api/sms/verify')
+def sms_verify(body: SmsCode, req: Request):
+    m=require(req,write=True)
+    rate(req,'sms-verify',20)
+    now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT * FROM sms_otps WHERE member=?',(m['id'],)).fetchone()
+        if not row: fail(404,'먼저 인증번호를 요청해 주세요.')
+        if row['expires']<now:
+            c.execute('DELETE FROM sms_otps WHERE member=?',(m['id'],))
+            fail(410,'인증번호가 만료되었습니다. 새 인증번호를 요청해 주세요.')
+        if row['attempts']>=5: fail(429,'인증번호 입력 횟수를 초과했습니다. 새 인증번호를 요청해 주세요.')
+        if not secrets.compare_digest(row['code_hash'],_otp_hash(m['id'],body.code)):
+            c.execute('UPDATE sms_otps SET attempts=attempts+1 WHERE member=?',(m['id'],))
+            fail(422,'인증번호가 일치하지 않습니다.')
+        c.execute('UPDATE members SET phone_verified=1,phone_verified_at=?,revision=revision+1 WHERE id=?',(now,m['id']))
+        c.execute('DELETE FROM sms_otps WHERE member=?',(m['id'],))
+        audit(c,m['id'],m['id'],'phone_verified')
+        fresh=c.execute('SELECT * FROM members WHERE id=?',(m['id'],)).fetchone()
+    return {'ok':True,'member':present(fresh,True)}
 
 class IdentityComplete(BaseModel):
     identityVerificationId: str=Field(min_length=1,max_length=80)
@@ -337,8 +807,8 @@ def change_member(ident: str,body: Change,req: Request):
             audit(c,a['id'],ident,'erase')
             return {'ok':True}
         if body.action not in TRANSITIONS: fail(422,'지원하지 않는 동작입니다.')
-        if body.action=='approve' and all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET')) and not m['verified']:
-            fail(409,'본인인증을 완료한 회원만 시청 승인할 수 있습니다.')
+        if body.action=='approve' and all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER')) and not m['phone_verified']:
+            fail(409,'휴대폰 번호 인증을 완료한 회원만 시청 승인할 수 있습니다.')
         allowed,target=TRANSITIONS[body.action]
         if m['state'] not in allowed: fail(409,'현재 회원 상태에서는 처리할 수 없습니다.')
         if body.action in ('block','remove') and not body.reason.strip(): fail(422,'처리 사유를 입력해 주세요.')

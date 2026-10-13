@@ -290,9 +290,15 @@ def _send_solapi_sms(to_phone: str, message: str):
     date=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
     signature=hmac.new(api_secret.encode(), (date+salt).encode(), hashlib.sha256).hexdigest()
     auth=f'HMAC-SHA256 apiKey={api_key}, date={date}, salt={salt}, signature={signature}'
-    payload={'message':{'to':to_phone,'from':sender,'text':message}}
-    r=_requests.post('https://api.solapi.com/messages/v4/send',json=payload,headers={'Authorization':auth,'Content-Type':'application/json'},timeout=15)
-    if r.status_code not in (200,201): fail(502,'인증 문자를 보내지 못했습니다. 잠시 후 다시 시도해 주세요.')
+    payload={'messages':[{'to':to_phone,'from':sender,'text':message,'type':'SMS','autoTypeDetect':False}]}
+    r=_requests.post('https://api.solapi.com/messages/v4/send-many/detail',json=payload,headers={'Authorization':auth,'Content-Type':'application/json'},timeout=15)
+    if r.status_code not in (200,201):
+        try:
+            detail=r.json()
+            msg=detail.get('errorMessage') or detail.get('message') or 'SOLAPI 발송 오류'
+        except Exception:
+            msg='SOLAPI 발송 오류'
+        fail(502,'인증 문자를 보내지 못했습니다: '+str(msg)[:180])
 
 @app.get('/api/sms/status')
 def sms_status(req: Request):

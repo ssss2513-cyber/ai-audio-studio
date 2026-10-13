@@ -39,6 +39,7 @@ HASH_SLOTS = threading.BoundedSemaphore(2)
 DUMMY = PH.hash(secrets.token_urlsafe(24))
 LOCKS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 LOCK_GUARD = threading.Lock()
+EXTERNAL_STREAMER = None
 
 @contextmanager
 def db():
@@ -83,6 +84,10 @@ with db() as c:
     CREATE INDEX IF NOT EXISTS audit_subject ON audits(subject);
     ''')
     c.execute('INSERT OR IGNORE INTO settings VALUES(1,?)', (json.dumps(DEFAULT,ensure_ascii=False),))
+    # Backward-compatible columns for externally stored videos such as private Google Drive files.
+    cols={row[1] for row in c.execute("PRAGMA table_info(videos)")}
+    if 'source' not in cols: c.execute("ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
+    if 'external_id' not in cols: c.execute("ALTER TABLE videos ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")
     # A single worker is required. Interrupted assembly can be safely repeated from intact parts.
 
 
@@ -518,8 +523,13 @@ def edit_video(ident: str,body: VideoChange,req: Request):
             c.execute('UPDATE videos SET state=?,revision=revision+1 WHERE id=?',(states[body.action],ident))
         audit(c,a['id'],ident,'video_'+body.action)
     if body.action=='purge':
-        (DATA/'media'/ident).unlink(missing_ok=True); (DATA/'posters'/(ident+'.jpg')).unlink(missing_ok=True)
-        with db() as c: c.execute('DELETE FROM videos WHERE id=?',(ident,)); c.execute('DELETE FROM uploads WHERE id=?',(ident,))
+        # Removing a Drive-backed video only removes it from this site; the original Drive file stays untouched.
+        if v['source']=='local':
+            (DATA/'media'/ident).unlink(missing_ok=True)
+        (DATA/'posters'/(ident+'.jpg')).unlink(missing_ok=True)
+        with db() as c:
+            c.execute('DELETE FROM videos WHERE id=?',(ident,))
+            c.execute('DELETE FROM uploads WHERE id=?',(ident,))
     return {'ok':True}
 @app.post('/api/admin/videos/{ident}/poster')
 async def poster_upload(ident: str,req: Request):
@@ -569,7 +579,11 @@ def byte_range(value,size):
     return start,end,206
 @app.api_route('/api/videos/{ident}/stream',methods=['GET','HEAD'])
 def stream(ident: str,req: Request):
-    m,v=watch(req,ident); path=DATA/'media'/v['id']
+    m,v=watch(req,ident)
+    if v['source']!='local':
+        if EXTERNAL_STREAMER is None: fail(503,'외부 영상 저장소 연결을 확인해 주세요.')
+        return EXTERNAL_STREAMER(req,v)
+    path=DATA/'media'/v['id']
     if not path.exists(): fail(404,'영상 원본을 찾을 수 없습니다.')
     size=path.stat().st_size
     try: start,end,status=byte_range(req.headers.get('range',''),size)

@@ -300,6 +300,37 @@ def _send_solapi_sms(to_phone: str, message: str):
             msg='SOLAPI 발송 오류'
         fail(502,'인증 문자를 보내지 못했습니다: '+str(msg)[:180])
 
+def _solapi_diag_once():
+    if not _sms_ready():
+        print('SOLAPI_DIAG ready=false', flush=True)
+        return
+    try:
+        import requests as _requests, datetime as _datetime
+        api_key=os.getenv('SOLAPI_API_KEY','').strip()
+        api_secret=os.getenv('SOLAPI_API_SECRET','').strip()
+        sender=os.getenv('SOLAPI_SENDER','').strip()
+        def _auth():
+            salt=secrets.token_hex(16)
+            date=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+            signature=hmac.new(api_secret.encode(), (date+salt).encode(), hashlib.sha256).hexdigest()
+            return f'HMAC-SHA256 apiKey={api_key}, date={date}, salt={salt}, signature={signature}'
+        rb=_requests.get('https://api.solapi.com/cash/v1/balance',headers={'Authorization':_auth()},timeout=12)
+        rs=_requests.get('https://api.solapi.com/senderid/v1/numbers',headers={'Authorization':_auth()},timeout=12)
+        sender_status='not-found'
+        if rs.status_code==200:
+            try:
+                for x in rs.json().get('senderIds',[]):
+                    if str(x.get('phoneNumber','')).replace('-','')==sender.replace('-',''):
+                        sender_status=str(x.get('status','unknown'))
+                        break
+            except Exception:
+                sender_status='parse-error'
+        print(f'SOLAPI_DIAG balance_http={rb.status_code} sender_http={rs.status_code} sender_status={sender_status}', flush=True)
+    except Exception as e:
+        print('SOLAPI_DIAG exception='+type(e).__name__, flush=True)
+
+_solapi_diag_once()
+
 @app.get('/api/sms/status')
 def sms_status(req: Request):
     m=require(req)

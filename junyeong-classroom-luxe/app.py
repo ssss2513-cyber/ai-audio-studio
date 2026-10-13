@@ -325,7 +325,14 @@ def _solapi_diag_once():
                         break
             except Exception:
                 sender_status='parse-error'
-        print(f'SOLAPI_DIAG balance_http={rb.status_code} sender_http={rs.status_code} sender_status={sender_status}', flush=True)
+        def _err(resp):
+            if resp.status_code < 400: return 'ok'
+            try:
+                j=resp.json()
+                return str(j.get('errorCode') or j.get('code') or '')+':'+str(j.get('errorMessage') or j.get('message') or '')[:120]
+            except Exception:
+                return ('text:'+resp.text[:120]).replace('\n',' ')
+        print(f'SOLAPI_DIAG balance_http={rb.status_code} balance_err={_err(rb)} sender_http={rs.status_code} sender_err={_err(rs)} sender_status={sender_status}', flush=True)
     except Exception as e:
         print('SOLAPI_DIAG exception='+type(e).__name__, flush=True)
 

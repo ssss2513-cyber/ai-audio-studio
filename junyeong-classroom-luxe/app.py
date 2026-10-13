@@ -88,6 +88,11 @@ with db() as c:
     cols={row[1] for row in c.execute("PRAGMA table_info(videos)")}
     if 'source' not in cols: c.execute("ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
     if 'external_id' not in cols: c.execute("ALTER TABLE videos ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")
+    mcols={row[1] for row in c.execute("PRAGMA table_info(members)")}
+    if 'verified' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
+    if 'verified_at' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified_at REAL")
+    if 'verification_id' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verification_id TEXT NOT NULL DEFAULT ''")
+    if 'verification_di' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verification_di TEXT NOT NULL DEFAULT ''")
     # A single worker is required. Interrupted assembly can be safely repeated from intact parts.
 
 
@@ -156,7 +161,7 @@ def require(req, admin=False, watch=False, write=False):
 def present(m, full=False):
     p=dec(m['phone']); n=dec(m['name'])
     return dict(id=m['id'],name=n,phone=p if full else (p[:3]+'-****-'+p[-4:] if '@' not in p else '운영자'),
-                state=m['state'],role=m['role'],revision=m['revision'],created=m['created'],consent=m['consent'],verified=False)
+                state=m['state'],role=m['role'],revision=m['revision'],created=m['created'],consent=m['consent'],verified=bool(m['verified']),verifiedAt=m['verified_at'])
 
 def session_response(m, remember=False):
     raw=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24); ttl=(30 if remember else 1)*86400
@@ -212,7 +217,8 @@ class Login(BaseModel):
 def meta():
     s=settings()
     with db() as c: ready=bool(c.execute("SELECT 1 FROM members WHERE role='admin'").fetchone())
-    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.0.0'}
+    identity_ready=all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET'))
+    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.0.0','identityReady':identity_ready,'identityRequired':identity_ready,'portoneStoreId':os.getenv('PORTONE_STORE_ID','') if identity_ready else '','portoneChannelKey':os.getenv('PORTONE_CHANNEL_KEY','') if identity_ready else ''}
 @app.post('/api/join')
 def join(body: Join, req: Request):
     rate(req,'signup',8)
@@ -256,6 +262,43 @@ def logout(req: Request):
     with db() as c: c.execute('DELETE FROM sessions WHERE token=?',(m['token'],))
     r=JSONResponse({'ok':True}); r.delete_cookie(COOKIE,path='/',secure=SECURE,httponly=True,samesite='lax'); return r
 
+
+class IdentityComplete(BaseModel):
+    identityVerificationId: str=Field(min_length=1,max_length=80)
+
+@app.get('/api/identity/config')
+def identity_config(req: Request):
+    m=require(req)
+    ready=all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET'))
+    return {'ready':ready,'verified':bool(m['verified']),'storeId':os.getenv('PORTONE_STORE_ID','') if ready else '','channelKey':os.getenv('PORTONE_CHANNEL_KEY','') if ready else ''}
+
+@app.post('/api/identity/complete')
+def identity_complete(body: IdentityComplete, req: Request):
+    m=require(req,write=True)
+    secret=os.getenv('PORTONE_API_SECRET','').strip()
+    if not secret: fail(503,'본인인증 서비스가 아직 연결되지 않았습니다.')
+    import requests
+    r=requests.get('https://api.portone.io/identity-verifications/'+requests.utils.quote(body.identityVerificationId,safe=''),headers={'Authorization':'PortOne '+secret},timeout=20)
+    if r.status_code!=200: fail(502,'본인인증 결과를 확인하지 못했습니다.')
+    info=r.json()
+    if info.get('status')!='VERIFIED': fail(409,'본인인증이 완료되지 않았습니다.')
+    customer=info.get('verifiedCustomer') or {}
+    verified_name=(customer.get('name') or '').strip()
+    verified_phone=re.sub(r'\D','',customer.get('phoneNumber') or '')
+    member_name=dec(m['name']).strip()
+    member_phone=re.sub(r'\D','',dec(m['phone']))
+    if verified_name and verified_name!=member_name: fail(409,'회원가입 이름과 본인인증 이름이 다릅니다.')
+    if verified_phone and verified_phone!=member_phone: fail(409,'회원가입 휴대폰 번호와 본인인증 번호가 다릅니다.')
+    di=(customer.get('di') or '')[:255]
+    with db() as c:
+        if di:
+            dup=c.execute("SELECT id FROM members WHERE verification_di=? AND id<>?",(digest(di),m['id'])).fetchone()
+            if dup: fail(409,'이미 다른 회원 계정에서 사용된 본인정보입니다.')
+        c.execute('UPDATE members SET verified=1,verified_at=?,verification_id=?,verification_di=?,revision=revision+1 WHERE id=?',(time.time(),body.identityVerificationId,digest(di) if di else '',m['id']))
+        audit(c,m['id'],m['id'],'identity_verified')
+        fresh=c.execute('SELECT * FROM members WHERE id=?',(m['id'],)).fetchone()
+    return {'ok':True,'member':present(fresh,True)}
+
 TRANSITIONS={'approve':({'pending'},'approved'),'revoke':({'approved'},'pending'),
  'block':({'pending','approved'},'blocked'),'unblock':({'blocked'},'pending'),
  'remove':({'pending','approved','blocked'},'removed'),'restore':({'removed'},'pending')}
@@ -294,6 +337,8 @@ def change_member(ident: str,body: Change,req: Request):
             audit(c,a['id'],ident,'erase')
             return {'ok':True}
         if body.action not in TRANSITIONS: fail(422,'지원하지 않는 동작입니다.')
+        if body.action=='approve' and all(os.getenv(k,'').strip() for k in ('PORTONE_STORE_ID','PORTONE_CHANNEL_KEY','PORTONE_API_SECRET')) and not m['verified']:
+            fail(409,'본인인증을 완료한 회원만 시청 승인할 수 있습니다.')
         allowed,target=TRANSITIONS[body.action]
         if m['state'] not in allowed: fail(409,'현재 회원 상태에서는 처리할 수 없습니다.')
         if body.action in ('block','remove') and not body.reason.strip(): fail(422,'처리 사유를 입력해 주세요.')

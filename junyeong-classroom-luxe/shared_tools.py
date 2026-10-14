@@ -11,15 +11,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
 PACKAGES = (
     {
         'id': 'yadam-script-gpt',
-        'asset': 'yadam-script-gpt-v2.1.zip',
-        'filename': 'Yadam_Synopsis_Skill_v2.1.zip',
+        'asset': 'yadam-script-gpt-v2.2.zip',
+        'filename': 'Yadam_Synopsis_Skill_v2.2.zip',
         'title': '대본 GPT 버전',
         'step': '01 · 시놉시스와 대본 만들기',
-        'version': 'V2.1',
+        'version': 'V2.2',
         'updated': '2026-10-15',
-        'description': '소재나 레퍼런스 썸네일·제목에서 시놉시스 5안, 5막 20챕터, 약 35,000자 낭독 대본으로 이어지는 ChatGPT용 지침입니다. V2.1은 ‘옛날 옛적’ 도입과 중간 전개, 유튜브용 엔딩을 보강했습니다. 완성 시놉시스로 바로 대본을 쓸 수도 있습니다.',
-        'features': ['시놉시스 5안 → 20챕터 → 목표 90분·약 35,000자', '옛날 옛적 도입 · 단서와 행동 중심의 중간 전개', '유튜브용 좋아요·구독·다음 이야기·안부 엔딩', '사진 없는 MD 12개 · 하위 폴더 없음'],
-        'fileCount': 12,
+        'description': '소재나 레퍼런스 썸네일·제목에서 시놉시스 5안, 5막 20챕터, 약 35,000자 낭독 대본으로 이어지는 ChatGPT용 지침입니다. V2.2는 첫 궁금증을 앞당기고 중반의 선택과 대가, 반복을 줄인 후일담을 강화했습니다. ‘옛날 옛적’ 시작과 유튜브 엔딩을 유지합니다. 완성 시놉시스로 바로 대본을 쓸 수도 있습니다.',
+        'features': ['시놉시스 5안 → 20챕터 → 목표 90분·약 35,000자', '첫 궁금증 강화 · 중반의 행동·선택·대가', '반복 후일담 압축 · 옛날 옛적 시작·유튜브 엔딩 유지', '사진 없는 MD 13개 · 하위 폴더 없음'],
+        'fileCount': 13,
     },
     {
         'id': 'yadam-script-titles',
@@ -112,6 +112,7 @@ def install_shared_tools(core):
             filename=package['filename'],
             headers={'Cache-Control': 'private, no-store, max-age=0'},
         )
+
 
 
 

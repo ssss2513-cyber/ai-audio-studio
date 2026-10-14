@@ -176,3 +176,28 @@ def _drive_stream(req: Request,v):
 
 core.EXTERNAL_STREAMER=_drive_stream
 
+
+
+# Public background music for the homepage. Audio only, not the private classes.
+@app.get('/assets/background-music.mp3')
+def background_music(req: Request):
+ import requests
+ drive_id='1Mk-XP_VHX4BW0R0p7vFoECr_dxsdxU_H'
+ headers=_drive_auth_headers()
+ if req.headers.get('range'):
+  headers['Range']=req.headers['range']
+ upstream=requests.get('https://www.googleapis.com/drive/v3/files/'+drive_id,
+      params={'alt':'media'},headers=headers,stream=True,timeout=35)
+ if upstream.status_code not in (200,206):
+  upstream.close()
+  core.fail(502,'배경음악을 불러오지 못했습니다.')
+ out={'Accept-Ranges':'bytes','Cache-Control':'public, max-age=3600','X-Content-Type-Options':'nosniff'}
+ for name in ('Content-Length','Content-Range'):
+  if upstream.headers.get(name): out[name]=upstream.headers[name]
+ def stream():
+  try:
+   for block in upstream.iter_content(128*1024):
+    if block: yield block
+  finally:
+   upstream.close()
+ return core.StreamingResponse(stream(),status_code=upstream.status_code,media_type='audio/mpeg',headers=out)

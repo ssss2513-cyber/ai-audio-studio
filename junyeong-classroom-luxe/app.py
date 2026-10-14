@@ -40,6 +40,7 @@ DUMMY = PH.hash(secrets.token_urlsafe(24))
 LOCKS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 LOCK_GUARD = threading.Lock()
 EXTERNAL_STREAMER = None
+TEMP_OPEN_ACCESS = os.getenv('TEMP_OPEN_ACCESS','').strip().lower() in ('1','true','yes','on')
 
 @contextmanager
 def db():
@@ -110,6 +111,9 @@ def dec(value: str): return CIPHER.decrypt(value.encode()).decode()
 def digest(value: str): return hmac.new(KEY, value.encode(), hashlib.sha256).hexdigest()
 def token_hash(value: str): return hashlib.sha256(value.encode()).hexdigest()
 def uid(): return uuid.uuid4().hex
+
+    if TEMP_OPEN_ACCESS:
+        c.execute("UPDATE members SET state='approved', revision=revision+1 WHERE role='member' AND state='pending'")
 
 def settings():
     with db() as c: return json.loads(c.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
@@ -224,8 +228,8 @@ class Login(BaseModel):
 def meta():
     s=settings()
     with db() as c: ready=bool(c.execute("SELECT 1 FROM members WHERE role='admin'").fetchone())
-    sms_ready=all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER'))
-    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.1.0','smsReady':sms_ready,'phoneVerificationRequired':sms_ready}
+    sms_ready=(not TEMP_OPEN_ACCESS) and all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER'))
+    return {**s,'ready':ready,'maxUploadBytes':MAX_SIZE,'version':'1.1.1','smsReady':sms_ready,'phoneVerificationRequired':sms_ready,'temporaryOpenAccess':TEMP_OPEN_ACCESS}
 @app.post('/api/join')
 def join(body: Join, req: Request):
     rate(req,'signup',8)
@@ -241,7 +245,7 @@ def join(body: Join, req: Request):
     with db() as c:
         if c.execute('SELECT 1 FROM members WHERE lookup=?',(digest(p),)).fetchone(): fail(409,'해당 번호로 가입할 수 없습니다. 기존 계정 로그인 또는 운영자 문의를 이용해 주세요.')
         c.execute('''INSERT INTO members(id,name,phone,lookup,password,state,created,consent,consent_text)
-          VALUES(?,?,?,?,?,?,?,?,?)''',(ident,enc(n),enc(p),digest(p),hp,'approved' if s['autoApprove'] else 'pending',now,now,json.dumps({'version':'1.0','purpose':'회원 관리 및 영상 접근 관리','contact':s['contact'],'retention':s['retention']},ensure_ascii=False)))
+          VALUES(?,?,?,?,?,?,?,?,?)''',(ident,enc(n),enc(p),digest(p),hp,'approved' if (TEMP_OPEN_ACCESS or s['autoApprove']) else 'pending',now,now,json.dumps({'version':'1.0','purpose':'회원 관리 및 영상 접근 관리','contact':s['contact'],'retention':s['retention']},ensure_ascii=False)))
         m=c.execute('SELECT * FROM members WHERE id=?',(ident,)).fetchone()
         audit(c,ident,ident,'join')
     return session_response(m)
@@ -437,7 +441,7 @@ def change_member(ident: str,body: Change,req: Request):
             audit(c,a['id'],ident,'erase')
             return {'ok':True}
         if body.action not in TRANSITIONS: fail(422,'지원하지 않는 동작입니다.')
-        if body.action=='approve' and all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER')) and not m['phone_verified']:
+        if body.action=='approve' and (not TEMP_OPEN_ACCESS) and all(os.getenv(k,'').strip() for k in ('SOLAPI_API_KEY','SOLAPI_API_SECRET','SOLAPI_SENDER')) and not m['phone_verified']:
             fail(409,'휴대폰 번호 인증을 완료한 회원만 시청 승인할 수 있습니다.')
         allowed,target=TRANSITIONS[body.action]
         if m['state'] not in allowed: fail(409,'현재 회원 상태에서는 처리할 수 없습니다.')

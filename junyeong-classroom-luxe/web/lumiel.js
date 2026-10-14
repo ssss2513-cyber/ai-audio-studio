@@ -184,3 +184,39 @@ document.addEventListener('click',function(event){
   if(el){event.preventDefault();el.scrollIntoView({behavior:document.body.classList.contains('no-motion')?'auto':'smooth',block:'start'});}
  }
 });
+
+/* MAISON_LUMIEL_BGM — visitor-controlled background audio */
+(function(){
+ function setupMusic(){
+  if(document.getElementById('lumiel-music-control'))return;
+  const music=document.createElement('audio');
+  music.id='lumiel-background-music';
+  music.src='/assets/background-music.mp3';
+  music.preload='none';
+  music.loop=true;
+  music.volume=0.32;
+  const button=document.createElement('button');
+  button.id='lumiel-music-control';
+  button.type='button';
+  button.setAttribute('aria-label','배경음악 재생');
+  button.setAttribute('aria-pressed','false');
+  button.title='배경음악 재생 / 끄기';
+  button.innerHTML='<span aria-hidden="true">♫</span><span class="lumiel-music-label">음악 켜기</span>';
+  button.style.cssText='position:fixed;right:16px;bottom:calc(82px + env(safe-area-inset-bottom, 0px));z-index:1200;display:flex;align-items:center;gap:7px;border:1px solid #cba6ac;background:#fff4f4;color:#653b47;border-radius:100px;padding:11px 15px;box-shadow:0 5px 20px #20101630;font-size:13px;font-weight:600;cursor:pointer;min-height:44px;';
+  music.addEventListener('play',function(){button.setAttribute('aria-pressed','true');button.setAttribute('aria-label','배경음악 끄기');button.querySelector('.lumiel-music-label').textContent='음악 끄기';});
+  music.addEventListener('pause',function(){button.setAttribute('aria-pressed','false');button.setAttribute('aria-label','배경음악 재생');button.querySelector('.lumiel-music-label').textContent='음악 켜기';});
+  button.addEventListener('click',async function(){
+   if(!music.paused){music.pause();try{sessionStorage.setItem('lumielMusicWanted','0');}catch(_){}return;}
+   if(document.querySelector('video:not([paused])') && Array.from(document.querySelectorAll('video')).some(v=>!v.paused))return;
+   try{await music.play();sessionStorage.setItem('lumielMusicWanted','1');}
+   catch(e){button.title='브라우저에서 음악 재생이 제한되었습니다. 다시 눌러 주세요.';}
+  });
+  // Suspend music for all course playback, resume only if visitor enabled it.
+  document.addEventListener('play',function(e){if(e.target?.tagName==='VIDEO'&&!music.paused){music.pause();music.dataset.suspended='1';}},true);
+  document.addEventListener('pause',function(e){if(e.target?.tagName==='VIDEO'&&music.dataset.suspended==='1'){setTimeout(function(){if(Array.from(document.querySelectorAll('video')).every(v=>v.paused)){delete music.dataset.suspended;music.play().catch(()=>{});}},250);}},true);
+  document.addEventListener('ended',function(e){if(e.target?.tagName==='VIDEO'&&music.dataset.suspended==='1'){delete music.dataset.suspended;music.play().catch(()=>{});}},true);
+  document.body.append(music,button);
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',setupMusic);
+ else setupMusic();
+})();

@@ -165,6 +165,22 @@ async function play(id){
  const save=()=>{if(playerId===id&&Number.isFinite(el.currentTime)&&el.currentTime>0)api('/videos/'+id+'/progress','POST',{seconds:el.currentTime},{keepalive:true}).catch(()=>{});};
  progressTimer=setInterval(save,7000);el.addEventListener('pause',save);
 }
+function createPlaylistModal(){
+ S.activePlaylist=null;
+ openModal(`<div class="eyebrow">PLAYLIST</div><h2>새 재생목록 만들기</h2><form data-form="playlist-create">${field('재생목록 이름','name','text','예: 스토리 마스터 클래스')}<label class="field"><span>재생목록 소개</span><textarea name="description" maxlength="300" placeholder="사용자가 어떤 강의 묶음인지 쉽게 알 수 있게 적어 주세요."></textarea></label>${field('표시 순서 · 작은 숫자가 먼저','position','number','',0)}<div class="form-error" hidden role="alert"></div><button class="primary full" type="submit">재생목록 만들기</button></form>`);
+}
+function editPlaylistModal(name){
+ const p=S.playlists.find(x=>x.name===name);if(!p)return;S.activePlaylist=p;
+ openModal(`<div class="eyebrow">PLAYLIST</div><h2>재생목록 수정</h2><form data-form="playlist-edit">${field('재생목록 이름','new_name','text','',p.name,p.name==='전체 클래스')}<label class="field"><span>재생목록 소개</span><textarea name="description" maxlength="300">${esc(p.description||'')}</textarea></label>${field('표시 순서 · 작은 숫자가 먼저','position','number','',p.position)}<div class="form-error" hidden role="alert"></div><button class="primary full" type="submit">저장하기</button></form>`);
+}
+function deletePlaylistModal(name){
+ const p=S.playlists.find(x=>x.name===name);if(!p||name==='전체 클래스')return;S.activePlaylist=p;
+ openModal(`<div class="eyebrow">PLAYLIST</div><h2>재생목록 삭제</h2><p><b>${esc(p.name)}</b> 재생목록을 삭제할까요?</p><p>안에 있는 영상은 삭제되지 않고 자동으로 <b>전체 클래스</b>로 이동합니다.</p><div class="button-row"><button class="outline" data-action="close">취소</button><button class="danger" data-action="playlist-delete-confirm">삭제</button></div>`);
+}
+function moveVideoPlaylistModal(id){
+ const v=S.videos.find(x=>x.id===id);if(!v)return;S.activeVideo=v;
+ openModal(`<div class="eyebrow">MOVE CLASS</div><h2>재생목록 이동</h2><p><b>${esc(v.title)}</b></p><form data-form="playlist-move"><label class="field"><span>이동할 재생목록</span><select name="playlist">${S.playlists.map(p=>`<option value="${esc(p.name)}" ${(v.playlist||'전체 클래스')===p.name?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><div class="form-error" hidden role="alert"></div><button class="primary full" type="submit">이 재생목록으로 이동</button></form>`);
+}
 async function editVideo(id){const v=S.videos.find(x=>x.id===id);if(!v)return;S.activeVideo=v;
  openModal(`<div class="eyebrow">CLASS DETAILS</div><h2>영상 정보 수정</h2><form data-form="video-edit">${field('영상 제목','title','text','',v.title)}<label class="field"><span>영상 소개</span><textarea name="description" maxlength="1000">${esc(v.description)}</textarea></label>${field('재생목록 이름','playlist','text','예: 스토리 마스터 클래스',v.playlist||'전체 클래스')}<label class="field"><span>재생목록 소개</span><textarea name="playlist_description" maxlength="300" placeholder="이 재생목록에서 무엇을 배우는지 짧게 적어 주세요.">${esc(v.playlist_description||'')}</textarea><small>같은 재생목록의 영상들은 동일한 이름으로 입력하세요.</small></label><label class="field"><span>기본 썸네일 테마</span><select name="theme">${[['rose','로즈'],['lilac','라일락'],['sage','세이지']].map(([k,t])=>`<option value="${k}" ${v.theme===k?'selected':''}>${t}</option>`).join('')}</select></label>${field('목록 배치 순서 · 작은 숫자가 먼저','position','number','',v.position)}<label class="field"><span>새 썸네일 · 선택 사항</span><input type="file" name="poster" accept="image/jpeg,image/png,image/webp"><small>2MB 이하. 선택하지 않으면 기존 썸네일을 유지합니다.</small></label><div class="form-error" hidden role="alert"></div><button class="primary full" type="submit">저장하기</button></form>`);
 }

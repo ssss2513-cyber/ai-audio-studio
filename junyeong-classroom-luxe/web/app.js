@@ -228,6 +228,9 @@ document.addEventListener('submit',async e=>{
  else if(kind==='settings'){S.meta=await api('/admin/settings','POST',{title:v.title,contact:v.contact,retention:v.retention,autoApprove:f.elements.autoApprove.checked,open:f.elements.open.checked,revision:S.meta.revision});toast('설정이 저장되었습니다.');await refresh();}
  else if(kind==='member-change'){await api('/admin/members/'+S.activeMember.id,'POST',{action:f.dataset.actionName,revision:S.activeMember.revision,reason:v.reason||'',confirmation:v.confirmation||''});closeModal();toast(actions[f.dataset.actionName]+' 처리가 저장되었습니다.');await render();}
  else if(kind==='video-change'){await api('/admin/videos/'+S.activeVideo.id,'POST',{action:f.dataset.actionName,revision:S.activeVideo.revision,confirmation:v.confirmation||''});closeModal();toast('영상 상태가 저장되었습니다.');await refresh();}
+ else if(kind==='playlist-create'){await api('/admin/playlists','POST',{action:'create',name:v.name,description:v.description||'',position:Number(v.position||0)});closeModal();toast('재생목록을 만들었습니다.');await render();}
+ else if(kind==='playlist-edit'){await api('/admin/playlists','POST',{action:'edit',name:S.activePlaylist.name,new_name:v.new_name||S.activePlaylist.name,description:v.description||'',position:Number(v.position||0)});closeModal();toast('재생목록을 수정했습니다.');await render();}
+ else if(kind==='playlist-move'){await api('/admin/videos/'+S.activeVideo.id+'/playlist','POST',{playlist:v.playlist});closeModal();toast('영상을 재생목록으로 이동했습니다.');await render();}
  else if(kind==='video-edit'){
  const poster=f.elements.poster.files[0];if(poster?.size>2*1024**2)throw new Error('썸네일은 2MB 이하로 선택해 주세요.');
  await api('/admin/videos/'+S.activeVideo.id,'POST',{action:'edit',revision:S.activeVideo.revision,title:v.title,description:v.description,playlist:v.playlist||'전체 클래스',playlist_description:v.playlist_description||'',theme:v.theme,position:Number(v.position)});
@@ -250,6 +253,9 @@ document.addEventListener('click',async e=>{
  else if(b.dataset.edit)await editVideo(b.dataset.edit);
  else if(b.dataset.videoAction)videoConfirm(b.dataset.id,b.dataset.videoAction);
  else if(b.dataset.resume)await openUpload(b.dataset.resume);
+ else if(b.dataset.playlistEdit)editPlaylistModal(b.dataset.playlistEdit);
+ else if(b.dataset.playlistDelete)deletePlaylistModal(b.dataset.playlistDelete);
+ else if(b.dataset.moveVideo)moveVideoPlaylistModal(b.dataset.moveVideo);
  else if(b.dataset.action){switch(b.dataset.action){
  case 'share-tools':await shareYadamTools();break;
  case 'refresh':b.disabled=true;try{await refresh();toast('최신 상태를 확인했습니다.');}finally{b.disabled=false;}break;
@@ -257,6 +263,8 @@ document.addEventListener('click',async e=>{
  case 'privacy':privacy();break;case 'close':closeModal();break;
  case 'sms-verify-open':b.disabled=true;try{await openSmsVerification();}finally{b.disabled=false;}break;
  case 'show-password':{const input=$('input',b.parentElement);input.type=input.type==='password'?'text':'password';b.textContent=input.type==='password'?'보기':'숨기기';break;}
+ case 'playlist-create':createPlaylistModal();break;
+ case 'playlist-delete-confirm':{if(!S.activePlaylist)break;await api('/admin/playlists','POST',{action:'delete',name:S.activePlaylist.name});closeModal();toast('재생목록을 삭제했습니다. 영상은 전체 클래스로 이동했습니다.');await render();break;}
  case 'upload':await openUpload();break;
  case 'drive-sync':{b.disabled=true;const old=b.textContent;b.textContent='Drive 확인 중…';try{const d=await api('/admin/drive/sync','POST',{});toast(`Drive 영상 ${d.found}개 확인 · 새로 등록 ${d.added}개`);await render();}finally{b.disabled=false;b.textContent=old;}break;}
  case 'preview-info':toast('디자인 확인용 예시입니다. 실제 데이터는 저장하지 않습니다.');break;

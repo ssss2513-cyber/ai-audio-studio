@@ -449,6 +449,37 @@ def change_member(ident: str,body: Change,req: Request):
         audit(c,a['id'],ident,body.action,body.reason)
         out=present(c.execute('SELECT * FROM members WHERE id=?',(ident,)).fetchone())
     return {'ok':True,'member':out}
+def _solapi_recent_admin(limit: int=8):
+    if not _sms_ready(): return []
+    try:
+        import requests as _requests, datetime as _datetime
+        api_key=os.getenv('SOLAPI_API_KEY','').strip()
+        api_secret=os.getenv('SOLAPI_API_SECRET','').strip()
+        salt=secrets.token_hex(16)
+        dt=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+        sig=hmac.new(api_secret.encode(),(dt+salt).encode(),hashlib.sha256).hexdigest()
+        auth=f'HMAC-SHA256 apiKey={api_key}, date={dt}, salt={salt}, signature={sig}'
+        r=_requests.get('https://api.solapi.com/messages/v4/list?limit='+str(max(1,min(20,limit))),headers={'Authorization':auth},timeout=12)
+        if r.status_code!=200: return [{'status':'조회 실패','statusCode':str(r.status_code),'reason':'SOLAPI 발송 결과를 불러오지 못했습니다.','to':'','dateUpdated':''}]
+        j=r.json()
+        raw=j.get('messageList',{})
+        vals=list(raw.values()) if isinstance(raw,dict) else (raw if isinstance(raw,list) else [])
+        out=[]
+        for x in vals[:limit]:
+            to=str(x.get('to') or '')
+            masked=(to[:3]+'****'+to[-4:]) if len(to)>=7 else ''
+            code=str(x.get('statusCode') or '')
+            status=str(x.get('status') or '')
+            reason=str(x.get('reason') or x.get('statusMessage') or '')
+            if code=='4000': label='수신 완료'
+            elif code.startswith('3'): label='발송 실패'
+            elif status.lower() in ('sent','completed','success'): label='발송 처리'
+            else: label=status or '처리 중'
+            out.append({'status':label,'statusCode':code,'reason':reason,'to':masked,'networkName':str(x.get('networkName') or ''),'dateUpdated':str(x.get('dateUpdated') or '')})
+        return out
+    except Exception:
+        return [{'status':'조회 실패','statusCode':'','reason':'발송 결과 조회 중 오류가 발생했습니다.','to':'','dateUpdated':''}]
+
 @app.get('/api/admin/overview')
 def overview(req: Request):
     require(req,admin=True)
@@ -456,7 +487,7 @@ def overview(req: Request):
         counts={m['state']:m['n'] for m in c.execute("SELECT state,COUNT(*) n FROM members WHERE role='member' GROUP BY state")}
         videos=c.execute("SELECT COUNT(*) FROM videos WHERE state!='trash'").fetchone()[0]
         recent=[dict(x) for x in c.execute('SELECT action,created FROM audits ORDER BY id DESC LIMIT 8')]
-    return {'counts':counts,'videos':videos,'recent':recent}
+    return {'counts':counts,'videos':videos,'recent':recent,'smsDeliveries':_solapi_recent_admin(8)}
 @app.get('/api/admin/audits')
 def audits(req: Request,page: int=1):
     require(req,admin=True)

@@ -81,7 +81,13 @@ with db() as c:
     CREATE TABLE IF NOT EXISTS progress(member TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
       video TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE, seconds REAL NOT NULL, updated REAL NOT NULL,
       PRIMARY KEY(member,video));
-    CREATE INDEX IF NOT EXISTS sessions_member ON sessions(member);
+    CREATE TABLE IF NOT EXISTS playlists(
+      name TEXT PRIMARY KEY,
+      description TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 0,
+      created REAL NOT NULL
+    );
+        CREATE INDEX IF NOT EXISTS sessions_member ON sessions(member);
     CREATE INDEX IF NOT EXISTS audit_subject ON audits(subject);
     ''')
     c.execute('INSERT OR IGNORE INTO settings VALUES(1,?)', (json.dumps(DEFAULT,ensure_ascii=False),))
@@ -91,6 +97,9 @@ with db() as c:
     if 'external_id' not in cols: c.execute("ALTER TABLE videos ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")
     if 'playlist' not in cols: c.execute("ALTER TABLE videos ADD COLUMN playlist TEXT NOT NULL DEFAULT '전체 클래스'")
     if 'playlist_description' not in cols: c.execute("ALTER TABLE videos ADD COLUMN playlist_description TEXT NOT NULL DEFAULT ''")
+    c.execute("INSERT OR IGNORE INTO playlists(name,description,position,created) VALUES('전체 클래스','',0,?)",(time.time(),))
+    for row in c.execute("SELECT DISTINCT playlist,playlist_description FROM videos WHERE TRIM(COALESCE(playlist,''))<>''"):
+        c.execute("INSERT OR IGNORE INTO playlists(name,description,position,created) VALUES(?,?,0,?)",(row[0],row[1] or '',time.time()))
     mcols={row[1] for row in c.execute("PRAGMA table_info(members)")}
     if 'verified' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
     if 'verified_at' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified_at REAL")
@@ -675,6 +684,72 @@ def videos(req: Request):
     with db() as c:
         rows=c.execute("SELECT v.*,COALESCE(p.seconds,0) seconds FROM videos v LEFT JOIN progress p ON p.video=v.id AND p.member=? WHERE v.state='public' ORDER BY v.position,v.created DESC",(m['id'],)).fetchall()
     return {'items':[dict(x) for x in rows]}
+@app.get('/api/admin/playlists')
+def admin_playlists(req: Request):
+    require(req,admin=True)
+    with db() as c:
+        rows=c.execute("""SELECT p.name,p.description,p.position,p.created,
+          COUNT(v.id) video_count
+          FROM playlists p LEFT JOIN videos v ON v.playlist=p.name AND v.state!='purging'
+          GROUP BY p.name,p.description,p.position,p.created
+          ORDER BY p.position,p.created,p.name""").fetchall()
+    return {'items':[dict(x) for x in rows]}
+
+class PlaylistChange(BaseModel):
+    action: str
+    name: str=Field(default='',max_length=80)
+    new_name: str=Field(default='',max_length=80)
+    description: str=Field(default='',max_length=300)
+    position: int=Field(default=0,ge=-100000,le=100000)
+
+@app.post('/api/admin/playlists')
+def change_playlist(body: PlaylistChange,req: Request):
+    a=require(req,admin=True,write=True)
+    name=body.name.strip()
+    new_name=body.new_name.strip()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if body.action=='create':
+            target=(name or new_name)
+            if not target: fail(422,'재생목록 이름을 입력해 주세요.')
+            if c.execute('SELECT 1 FROM playlists WHERE name=?',(target,)).fetchone(): fail(409,'같은 이름의 재생목록이 이미 있습니다.')
+            c.execute('INSERT INTO playlists(name,description,position,created) VALUES(?,?,?,?)',(target,body.description.strip(),body.position,time.time()))
+            audit(c,a['id'],target,'playlist_create')
+        elif body.action=='edit':
+            if not name: fail(422,'수정할 재생목록을 확인해 주세요.')
+            target=(new_name or name)
+            if name=='전체 클래스' and target!='전체 클래스': fail(409,'기본 재생목록 이름은 변경할 수 없습니다.')
+            if target!=name and c.execute('SELECT 1 FROM playlists WHERE name=?',(target,)).fetchone(): fail(409,'같은 이름의 재생목록이 이미 있습니다.')
+            if not c.execute('SELECT 1 FROM playlists WHERE name=?',(name,)).fetchone(): fail(404,'재생목록을 찾을 수 없습니다.')
+            c.execute('UPDATE playlists SET name=?,description=?,position=? WHERE name=?',(target,body.description.strip(),body.position,name))
+            c.execute('UPDATE videos SET playlist=?,playlist_description=?,revision=revision+1 WHERE playlist=?',(target,body.description.strip(),name))
+            audit(c,a['id'],name,'playlist_edit',target)
+        elif body.action=='delete':
+            if name=='전체 클래스': fail(409,'기본 재생목록은 삭제할 수 없습니다.')
+            if not c.execute('SELECT 1 FROM playlists WHERE name=?',(name,)).fetchone(): fail(404,'재생목록을 찾을 수 없습니다.')
+            c.execute("UPDATE videos SET playlist='전체 클래스',playlist_description='',revision=revision+1 WHERE playlist=?",(name,))
+            c.execute('DELETE FROM playlists WHERE name=?',(name,))
+            audit(c,a['id'],name,'playlist_delete')
+        else:
+            fail(422,'지원하지 않는 동작입니다.')
+    return {'ok':True}
+
+class PlaylistMove(BaseModel):
+    playlist: str=Field(min_length=1,max_length=80)
+
+@app.post('/api/admin/videos/{ident}/playlist')
+def move_video_playlist(ident: str,body: PlaylistMove,req: Request):
+    a=require(req,admin=True,write=True)
+    target=body.playlist.strip()
+    with db() as c:
+        v=c.execute('SELECT * FROM videos WHERE id=?',(ident,)).fetchone()
+        if not v: fail(404,'영상을 찾을 수 없습니다.')
+        p=c.execute('SELECT * FROM playlists WHERE name=?',(target,)).fetchone()
+        if not p: fail(404,'재생목록을 찾을 수 없습니다.')
+        c.execute('UPDATE videos SET playlist=?,playlist_description=?,revision=revision+1 WHERE id=?',(target,p['description'],ident))
+        audit(c,a['id'],ident,'video_move_playlist',target)
+    return {'ok':True}
+
 @app.get('/api/admin/videos')
 def admin_videos(req: Request):
     require(req,admin=True)

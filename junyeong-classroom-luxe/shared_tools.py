@@ -11,14 +11,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
 PACKAGES = (
     {
         'id': 'yadam-script-gpt',
-        'asset': 'yadam-script-gpt-v2.0.zip',
-        'filename': 'Yadam_Synopsis_Skill_v2.0.zip',
+        'asset': 'yadam-script-gpt-v2.1.zip',
+        'filename': 'Yadam_Synopsis_Skill_v2.1.zip',
         'title': '대본 GPT 버전',
         'step': '01 · 시놉시스와 대본 만들기',
-        'version': 'V2.0',
+        'version': 'V2.1',
         'updated': '2026-10-15',
-        'description': '소재나 레퍼런스 썸네일·제목으로 시놉시스 5안을 만들고, 선택한 이야기를 5막 20챕터와 약 35,000자 낭독 대본으로 이어 쓰는 ChatGPT용 통합 지침입니다. 완성된 시놉시스를 넣어 바로 대본으로 확장할 수도 있습니다.',
-        'features': ['시놉시스 5안 → 20챕터 → 대본 연계', '14장르·10작법·목표 90분·공백 포함 약 35,000자', '사진 없이 MD 파일 12개 · 하위 폴더 없음'],
+        'description': '소재나 레퍼런스 썸네일·제목에서 시놉시스 5안, 5막 20챕터, 약 35,000자 낭독 대본으로 이어지는 ChatGPT용 지침입니다. V2.1은 ‘옛날 옛적’ 도입과 중간 전개, 유튜브용 엔딩을 보강했습니다. 완성 시놉시스로 바로 대본을 쓸 수도 있습니다.',
+        'features': ['시놉시스 5안 → 20챕터 → 목표 90분·약 35,000자', '옛날 옛적 도입 · 단서와 행동 중심의 중간 전개', '유튜브용 좋아요·구독·다음 이야기·안부 엔딩', '사진 없는 MD 12개 · 하위 폴더 없음'],
         'fileCount': 12,
     },
     {

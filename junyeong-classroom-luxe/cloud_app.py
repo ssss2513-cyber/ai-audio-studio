@@ -1,6 +1,7 @@
 """Cloud entry: durable private data, one-time administrator setup, owner recovery."""
 import os, hashlib, secrets, time, json
 import app as core
+from yadam_trends import install as install_yadam_trends
 from fastapi import Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -9,6 +10,7 @@ app=core.app
 from shared_tools import install_shared_tools
 install_shared_tools(core)
 app.title='메종 루미엘 · Maison Lumiel'
+install_yadam_trends(core)
 marker=core.DATA/'lumiel-v2'
 if not marker.exists():
  with core.db() as c:

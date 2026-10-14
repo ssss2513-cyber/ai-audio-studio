@@ -160,14 +160,23 @@ function lumielIntroSection(){
  </section>`;
 }
 
+
+function lumielYadamSection(){
+ return '<section class="luxe-yadam-trends" id="yadam-trends" aria-labelledby="yadam-trends-title">'+
+  '<div class="luxe-yadam-heading"><span class="luxe-kicker">YADAM · MONTHLY PERFORMANCE</span>'+
+  '<h2 id="yadam-trends-title">구독자 대비 조회수가 높은<br><em>야담 이야기 세 편</em></h2>'+
+  '<p>최근 30일에 공개된 4분 이상 야담·민담 영상 중 구독자 대비 조회수 비율이 높은 후보를 보여드립니다.</p>'+
+  '<small>홈으로 다시 들어올 때마다 상위 후보에서 다른 세 편을 보여드립니다.</small></div>'+
+  '<div id="lumiel-yadam-list" class="luxe-yadam-grid" aria-live="polite" aria-busy="true">'+
+  '<p class="luxe-yadam-loading">최근 야담 영상을 불러오고 있습니다…</p></div>'+
+  '<div id="lumiel-yadam-method" class="luxe-yadam-method"></div></section>';
+}
 home=function(){
- const list=S.catalogue||[];
- S.videos=list;
- luxeActivePlaylist='all';
- return '<div class="luxe-home-page">'+luxeHero(true)+luxeFeatures()+
-  lumielIntroSection()+luxeClassLibrary(list)+
-  '<div class="luxe-collection" style="padding-top:0"><div class="luxe-endnote"><span>Discover a new chapter in your everyday.</span><button type="button" class="outline small" data-go="guide">이용 안내 ↗</button></div></div></div>';
+ return '<div class="luxe-home-page">'+lumielIntroSection()+lumielYadamSection()+
+  '<div class="luxe-yadam-foot"><span>MAISON LUMIEL · PRIVATE LEARNING SALON</span>'+
+  '<button type="button" class="outline small" data-go="classes">내 강의실 바로가기 ↗</button></div></div>';
 };
+
 filterCourses=function(){
  const target=document.getElementById('course-list');
  if(!target)return;
@@ -245,3 +254,189 @@ document.addEventListener('click',function(event){
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',setupMusic);
  else setupMusic();
 })();
+
+
+/* Ranked search pool is cached on the server. Each home visit rotates three picks. */
+let lumielYadamVisits=0;
+function lumielPickYadam(pool,date){
+ const choices=pool.slice(0,24);
+ if(!choices.length)return [];
+ const key='lumiel-yadam-visit-'+String(date||'new').slice(0,13);
+ let turn=lumielYadamVisits++;
+ try{turn=Number(sessionStorage.getItem(key)||'0')||0;sessionStorage.setItem(key,String(turn+1));}catch(_){}
+ const offset=(turn*3)%choices.length;
+ return Array.from({length:Math.min(3,choices.length)},(_,i)=>choices[(offset+i)%choices.length]);
+}
+async function lumielLoadYadam(box){
+ if(!box||!box.isConnected)return;
+ if(window.JC_DEMO){box.textContent='디자인 미리보기에서는 실제 YouTube 데이터가 표시되지 않습니다.';box.setAttribute('aria-busy','false');return;}
+ try{
+  let data;
+  for(let i=0;i<6;i++){
+   const request=await fetch('/api/public/yadam-trends',{credentials:'same-origin',signal:AbortSignal.timeout(65000)});
+   if(!request.ok)throw Error('데이터 연결 오류');
+   data=await request.json();
+   if(data.status!=='refreshing')break;
+   await new Promise(resolve=>setTimeout(resolve,3500));
+  }
+  if(!box.isConnected)return;
+  const videos=data&&Array.isArray(data.videos)?data.videos:[];
+  if(!videos.length){
+   box.innerHTML='<div class="luxe-yadam-empty"><h3>야담 영상을 준비하고 있습니다.</h3><p>'+
+    esc(data?.message||'운영자가 YouTube API 키를 연결하면 표시됩니다.')+'</p></div>';
+  }else{
+   const picks=lumielPickYadam(videos,data.fetchedAt);
+   box.innerHTML=picks.map(v=>{
+    const id=String(v.id||'');
+    if(!/^[a-zA-Z0-9_-]{11}$/.test(id))return '';
+    const ratio=Number(v.ratio||0).toFixed(2);
+    const number=n=>Number(n||0).toLocaleString('ko-KR');
+    return '<a class="luxe-yadam-card" href="https://www.youtube.com/watch?v='+encodeURIComponent(id)+
+     '" target="_blank" rel="noopener noreferrer"><div class="luxe-yadam-thumb">'+
+     '<img src="https://i.ytimg.com/vi/'+encodeURIComponent(id)+'/hqdefault.jpg" alt="" loading="lazy" decoding="async">'+
+     '<span class="luxe-yadam-rank">상위 '+Number(v.rank||0)+'위 후보</span>'+
+     '<span class="luxe-yadam-play" aria-hidden="true">▶</span></div>'+
+     '<div class="luxe-yadam-body"><h3>'+esc(v.title)+'</h3><p>'+esc(v.channel)+'</p>'+
+     '<div class="luxe-yadam-numbers"><span>조회수 '+number(v.views)+'회</span>'+
+     '<span>구독자 '+number(v.subscribers)+'명</span></div>'+
+     '<div class="luxe-yadam-score"><b>구독자 대비 '+ratio+'배</b><span>유튜브에서 보기 ↗</span></div></div></a>';
+   }).join('');
+  }
+  const info=document.getElementById('lumiel-yadam-method');
+  if(info&&info.isConnected){
+   const when=data?.fetchedAt?new Date(data.fetchedAt).toLocaleString('ko-KR'):'';
+   info.textContent='야담·민담 검색 표본 기준 · 최근 30일 · 4분 이상 · 조회수 ÷ 채널 구독자 수'+
+      (when?' · 수집 '+when:'')+(data?.status==='stale'?' · 마지막 수집 자료':'')+
+      ' · YouTube 전체 순위를 의미하지 않습니다.';
+  }
+ }catch(_){
+  if(box.isConnected)box.innerHTML='<div class="luxe-yadam-empty"><h3>영상 데이터를 가져오지 못했습니다.</h3><p>연결 상태를 확인하고 홈을 다시 열어 주세요.</p></div>';
+ }finally{if(box.isConnected)box.setAttribute('aria-busy','false');}
+}
+
+
+/* Admin: private API key setup and manual ordering within each playlist. */
+function lumielAdminSetupPanel(){
+ return '<section class="panel yadam-key-panel" id="lumiel-yadam-settings">'+
+ '<div class="section-top"><div><div class="eyebrow">YOUTUBE DATA API V3</div>'+
+ '<h2>야담 트렌드 영상 연결</h2></div>'+
+ '<span id="lumiel-yadam-key-status" class="luxe-yadam-config-status">확인 중…</span></div>'+
+ '<p>API 키는 서버에 암호화해 보관하며 홈페이지 방문자에게 노출하지 않습니다. 6시간마다 영상 표본을 새로 확인합니다.</p>'+
+ '<form id="lumiel-yadam-key-form" autocomplete="off">'+
+ '<label class="field"><span>YouTube Data API 키</span>'+
+ '<input id="lumiel-yadam-key" name="apiKey" type="password" autocomplete="off" maxlength="200" required placeholder="Google Cloud에서 발급한 키를 입력하세요"></label>'+
+ '<div class="button-row"><button type="submit" class="primary">키 연결하고 저장</button>'+
+ '<button type="button" class="outline" data-lumiel-clear-key="true">키 연결 해제</button></div></form>'+
+ '<p class="form-note">Google Cloud에서 YouTube Data API v3가 활성화된 키를 입력하세요. 계정 비밀번호가 아니라 API 키입니다.</p>'+
+ '</section>';
+}
+async function lumielCheckKeyStatus(){
+ const status=document.getElementById('lumiel-yadam-key-status');
+ if(!status)return;
+ try{
+  const result=await api('/admin/yadam-config');
+  if(status.isConnected)status.textContent=result.configured?'연결됨 · 후보 '+Number(result.candidateCount||0)+'개':'연결 전';
+ }catch(_){if(status.isConnected)status.textContent='연결 상태 확인 필요';}
+}
+let lumielOrderCurrent='',lumielOrderDraft=[];
+function lumielOrderRefreshRows(){
+ const box=document.getElementById('lumiel-order-rows');
+ if(!box)return;
+ if(!lumielOrderDraft.length){box.innerHTML='<p class="form-note">이 재생목록에는 정렬할 영상이 없습니다.</p>';return;}
+ box.innerHTML=lumielOrderDraft.map((id,index)=>{
+  const item=S.videos.find(v=>v.id===id);
+  if(!item)return '';
+  return '<div class="lumiel-order-row"><span class="lumiel-order-number">'+(index+1)+'강</span>'+
+   '<span class="lumiel-order-title">'+esc(item.title)+'</span>'+
+   '<div class="lumiel-order-actions">'+
+   '<button type="button" class="outline small" data-lumiel-move-up="'+esc(id)+'"'+(index===0?' disabled':'')+' aria-label="'+esc(item.title)+' 위로 이동">↑</button>'+
+   '<button type="button" class="outline small" data-lumiel-move-down="'+esc(id)+'"'+(index===lumielOrderDraft.length-1?' disabled':'')+' aria-label="'+esc(item.title)+' 아래로 이동">↓</button>'+
+   '</div></div>';
+ }).join('');
+}
+function lumielOrderSelect(name){
+ lumielOrderCurrent=name;
+ lumielOrderDraft=(S.videos||[]).filter(v=>(v.playlist||'전체 클래스')===name&&!['trash','purging'].includes(v.state))
+   .sort((a,b)=>Number(a.position||0)-Number(b.position||0)||Number(b.created||0)-Number(a.created||0))
+   .map(v=>v.id);
+ lumielOrderRefreshRows();
+}
+function lumielOrderOpen(){
+ if(!S.member||S.member.role!=='admin')return;
+ if(!S.playlists?.length){toast('먼저 재생목록을 만들어 주세요.');return;}
+ openModal('<div class="eyebrow">SET YOUR CLASS ORDER</div><h2>재생목록 영상 순번 설정</h2>'+
+  '<p>재생목록을 고른 다음 ↑ ↓ 버튼으로 영상 순서를 바꿔 주세요. 저장한 순서가 회원 강의실에도 적용됩니다.</p>'+
+  '<label class="field"><span>재생목록 선택</span><select id="lumiel-order-playlist">'+
+  S.playlists.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name)+'</option>').join('')+
+  '</select></label><div id="lumiel-order-rows" class="lumiel-order-list"></div>'+
+  '<div class="button-row"><button type="button" class="outline" data-action="close">취소</button>'+
+  '<button type="button" class="primary" id="lumiel-order-save">영상 순서 저장</button></div>');
+ lumielOrderSelect(S.playlists[0].name);
+}
+function lumielOrderMove(id,delta){
+ const index=lumielOrderDraft.indexOf(id),next=index+delta;
+ if(index<0||next<0||next>=lumielOrderDraft.length)return;
+ [lumielOrderDraft[index],lumielOrderDraft[next]]=[lumielOrderDraft[next],lumielOrderDraft[index]];
+ lumielOrderRefreshRows();
+}
+async function lumielOrderSave(button){
+ if(!lumielOrderDraft.length){toast('정렬할 영상이 없습니다.');return;}
+ button.disabled=true;
+ try{
+  await api('/admin/playlists/'+encodeURIComponent(lumielOrderCurrent)+'/order','POST',{ids:lumielOrderDraft});
+  closeModal();S.tab='videos';toast('재생목록 영상 순번을 저장했습니다.');await render();
+ }catch(err){toast(err.message);}
+ finally{if(button.isConnected)button.disabled=false;}
+}
+function lumielEnhancePage(){
+ const yadam=document.getElementById('lumiel-yadam-list');
+ if(yadam&&!yadam.dataset.loaded){yadam.dataset.loaded='1';lumielLoadYadam(yadam);}
+ if(S.member?.role==='admin'&&S.tab==='videos'){
+  const heading=[...document.querySelectorAll('.panel h2')].find(h=>h.textContent.trim()==='재생목록 관리');
+  const buttons=heading?.closest('.section-top');
+  if(buttons&&!buttons.querySelector('[data-lumiel-order-open]')){
+   const btn=document.createElement('button');btn.type='button';btn.className='outline small';
+   btn.dataset.lumielOrderOpen='1';btn.textContent='영상 순번 변경 ↑↓';
+   buttons.appendChild(btn);
+  }
+ }
+ if(S.member?.role==='admin'&&S.tab==='settings'){
+  const settings=document.querySelector('form[data-form="settings"]');
+  if(settings&&!document.getElementById('lumiel-yadam-settings')){
+   settings.insertAdjacentHTML('afterend',lumielAdminSetupPanel());
+   lumielCheckKeyStatus();
+  }
+ }
+}
+const lumielPageObserver=new MutationObserver(lumielEnhancePage);
+const lumielMain=document.getElementById('main');
+if(lumielMain)lumielPageObserver.observe(lumielMain,{childList:true});
+document.addEventListener('click',async function(event){
+ const btn=event.target.closest('[data-lumiel-order-open],[data-lumiel-move-up],[data-lumiel-move-down],#lumiel-order-save,[data-lumiel-clear-key]');
+ if(!btn)return;
+ event.preventDefault();event.stopImmediatePropagation();
+ if(btn.dataset.lumielOrderOpen)lumielOrderOpen();
+ else if(btn.dataset.lumielMoveUp)lumielOrderMove(btn.dataset.lumielMoveUp,-1);
+ else if(btn.dataset.lumielMoveDown)lumielOrderMove(btn.dataset.lumielMoveDown,1);
+ else if(btn.id==='lumiel-order-save')await lumielOrderSave(btn);
+ else if(btn.dataset.lumielClearKey&&confirm('YouTube API 키 연결을 해제하시겠습니까?')){
+  try{await api('/admin/yadam-config','POST',{clear:true});toast('API 키 연결이 해제되었습니다.');lumielCheckKeyStatus();}
+  catch(e){toast(e.message);}
+ }
+},true);
+document.addEventListener('change',function(event){
+ if(event.target.id==='lumiel-order-playlist')lumielOrderSelect(event.target.value);
+},true);
+document.addEventListener('submit',async function(event){
+ const form=event.target;
+ if(form.id!=='lumiel-yadam-key-form')return;
+ event.preventDefault();event.stopImmediatePropagation();
+ const value=form.elements.apiKey.value.trim(),button=form.querySelector('button[type="submit"]');
+ if(!value){toast('API 키를 입력해 주세요.');return;}
+ button.disabled=true;
+ try{
+  await api('/admin/yadam-config','POST',{apiKey:value});
+  form.reset();toast('YouTube Data API 키를 저장했습니다. 홈에서 영상을 수집합니다.');lumielCheckKeyStatus();
+ }catch(err){toast(err.message);}
+ finally{if(button.isConnected)button.disabled=false;}
+},true);

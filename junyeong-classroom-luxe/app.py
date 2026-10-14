@@ -219,7 +219,7 @@ async def security(req: Request, call_next):
     response.headers['Referrer-Policy']='same-origin'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://images.unsplash.com blob: data: https://images.unsplash.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://images.unsplash.com https://i.ytimg.com blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     if req.url.path.startswith('/api/'): response.headers['Cache-Control']='private, no-store, max-age=0'
     if SECURE: response.headers['Strict-Transport-Security']='max-age=31536000'
     return response
@@ -677,12 +677,12 @@ def watch(req,ident):
 @app.get('/api/catalogue')
 def catalogue():
     if not settings()['open']: return {'items':[]}
-    with db() as c: return {'items':[dict(v) for v in c.execute("SELECT id,title,description,duration,theme,poster,created,playlist,playlist_description FROM videos WHERE state='public' ORDER BY position,created DESC")]}
+    with db() as c: return {'items':[dict(v) for v in c.execute("SELECT v.id,v.title,v.description,v.duration,v.theme,v.poster,v.created,v.playlist,v.playlist_description FROM videos v LEFT JOIN playlists pl ON pl.name=v.playlist WHERE v.state='public' ORDER BY COALESCE(pl.position,0),v.position,v.created DESC")]}
 @app.get('/api/videos')
 def videos(req: Request):
     m=require(req,watch=True)
     with db() as c:
-        rows=c.execute("SELECT v.*,COALESCE(p.seconds,0) seconds FROM videos v LEFT JOIN progress p ON p.video=v.id AND p.member=? WHERE v.state='public' ORDER BY v.position,v.created DESC",(m['id'],)).fetchall()
+        rows=c.execute("SELECT v.*,COALESCE(pg.seconds,0) seconds FROM videos v LEFT JOIN progress pg ON pg.video=v.id AND pg.member=? LEFT JOIN playlists pl ON pl.name=v.playlist WHERE v.state='public' ORDER BY COALESCE(pl.position,0),v.position,v.created DESC",(m['id'],)).fetchall()
     return {'items':[dict(x) for x in rows]}
 @app.get('/api/admin/playlists')
 def admin_playlists(req: Request):
@@ -746,14 +746,38 @@ def move_video_playlist(ident: str,body: PlaylistMove,req: Request):
         if not v: fail(404,'영상을 찾을 수 없습니다.')
         p=c.execute('SELECT * FROM playlists WHERE name=?',(target,)).fetchone()
         if not p: fail(404,'재생목록을 찾을 수 없습니다.')
-        c.execute('UPDATE videos SET playlist=?,playlist_description=?,revision=revision+1 WHERE id=?',(target,p['description'],ident))
+        tail=c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM videos WHERE playlist=? AND state NOT IN ('trash','purging')",(target,)).fetchone()[0]
+        c.execute('UPDATE videos SET playlist=?,playlist_description=?,position=?,revision=revision+1 WHERE id=?',(target,p['description'],tail,ident))
         audit(c,a['id'],ident,'video_move_playlist',target)
     return {'ok':True}
+
+
+class PlaylistVideoOrder(BaseModel):
+    ids: list[str]=Field(min_length=1,max_length=1500)
+
+@app.post('/api/admin/playlists/{playlist_name}/order')
+def save_playlist_order(playlist_name: str, body: PlaylistVideoOrder, req: Request):
+    manager=require(req,admin=True,write=True)
+    name=playlist_name.strip()
+    if not name or len(name)>80: fail(422,'재생목록 이름을 확인해 주세요.')
+    if len(body.ids)!=len(set(body.ids)) or any(not re.fullmatch(r'[0-9a-f]{32}',x) for x in body.ids):
+        fail(422,'영상 번호에 중복 또는 잘못된 항목이 있습니다.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM playlists WHERE name=?',(name,)).fetchone():
+            fail(404,'재생목록을 찾을 수 없습니다.')
+        current=c.execute("SELECT id FROM videos WHERE playlist=? AND state NOT IN ('trash','purging')",(name,)).fetchall()
+        if len(body.ids)!=len(current) or set(body.ids)!={r['id'] for r in current}:
+            fail(409,'재생목록에 영상이 변경됐습니다. 다시 열고 저장해 주세요.')
+        for n,ident in enumerate(body.ids):
+            c.execute("UPDATE videos SET position=?,revision=revision+1 WHERE id=? AND playlist=?",(n,ident,name))
+        audit(c,manager['id'],name,'playlist_video_order',str(len(body.ids)))
+    return {'ok':True,'count':len(body.ids)}
 
 @app.get('/api/admin/videos')
 def admin_videos(req: Request):
     require(req,admin=True)
-    with db() as c: return {'items':[dict(v) for v in c.execute('SELECT * FROM videos ORDER BY position,created DESC')]}
+    with db() as c: return {'items':[dict(v) for v in c.execute('SELECT v.* FROM videos v LEFT JOIN playlists pl ON pl.name=v.playlist ORDER BY COALESCE(pl.position,0),v.position,v.created DESC')]}
 class VideoChange(BaseModel):
     action: str
     revision: int

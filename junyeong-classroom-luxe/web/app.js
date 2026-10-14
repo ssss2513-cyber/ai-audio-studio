@@ -291,5 +291,5 @@ function motion(off){document.body.classList.toggle('no-motion',off);$('#motion-
 let off=matchMedia('(prefers-reduced-motion: reduce)').matches;try{off=off||localStorage.getItem('jc-motion-off')==='true';}catch{}motion(off);$('#motion-btn').onclick=()=>motion(!document.body.classList.contains('no-motion'));
 if(window.JC_DEMO)$('#preview-bar').hidden=false;
 $('#main').innerHTML='<div class="loading">나를 위한 배움의 공간을 준비하고 있어요.</div>';
-refresh().then(()=>finishIdentityReturn()).catch(e=>{$('#main').innerHTML=`<div class="error-page"><div class="notice"><h3>프로그램 연결을 확인해 주세요.</h3><p>${esc(e.message)}</p><button class="outline" data-action="refresh">다시 확인</button></div></div>`;});
+refresh().catch(e=>{$('#main').innerHTML=`<div class="error-page"><div class="notice"><h3>프로그램 연결을 확인해 주세요.</h3><p>${esc(e.message)}</p><button class="outline" data-action="refresh">다시 확인</button></div></div>`;});
 

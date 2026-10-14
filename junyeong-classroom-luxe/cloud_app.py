@@ -6,6 +6,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 app=core.app
+from shared_tools import install_shared_tools
+install_shared_tools(core)
 app.title='메종 루미엘 · Maison Lumiel'
 marker=core.DATA/'lumiel-v2'
 if not marker.exists():
@@ -173,3 +175,4 @@ def _drive_stream(req: Request,v):
  return core.StreamingResponse(chunks(),status_code=upstream.status_code,media_type=v['mime'],headers=out_headers)
 
 core.EXTERNAL_STREAMER=_drive_stream
+

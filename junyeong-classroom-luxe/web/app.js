@@ -6,6 +6,7 @@ const actions={approve:'시청 승인',revoke:'승인 취소',block:'이용 제�
 const rules={pending:['approve','block','remove'],approved:['revoke','block','remove'],blocked:['unblock','remove'],removed:['restore','erase']};
 const S={member:null,csrf:null,meta:{title:'준영 클래스',contact:'ssss2513@gmail.com',retention:'회원 탈퇴 또는 개인정보 삭제 요청 처리 시까지',open:true,autoApprove:false,ready:false},catalogue:[],videos:[],members:[],tab:'overview',page:1,q:'',filter:'',render:0};
 let toastTimer,heartbeat,progressTimer,playerId=null,uploadRunning=false,uploadPause=false,activeXHR=null,currentUpload=null,lastFocus=null;
+let toolsAfterAuth=false;
 const prettyBytes=n=>n>=1024**3?(n/1024**3).toFixed(2)+' GB':(n/1024**2).toFixed(1)+' MB';
 const date=n=>n?new Date(n*1000).toLocaleDateString('ko-KR'):'—';
 const duration=n=>n>0?Math.floor(n/60)+'분 '+String(Math.floor(n%60)).padStart(2,'0')+'초':'강의 영상';
@@ -44,6 +45,28 @@ async function classes(){
  const can=S.member&&(S.member.role==='admin'||S.member.state==='approved')&&S.meta.open;
  const list=can?(await api('/videos')).items:S.catalogue;S.videos=list;
  return `${pageTitle('MY COLLECTION',S.member?S.member.name+'님의 배움 공간':'마음을 채우는 클래스','한 번 더 보고 싶은 배움, 언제든 이어서 만나보세요.')}<section class="section" style="padding-top:28px">${stateNotice()}<div class="toolbar"><input id="course-search" type="search" placeholder="보고 싶은 클래스 제목을 검색해 보세요" aria-label="클래스 제목 검색"><select id="course-sort" aria-label="영상 정렬"><option value="default">관리자 배치순</option><option value="newest">최신순</option></select></div><div id="course-list">${list.length?`<div class="card-grid">${list.map(card).join('')}</div>`:empty()}</div></section>`;
+}
+async function yadamTools(){
+ const {items}=await api('/tools');
+ const can=!!S.member&&(S.member.role==='admin'||(S.member.state==='approved'&&S.meta.open));
+ const notice=!S.member?`<div class="notice tools-notice"><h2>로그인하면 파일을 받을 수 있어요.</h2><p>이 페이지 주소를 공유하면 다른 회원도 같은 파일을 내려받을 수 있습니다.</p><div class="button-row"><button class="primary small" data-tools-login="login">로그인</button><button class="outline small" data-tools-login="join">회원가입</button></div></div>`:!can?`<div class="notice tools-notice"><h2>현재 다운로드 권한을 확인해 주세요.</h2><p>승인 상태와 사이트 이용 상태에 따라 다운로드가 제한될 수 있습니다.</p><div class="button-row"><button class="outline small" data-action="refresh">상태 새로 확인</button><button class="outline small" data-go="account">내 정보</button></div></div>`:'';
+ return `${pageTitle('YADAM CREATOR LIBRARY','야담 제작 도구','대본을 만들고, 완성도를 살피는 도구를 한곳에 모았습니다.')}<section class="section tools-section"><div class="tools-toolbar"><p>Claude 프로젝트용 · 전체 파일 포함</p><button class="outline small" data-action="share-tools">이 페이지 공유 ↗</button></div>${notice}<div class="tools-grid">${items.map((item,i)=>`<article class="tool-card"><div class="tool-card-top"><span class="tool-step">${i===0?'01 · 대본 만들기':'02 · 완성본 검증하기'}</span><span class="tool-version">${esc(item.version)}</span></div><h2>${esc(item.title)}</h2><p class="tool-description">${esc(item.description)}</p><ul class="tool-features">${item.features.map(feature=>`<li>${esc(feature)}</li>`).join('')}</ul><p class="tool-file-info">ZIP · ${Math.round(item.size/1024)} KB · ${item.fileCount}개 파일<br>등록일 ${esc(item.updated)}</p><button class="primary full tool-download" ${can?`data-tool-download="${esc(item.id)}" data-filename="${esc(item.filename)}"`:!S.member?'data-tools-login="login"':'disabled'}>${can?'전체 파일 다운로드 ↓':!S.member?'로그인하고 다운로드':'승인 후 다운로드'}</button><p class="tool-filename">${esc(item.filename)}</p></article>`).join('')}</div><div class="tools-guide"><div class="eyebrow">처음 사용하신다면</div><h2>이 순서대로 시작하세요.</h2><ol><li><strong>원하는 파일을 내려받고 압축을 풉니다.</strong><p>휴대폰은 ‘내 파일 → 다운로드’에서 ZIP 파일을 눌러 압축을 풀어 주세요.</p></li><li><strong>‘00_먼저읽기’ 파일을 엽니다.</strong><p>생성기는 설치방법, 검증기는 사용방법 파일에 넣을 자료와 복사할 지침이 적혀 있습니다.</p></li><li><strong>Claude 프로젝트에 지침과 자료를 넣습니다.</strong><p>생성용과 검증용 프로젝트를 따로 만들고, 각 설명에 따라 한 번만 설정해 주세요.</p></li></ol><div class="tools-start"><strong>생성기에서 시작하는 말</strong><p>“자극 강화형으로 주제 찾아줘.”</p><strong>검증기에서 시작하는 말</strong><p>“첨부한 대본과 60초 인트로를 검증하고 문제 있는 부분만 별도 수정본으로 만들어줘. 원본은 보존해줘.”</p></div><p class="tools-history-note">기존 프로젝트를 바꾸실 때는 작성한 대본과 생성 이력을 보관하고, 설명서에 적힌 지침·지원 자료만 교체해 주세요.</p></div></section>`;
+}
+async function downloadYadamTool(button){
+ const label=button.textContent;button.disabled=true;button.textContent='파일을 준비하고 있어요…';
+ try{
+  const response=await fetch('/api/tools/'+encodeURIComponent(button.dataset.toolDownload)+'/download',{credentials:'same-origin'});
+  if(!response.ok){const data=await response.json().catch(()=>({}));if(response.status===401){S.member=null;S.csrf=null;toolsAfterAuth=true;go('login');}throw new Error(data.detail||'파일을 받지 못했습니다. 잠시 후 다시 시도해 주세요.');}
+  const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
+  link.href=url;link.download=button.dataset.filename;document.body.appendChild(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),60000);toast('다운로드를 시작했습니다. 기기의 다운로드 목록을 확인해 주세요.');
+ }finally{button.disabled=false;button.textContent=label;}
+}
+async function shareYadamTools(){
+ const url=new URL('/#tools',location.origin).href;
+ if(navigator.share){try{await navigator.share({title:'메종 루미엘 · 야담 제작 도구',text:'야담 대본 생성기와 검증기 다운로드',url});return;}catch(error){if(error.name==='AbortError')return;}}
+ try{await navigator.clipboard.writeText(url);toast('공유 주소를 복사했습니다. 원하는 곳에 붙여넣으세요.');}
+ catch{openModal(`<h2>야담 제작 도구 공유 주소</h2><p>아래 주소를 길게 눌러 복사해 주세요.</p><input class="tools-share-url" aria-label="공유 주소" type="text" readonly value="${esc(url)}"><div class="button-row"><button class="primary" data-action="close">확인</button></div>`);$('.tools-share-url').select();}
 }
 function field(label,name,type,placeholder='',value='',disabled=false){return `<label class="field"><span>${esc(label)}</span><input name="${esc(name)}" type="${type}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${disabled?'disabled':''} ${type==='number'?'':'required'} ${type==='tel'?'inputmode="tel" autocomplete="tel"':type==='email'?'autocomplete="username"':name==='name'?'autocomplete="name"':''}></label>`;}
 function passwordField(label,name,isNew,value='',disabled=false){return `<label class="field"><span>${esc(label)}</span><span class="password-wrap"><input name="${name}" type="password" minlength="8" maxlength="128" value="${esc(value)}" placeholder="8자 이상 입력해 주세요" autocomplete="${isNew?'new-password':'current-password'}" required ${disabled?'disabled':''}><button type="button" data-action="show-password" aria-label="${label} 표시">보기</button></span></label>`;}
@@ -88,7 +111,7 @@ async function admin(){
 }
 async function render(){
  const seq=++S.render;header();const view=location.hash.slice(1)||(location.pathname==='/admin'?'admin':'home');
- try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;$('#main').innerHTML=html;header();}
+ try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='tools')html=await yadamTools();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;$('#main').innerHTML=html;header();}
  catch(e){if(seq!==S.render)return;$('#main').innerHTML=`<div class="error-page">${empty('화면을 불러오지 못했습니다',e.message)}<div class="button-row" style="margin-top:20px"><button class="primary" data-action="refresh">다시 확인</button><button class="outline" data-go="login">로그인</button></div></div>`;}
 }
 async function refresh(){const [m,a]=await Promise.all([api('/meta'),api('/session')]);S.meta=m;S.member=a.member;S.csrf=a.csrf;S.catalogue=(await api('/catalogue')).items;await render();}
@@ -169,7 +192,7 @@ document.addEventListener('submit',async e=>{
  const v=Object.fromEntries(new FormData(f));
  if(['login','join','admin-login'].includes(kind)){
  const out=kind==='join'?await api('/join','POST',{...v,consent:f.elements.consent.checked}):await api('/login','POST',{identifier:v.identifier,password:v.password,remember:f.elements.remember?.checked||false,admin:kind==='admin-login'});
- S.member=out.member;S.csrf=out.csrf;toast(kind==='join'?(S.meta.smsReady?'가입 완료. 휴대폰 휴대폰 번호 인증을 진행해 주세요.':'가입이 완료되었습니다. 승인 상태를 확인해 주세요.'):'로그인했습니다.');go(kind==='admin-login'?'admin':'classes');
+ S.member=out.member;S.csrf=out.csrf;toast(kind==='join'?(S.meta.smsReady?'가입 완료. 휴대폰 휴대폰 번호 인증을 진행해 주세요.':'가입이 완료되었습니다. 승인 상태를 확인해 주세요.'):'로그인했습니다.');const destination=toolsAfterAuth?'tools':kind==='admin-login'?'admin':'classes';toolsAfterAuth=false;go(destination);
  }else if(kind==='member-search'){S.q=v.q;S.filter=v.state;S.page=1;await render();}
  else if(kind==='sms-verify'){const out=await api('/sms/verify','POST',{code:String(v.code||'').trim()});S.member=out.member;closeModal();toast('휴대폰 번호 인증이 완료되었습니다.');await refresh();go('account');}
  else if(kind==='settings'){S.meta=await api('/admin/settings','POST',{title:v.title,contact:v.contact,retention:v.retention,autoApprove:f.elements.autoApprove.checked,open:f.elements.open.checked,revision:S.meta.revision});toast('설정이 저장되었습니다.');await refresh();}
@@ -187,6 +210,8 @@ document.addEventListener('click',async e=>{
  const b=e.target.closest('button,a');if(!b)return;
  try{
  if(b.dataset.go){e.preventDefault();if(b.dataset.go==='admin'&&window.JC_DEMO){window.demoSignedIn=true;S.member=window.demoAdmin;S.csrf='preview';}go(b.dataset.go);}
+ else if(b.dataset.toolsLogin){toolsAfterAuth=true;go(b.dataset.toolsLogin);}
+ else if(b.dataset.toolDownload){await downloadYadamTool(b);}
  else if(b.dataset.tab){S.tab=b.dataset.tab;S.page=1;go('admin');}
  else if(b.dataset.page){S.page=Number(b.dataset.page);await render();}
  else if(b.dataset.play){b.disabled=true;try{await play(b.dataset.play);}finally{b.disabled=false;}}
@@ -196,6 +221,7 @@ document.addEventListener('click',async e=>{
  else if(b.dataset.videoAction)videoConfirm(b.dataset.id,b.dataset.videoAction);
  else if(b.dataset.resume)await openUpload(b.dataset.resume);
  else if(b.dataset.action){switch(b.dataset.action){
+ case 'share-tools':await shareYadamTools();break;
  case 'refresh':b.disabled=true;try{await refresh();toast('최신 상태를 확인했습니다.');}finally{b.disabled=false;}break;
  case 'logout':await api('/logout','POST',{});S.member=null;S.csrf=null;go('home');toast('로그아웃했습니다.');break;
  case 'privacy':privacy();break;case 'close':closeModal();break;
@@ -228,3 +254,4 @@ let off=matchMedia('(prefers-reduced-motion: reduce)').matches;try{off=off||loca
 if(window.JC_DEMO)$('#preview-bar').hidden=false;
 $('#main').innerHTML='<div class="loading">나를 위한 배움의 공간을 준비하고 있어요.</div>';
 refresh().then(()=>finishIdentityReturn()).catch(e=>{$('#main').innerHTML=`<div class="error-page"><div class="notice"><h3>프로그램 연결을 확인해 주세요.</h3><p>${esc(e.message)}</p><button class="outline" data-action="refresh">다시 확인</button></div></div>`;});
+

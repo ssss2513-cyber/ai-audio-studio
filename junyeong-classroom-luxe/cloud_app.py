@@ -201,3 +201,38 @@ def background_music(req: Request):
   finally:
    upstream.close()
  return core.StreamingResponse(stream(),status_code=upstream.status_code,media_type='audio/mpeg',headers=out)
+
+# Owner-supplied 27.7-second welcome film. Public only; private lessons remain access-controlled.
+def _public_brand_media(req: Request, file_id: str, mime: str, maxage: int):
+ import requests
+ headers=_drive_auth_headers()
+ range_value=req.headers.get('range','')
+ if range_value:
+  if len(range_value)>120 or not range_value.startswith('bytes='): core.fail(416,'잘못된 범위 요청입니다.')
+  headers['Range']=range_value
+ upstream=requests.get('https://www.googleapis.com/drive/v3/files/'+file_id,
+     params={'alt':'media'},headers=headers,stream=True,timeout=60)
+ if upstream.status_code not in (200,206):
+  upstream.close()
+  core.fail(502,'메종 루미엘 소개 영상을 불러오지 못했습니다.')
+ out={'Accept-Ranges':'bytes','Cache-Control':f'public, max-age={maxage}',
+      'X-Content-Type-Options':'nosniff','Content-Disposition':'inline'}
+ for k in ('Content-Length','Content-Range','ETag'):
+  if upstream.headers.get(k):out[k]=upstream.headers[k]
+ if req.method=='HEAD':
+  upstream.close()
+  return core.Response(status_code=upstream.status_code,media_type=mime,headers=out)
+ def stream_media():
+  try:
+   for block in upstream.iter_content(128*1024):
+    if block:yield block
+  finally:upstream.close()
+ return core.StreamingResponse(stream_media(),status_code=upstream.status_code,media_type=mime,headers=out)
+
+@app.api_route('/api/public/brand-intro.mp4',methods=['GET','HEAD'])
+def brand_intro(req: Request):
+ return _public_brand_media(req,'1du6wZx1Ga94vLo0zPGF-ekRwObRWCDwF','video/mp4',3600)
+
+@app.api_route('/api/public/brand-poster.jpg',methods=['GET','HEAD'])
+def brand_intro_poster(req: Request):
+ return _public_brand_media(req,'13ayyUIBfCoWuTH9ghVCwHDNvrxhWJ4AP','image/jpeg',86400)

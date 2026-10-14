@@ -136,12 +136,36 @@ classes=async function(){
  luxeActivePlaylist='all';
  return '<div class="luxe-classes-page">'+luxeHero(false)+luxeFeatures()+luxeNotice()+luxeClassLibrary(list)+'</div>';
 };
+
+function lumielIntroSection(){
+ return `<section class="lumiel-film" id="lumiel-introduction" aria-labelledby="lumiel-film-title">
+  <div class="lumiel-film-top">
+   <div class="lumiel-film-copy">
+    <span class="luxe-kicker">OUR STORY · THE INTRODUCTION FILM</span>
+    <h2 id="lumiel-film-title">메종 루미엘을<br><em>영상으로 만나보세요.</em></h2>
+    <p>프라이빗 클래스의 새로운 시작, 약 28초의 작은 초대장.<br>재생 버튼을 누르면 목소리와 음악이 함께 나옵니다.</p>
+   </div>
+   <span class="lumiel-film-length" aria-label="소개 영상 약 28초">00:28 &nbsp; · &nbsp; MAISON LUMIEL</span>
+  </div>
+  <div class="lumiel-film-frame">
+   <video id="lumiel-intro-video" controls playsinline preload="metadata" poster="/api/public/brand-poster.jpg" aria-label="메종 루미엘 홈페이지 소개 영상">
+    <source src="/api/public/brand-intro.mp4" type="video/mp4">
+    브라우저에서 영상을 재생할 수 없습니다.
+   </video>
+  </div>
+  <div class="lumiel-film-bottom">
+   <span>✦ &nbsp; 2026 · MAISON LUMIEL ORIGINAL FILM</span>
+   <a href="/api/public/brand-intro.mp4" target="_blank" rel="noopener">동영상 새 창에서 보기 ↗</a>
+  </div>
+ </section>`;
+}
+
 home=function(){
  const list=S.catalogue||[];
  S.videos=list;
  luxeActivePlaylist='all';
  return '<div class="luxe-home-page">'+luxeHero(true)+luxeFeatures()+
-  luxeClassLibrary(list)+
+  lumielIntroSection()+luxeClassLibrary(list)+
   '<div class="luxe-collection" style="padding-top:0"><div class="luxe-endnote"><span>Discover a new chapter in your everyday.</span><button type="button" class="outline small" data-go="guide">이용 안내 ↗</button></div></div></div>';
 };
 filterCourses=function(){

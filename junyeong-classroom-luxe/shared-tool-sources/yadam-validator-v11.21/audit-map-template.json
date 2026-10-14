@@ -1,0 +1,313 @@
+{
+  "schema_version": "11.21-five-acts-20-chapters",
+  "primary_structure": "",
+  "support_structure": "",
+  "body_marker": "",
+  "chapters": [
+    {
+      "id": 1,
+      "act": 1,
+      "role_id": "CH01",
+      "role": "연결과 첫 모순",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 2,
+      "act": 1,
+      "role_id": "CH02",
+      "role": "주인공과 관계",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 3,
+      "act": 1,
+      "role_id": "CH03",
+      "role": "사건의 발단",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 4,
+      "act": 1,
+      "role_id": "CH04",
+      "role": "첫 선택",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 5,
+      "act": 2,
+      "role_id": "CH05",
+      "role": "새 조건과 첫 행동",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 6,
+      "act": 2,
+      "role_id": "CH06",
+      "role": "시도와 관계 반응",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 7,
+      "act": 2,
+      "role_id": "CH07",
+      "role": "부분 성취와 어긋남",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 8,
+      "act": 2,
+      "role_id": "CH08",
+      "role": "커진 대가와 재선택",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 9,
+      "act": 3,
+      "role_id": "CH09",
+      "role": "핵심에 접근",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 10,
+      "act": 3,
+      "role_id": "CH10",
+      "role": "중심 의미 전환",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 11,
+      "act": 3,
+      "role_id": "CH11",
+      "role": "전환의 결과",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 12,
+      "act": 3,
+      "role_id": "CH12",
+      "role": "달라진 조건의 대응",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 13,
+      "act": 4,
+      "role_id": "CH13",
+      "role": "기존 방식의 한계",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 14,
+      "act": 4,
+      "role_id": "CH14",
+      "role": "치러야 할 대가",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 15,
+      "act": 4,
+      "role_id": "CH15",
+      "role": "재해석과 배움",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 16,
+      "act": 4,
+      "role_id": "CH16",
+      "role": "결정적 선택",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 17,
+      "act": 5,
+      "role_id": "CH17",
+      "role": "선택의 실행",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 18,
+      "act": 5,
+      "role_id": "CH18",
+      "role": "남은 저항과 결과",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 19,
+      "act": 5,
+      "role_id": "CH19",
+      "role": "중심 질문과 관계 회수",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    },
+    {
+      "id": 20,
+      "act": 5,
+      "role_id": "CH20",
+      "role": "달라진 일상과 정서",
+      "start_anchor": "",
+      "role_evidence_anchor": ""
+    }
+  ],
+  "speaker_map": {
+    "dialogue_speakers": [],
+    "allowed_speakers": [],
+    "intro_speaker": ""
+  },
+  "beats": [
+    {
+      "id": 1,
+      "name": "오프닝 이미지",
+      "anchor": ""
+    },
+    {
+      "id": 2,
+      "name": "주제 제시",
+      "anchor": ""
+    },
+    {
+      "id": 3,
+      "name": "설정",
+      "anchor": ""
+    },
+    {
+      "id": 4,
+      "name": "기폭제",
+      "anchor": ""
+    },
+    {
+      "id": 5,
+      "name": "고민",
+      "anchor": ""
+    },
+    {
+      "id": 6,
+      "name": "2막 진입",
+      "anchor": ""
+    },
+    {
+      "id": 7,
+      "name": "B 스토리",
+      "anchor": ""
+    },
+    {
+      "id": 8,
+      "name": "재미와 놀이",
+      "anchor": ""
+    },
+    {
+      "id": 9,
+      "name": "중반점",
+      "anchor": ""
+    },
+    {
+      "id": 10,
+      "name": "악당이 다가오다",
+      "anchor": ""
+    },
+    {
+      "id": 11,
+      "name": "모든 것을 잃다",
+      "anchor": ""
+    },
+    {
+      "id": 12,
+      "name": "영혼의 어두운 밤",
+      "anchor": ""
+    },
+    {
+      "id": 13,
+      "name": "3막 진입",
+      "anchor": ""
+    },
+    {
+      "id": 14,
+      "name": "피날레",
+      "anchor": ""
+    },
+    {
+      "id": 15,
+      "name": "파이널 이미지",
+      "anchor": ""
+    }
+  ],
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "",
+      "open_anchor": "",
+      "clue_anchors": [
+        "",
+        ""
+      ],
+      "partial_answer_anchor": "",
+      "answer_anchor": ""
+    }
+  ],
+  "_instructions": {
+    "primary_structure": "고정 5막을 바꾸는 항목이 아님. 20챕터 안에 적용하는 주 작법 STR01~STR10. STR08 주 작법만 beats 15개 사용; 그 외 beats: []. support_structure는 다른 STR 1개 또는 없음.",
+    "chapters": "고정 20행의 id·act·role_id를 유지. 실제 본편 첫 문장을 start_anchor에, 역할을 보여 주는 해당 챕터의 고유 원문을 role_evidence_anchor에 기록. 문장 길이로 임의 등분하지 않으며 원문 근거를 모르면 빈 문자열과 미검증을 유지. 챕터 제목은 기본 대본에 출력하지 않음.",
+    "speaker_map": "기본 대본에서 발화 순서대로 실제 한글 화자명을 독립 확인. 추가 대사 파일의 이름을 그대로 정답으로 복사하지 않음. 별도 --speaker-map도 가능",
+    "semantic_review": "챕터마다 2인 이상·3턴 이상 응답이 연결되는 실제 대화, 실제 화자, 선택 구조의 사건 기능은 원문 근거로 별도 확인",
+    "story_title": "확정된 실제 작품 제목. 화자별 앞 20자 정리본 첫 줄과 비교하며 파일명으로 임의 변경하지 않음",
+    "educational_value": "기본 대본에서 핵심 배움과 선택·결과·마지막 회수의 실제 고유 원문을 기록. 앵커 자동 확인 뒤 배움·재미·설교성·정보 정확성을 원문 근거로 별도 검토. 사용자에게 지도 작성을 요구하지 않음.",
+    "body_marker": "기본값은 빈 문자열. --direction의 INTRO SCRIPT 전체와 기본 대본 시작부 일치로 경계를 찾는다. 별도 앵커가 필요할 때만 실제 본편 첫 고유 문장을 원문 그대로 기록한다. 옛날 옛적을 강제하지 않는다.",
+    "intensity": "현재 요청 → 작품 기록 → existing 기본값. strong은 KP1·KP2 필수. 각 항목 {id: KP1, clue_anchors: [고유 원문1, 고유 원문2], turn_anchor: 전환 고유 원문, consequence_anchor: 결과 고유 원문}. 실제 원문으로 Claude가 작성하며 사용자에게 JSON을 요구하지 않음. existing은 이미 설계된 전환만 기록.",
+    "policy_review": "코드는 정책을 판정하지 않음. Claude가 SKILL.md 8절의 삭제/연령/광고/독창성과 내부 기준을 원문·공식 근거로 따로 보고. 미제공 실제 매체는 미확인.",
+    "layout": "상수 형식과 35,000자 목표를 유지. main_emotion·ending_method는 실제 확정 기획, ending_evidence_anchor는 CH20 원문으로 기록. 감정 의미·재미는 별도 수동 검토."
+  },
+  "story_title": "",
+  "educational_value": {
+    "learning_focus": "",
+    "choice_anchor": "",
+    "consequence_anchor": "",
+    "payoff_anchor": ""
+  },
+  "intro_contract": {
+    "edit_duration_seconds": 60,
+    "scene_count": "variable",
+    "dialogue_scope": "unrestricted_in_intro",
+    "bgm_id": "MASTER_01",
+    "rendered_media_status": "UNVERIFIED",
+    "mode": "continuous_short_animation",
+    "min_dialogue_characters": 2,
+    "body_opening_anchor": "",
+    "last_intro_line": "",
+    "transition_mode": "",
+    "handoff_semantics": "MANUAL_REVIEW_REQUIRED"
+  },
+  "intensity": {
+    "mode": "existing",
+    "selection_source": "default",
+    "pressure_mechanism": "",
+    "loss_at_stake": "",
+    "kill_points": []
+  },
+  "layout": {
+    "format": "FIVE_ACTS_20_CHAPTERS",
+    "act_count": 5,
+    "chapter_count": 20,
+    "chapters_per_act": 4,
+    "target_chars": 35000,
+    "length_scope": "intro_plus_body",
+    "main_emotion": "",
+    "ending_method": "",
+    "ending_evidence_anchor": ""
+  }
+}

@@ -10,6 +10,18 @@ from fastapi.responses import FileResponse
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
 PACKAGES = (
     {
+        'id': 'yadam-script-gpt',
+        'asset': 'yadam-script-gpt-v2.0.zip',
+        'filename': 'Yadam_Synopsis_Skill_v2.0.zip',
+        'title': '대본 GPT 버전',
+        'step': '01 · 시놉시스와 대본 만들기',
+        'version': 'V2.0',
+        'updated': '2026-10-15',
+        'description': '소재나 레퍼런스 썸네일·제목으로 시놉시스 5안을 만들고, 선택한 이야기를 5막 20챕터와 약 35,000자 낭독 대본으로 이어 쓰는 ChatGPT용 통합 지침입니다. 완성된 시놉시스를 넣어 바로 대본으로 확장할 수도 있습니다.',
+        'features': ['시놉시스 5안 → 20챕터 → 대본 연계', '14장르·10작법·목표 90분·공백 포함 약 35,000자', '사진 없이 MD 파일 12개 · 하위 폴더 없음'],
+        'fileCount': 12,
+    },
+    {
         'id': 'yadam-script-titles',
         'asset': 'yadam-script-titles-v1.zip.b64',
         'filename': 'Yadam_Script_Titles_Skill.zip',
@@ -100,5 +112,6 @@ def install_shared_tools(core):
             filename=package['filename'],
             headers={'Cache-Control': 'private, no-store, max-age=0'},
         )
+
 
 

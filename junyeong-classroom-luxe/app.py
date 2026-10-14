@@ -334,6 +334,18 @@ def _solapi_diag_once():
             except Exception:
                 return ('text:'+resp.text[:120]).replace('\n',' ')
         print(f'SOLAPI_DIAG balance_http={rb.status_code} balance_err={_err(rb)} sender_http={rs.status_code} sender_err={_err(rs)} sender_status={sender_status}', flush=True)
+        rl=_requests.get('https://api.solapi.com/messages/v4/list?limit=5',headers={'Authorization':_auth()},timeout=12)
+        if rl.status_code==200:
+            try:
+                ml=rl.json().get('messageList',{})
+                rows=[]
+                for x in ml.values():
+                    rows.append({'status':x.get('status'),'statusCode':x.get('statusCode'),'reason':x.get('reason'),'networkName':x.get('networkName'),'dateUpdated':x.get('dateUpdated')})
+                print('SOLAPI_RECENT '+json.dumps(rows,ensure_ascii=False), flush=True)
+            except Exception as e:
+                print('SOLAPI_RECENT parse='+type(e).__name__, flush=True)
+        else:
+            print('SOLAPI_RECENT http='+str(rl.status_code)+' err='+_err(rl), flush=True)
     except Exception as e:
         print('SOLAPI_DIAG exception='+type(e).__name__, flush=True)
 

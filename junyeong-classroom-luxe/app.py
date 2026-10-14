@@ -89,6 +89,8 @@ with db() as c:
     cols={row[1] for row in c.execute("PRAGMA table_info(videos)")}
     if 'source' not in cols: c.execute("ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
     if 'external_id' not in cols: c.execute("ALTER TABLE videos ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")
+    if 'playlist' not in cols: c.execute("ALTER TABLE videos ADD COLUMN playlist TEXT NOT NULL DEFAULT '전체 클래스'")
+    if 'playlist_description' not in cols: c.execute("ALTER TABLE videos ADD COLUMN playlist_description TEXT NOT NULL DEFAULT ''")
     mcols={row[1] for row in c.execute("PRAGMA table_info(members)")}
     if 'verified' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
     if 'verified_at' not in mcols: c.execute("ALTER TABLE members ADD COLUMN verified_at REAL")
@@ -666,7 +668,7 @@ def watch(req,ident):
 @app.get('/api/catalogue')
 def catalogue():
     if not settings()['open']: return {'items':[]}
-    with db() as c: return {'items':[dict(v) for v in c.execute("SELECT id,title,description,duration,theme,poster,created FROM videos WHERE state='public' ORDER BY position,created DESC")]}
+    with db() as c: return {'items':[dict(v) for v in c.execute("SELECT id,title,description,duration,theme,poster,created,playlist,playlist_description FROM videos WHERE state='public' ORDER BY position,created DESC")]}
 @app.get('/api/videos')
 def videos(req: Request):
     m=require(req,watch=True)
@@ -682,6 +684,8 @@ class VideoChange(BaseModel):
     revision: int
     title: str=Field(default='',max_length=120)
     description: str=Field(default='',max_length=1000)
+    playlist: str=Field(default='전체 클래스',max_length=80)
+    playlist_description: str=Field(default='',max_length=300)
     theme: str='rose'
     position: int=Field(default=0,ge=-100000,le=100000)
     confirmation: str=Field(default='',max_length=120)
@@ -694,7 +698,8 @@ def edit_video(ident: str,body: VideoChange,req: Request):
         if v['revision']!=body.revision: fail(409,'영상 정보가 변경되었습니다. 다시 확인해 주세요.')
         if body.action=='edit':
             if not body.title.strip() or body.theme not in ('rose','lilac','sage'): fail(422,'제목과 테마를 확인해 주세요.')
-            c.execute('UPDATE videos SET title=?,description=?,theme=?,position=?,revision=revision+1 WHERE id=?',(body.title,body.description,body.theme,body.position,ident))
+            playlist=(body.playlist.strip() or '전체 클래스')
+            c.execute('UPDATE videos SET title=?,description=?,playlist=?,playlist_description=?,theme=?,position=?,revision=revision+1 WHERE id=?',(body.title,body.description,playlist,body.playlist_description.strip(),body.theme,body.position,ident))
         else:
             states={'publish':'public','private':'private','trash':'trash','restore':'private','purge':'purging'}
             if body.action not in states: fail(422,'지원하지 않는 동작입니다.')

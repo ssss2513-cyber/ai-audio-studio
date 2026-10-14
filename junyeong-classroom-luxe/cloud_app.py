@@ -178,29 +178,12 @@ core.EXTERNAL_STREAMER=_drive_stream
 
 
 
-# Public background music for the homepage. Audio only, not the private classes.
-@app.get('/assets/background-music.mp3')
+# Public homepage soundtrack. Route must be outside the /assets StaticFiles mount.
+# Browsers control actual playback through an explicit user action.
+@app.api_route('/api/public/background-music.mp3',methods=['GET','HEAD'])
 def background_music(req: Request):
- import requests
- drive_id='1Mk-XP_VHX4BW0R0p7vFoECr_dxsdxU_H'
- headers=_drive_auth_headers()
- if req.headers.get('range'):
-  headers['Range']=req.headers['range']
- upstream=requests.get('https://www.googleapis.com/drive/v3/files/'+drive_id,
-      params={'alt':'media'},headers=headers,stream=True,timeout=35)
- if upstream.status_code not in (200,206):
-  upstream.close()
-  core.fail(502,'배경음악을 불러오지 못했습니다.')
- out={'Accept-Ranges':'bytes','Cache-Control':'public, max-age=3600','X-Content-Type-Options':'nosniff'}
- for name in ('Content-Length','Content-Range'):
-  if upstream.headers.get(name): out[name]=upstream.headers[name]
- def stream():
-  try:
-   for block in upstream.iter_content(128*1024):
-    if block: yield block
-  finally:
-   upstream.close()
- return core.StreamingResponse(stream(),status_code=upstream.status_code,media_type='audio/mpeg',headers=out)
+ return _public_brand_media(req,'1Mk-XP_VHX4BW0R0p7vFoECr_dxsdxU_H','audio/mpeg',3600)
+
 
 # Owner-supplied 27.7-second welcome film. Public only; private lessons remain access-controlled.
 def _public_brand_media(req: Request, file_id: str, mime: str, maxage: int):

@@ -215,7 +215,7 @@ document.addEventListener('click',function(event){
   if(document.getElementById('lumiel-music-control'))return;
   const music=document.createElement('audio');
   music.id='lumiel-background-music';
-  music.src='/assets/background-music.mp3';
+  music.src='/api/public/background-music.mp3';
   music.preload='none';
   music.loop=true;
   music.volume=0.32;
@@ -227,13 +227,14 @@ document.addEventListener('click',function(event){
   button.title='배경음악 재생 / 끄기';
   button.innerHTML='<span aria-hidden="true">♫</span><span class="lumiel-music-label">음악 켜기</span>';
   button.style.cssText='position:fixed;right:16px;bottom:calc(82px + env(safe-area-inset-bottom, 0px));z-index:1200;display:flex;align-items:center;gap:7px;border:1px solid #cba6ac;background:#fff4f4;color:#653b47;border-radius:100px;padding:11px 15px;box-shadow:0 5px 20px #20101630;font-size:13px;font-weight:600;cursor:pointer;min-height:44px;';
+  music.addEventListener('error',function(){button.setAttribute('aria-pressed','false');button.querySelector('.lumiel-music-label').textContent='음악 다시 켜기';button.title='음악 연결 오류 · 다시 시도해 주세요.';});
   music.addEventListener('play',function(){button.setAttribute('aria-pressed','true');button.setAttribute('aria-label','배경음악 끄기');button.querySelector('.lumiel-music-label').textContent='음악 끄기';});
   music.addEventListener('pause',function(){button.setAttribute('aria-pressed','false');button.setAttribute('aria-label','배경음악 재생');button.querySelector('.lumiel-music-label').textContent='음악 켜기';});
   button.addEventListener('click',async function(){
    if(!music.paused){music.pause();try{sessionStorage.setItem('lumielMusicWanted','0');}catch(_){}return;}
-   if(document.querySelector('video:not([paused])') && Array.from(document.querySelectorAll('video')).some(v=>!v.paused))return;
+   if(Array.from(document.querySelectorAll('video')).some(v=>!v.paused)){toast('영상 재생 중에는 배경음악이 잠시 멈춥니다.');return;}
    try{await music.play();sessionStorage.setItem('lumielMusicWanted','1');}
-   catch(e){button.title='브라우저에서 음악 재생이 제한되었습니다. 다시 눌러 주세요.';}
+   catch(e){button.title='브라우저에서 음악 재생이 제한되었거나 음악을 불러오지 못했습니다.';toast('음악 재생이 안 됩니다. 인터넷 연결과 미디어 음량을 확인한 뒤 다시 눌러 주세요.');}
   });
   // Suspend music for all course playback, resume only if visitor enabled it.
   document.addEventListener('play',function(e){if(e.target?.tagName==='VIDEO'&&!music.paused){music.pause();music.dataset.suspended='1';}},true);

@@ -290,9 +290,10 @@ def _send_solapi_sms(to_phone: str, message: str):
     date=_datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
     signature=hmac.new(api_secret.encode(), (date+salt).encode(), hashlib.sha256).hexdigest()
     auth=f'HMAC-SHA256 apiKey={api_key}, date={date}, salt={salt}, signature={signature}'
-    payload={'message':{'to':to_phone,'from':sender,'text':message}}
+    payload={'messages':[{'to':to_phone,'from':sender,'text':message,'type':'SMS','autoTypeDetect':False}]}
     r=_requests.post('https://api.solapi.com/messages/v4/send-many/detail',json=payload,headers={'Authorization':auth,'Content-Type':'application/json'},timeout=15)
     if r.status_code not in (200,201):
+        print('SOLAPI_SEND status='+str(r.status_code)+' body='+r.text[:500], flush=True)
         try:
             detail=r.json()
             msg=detail.get('errorMessage') or detail.get('message') or 'SOLAPI 발송 오류'

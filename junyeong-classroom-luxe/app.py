@@ -112,7 +112,8 @@ def digest(value: str): return hmac.new(KEY, value.encode(), hashlib.sha256).hex
 def token_hash(value: str): return hashlib.sha256(value.encode()).hexdigest()
 def uid(): return uuid.uuid4().hex
 
-    if TEMP_OPEN_ACCESS:
+if TEMP_OPEN_ACCESS:
+    with db() as c:
         c.execute("UPDATE members SET state='approved', revision=revision+1 WHERE role='member' AND state='pending'")
 
 def settings():

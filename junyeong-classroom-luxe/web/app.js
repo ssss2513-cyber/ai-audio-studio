@@ -6,6 +6,7 @@ const actions={approve:'시청 승인',revoke:'승인 취소',block:'이용 제�
 const rules={pending:['approve','block','remove'],approved:['revoke','block','remove'],blocked:['unblock','remove'],removed:['restore','erase']};
 const S={member:null,csrf:null,meta:{title:'준영 클래스',contact:'ssss2513@gmail.com',retention:'회원 탈퇴 또는 개인정보 삭제 요청 처리 시까지',open:true,autoApprove:false,ready:false},catalogue:[],videos:[],members:[],playlists:[],activePlaylist:null,tab:'overview',page:1,q:'',filter:'',render:0};
 let toastTimer,heartbeat,progressTimer,playerId=null,uploadRunning=false,uploadPause=false,activeXHR=null,currentUpload=null,lastFocus=null;
+let videoRecoveryTimer=null,videoStallTimer=null,manualVideoRecovery=null;
 let toolsAfterAuth=false;
 const prettyBytes=n=>n>=1024**3?(n/1024**3).toFixed(2)+' GB':(n/1024**2).toFixed(1)+' MB';
 const date=n=>n?new Date(n*1000).toLocaleDateString('ko-KR'):'—';
@@ -129,7 +130,7 @@ async function render(){
  catch(e){if(seq!==S.render)return;$('#main').innerHTML=`<div class="error-page">${empty('화면을 불러오지 못했습니다',e.message)}<div class="button-row" style="margin-top:20px"><button class="primary" data-action="refresh">다시 확인</button><button class="outline" data-go="login">로그인</button></div></div>`;}
 }
 async function refresh(){const [m,a]=await Promise.all([api('/meta'),api('/session')]);S.meta=m;S.member=a.member;S.csrf=a.csrf;S.catalogue=(await api('/catalogue')).items;await render();}
-function stopPlayer(){clearInterval(heartbeat);clearInterval(progressTimer);const v=$('#player');if(v){v.pause();v.removeAttribute('src');v.load();}playerId=null;document.body.classList.remove('playing');}
+function stopPlayer(){clearInterval(heartbeat);clearInterval(progressTimer);clearTimeout(videoRecoveryTimer);clearTimeout(videoStallTimer);videoRecoveryTimer=null;videoStallTimer=null;manualVideoRecovery=null;const v=$('#player');if(v){v.onloadedmetadata=null;v.pause();v.removeAttribute('src');v.load();}playerId=null;document.body.classList.remove('playing');}
 function openModal(html,player=false){stopPlayer();lastFocus=document.activeElement;$('#modal').classList.toggle('player-dialog',player);$('#modal-body').innerHTML=html;if(!$('#modal').open)$('#modal').showModal();}
 function closeModal(){if(uploadRunning){toast('일시정지한 뒤 창을 닫아 주세요.');return;}stopPlayer();$('#modal').close();lastFocus?.focus?.();}
 function privacy(){openModal(`<div class="eyebrow">PRIVACY & CARE</div><h2>개인정보 수집·이용 안내</h2><p>필요한 정보만, 정해진 목적에 사용합니다.</p><div class="consent-copy"><b>수집 항목</b><br>이름, 휴대폰 번호, 비밀번호 해시, 가입·동의 시각, 시청 진행 및 운영 기록<br><br><b>이용 목적</b><br>회원 관리, 영상 접근 권한 관리, 문의 처리<br><br><b>보관 안내</b><br>${esc(S.meta.retention)}<br><br><b>문의·삭제 요청</b><br>${esc(S.meta.contact)}<br><br>휴대폰 번호 인증 기능을 사용할 경우 인증기관이 확인한 이름·휴대폰 번호 일치 여부와 인증 완료 상태를 저장합니다. 동의하지 않을 수 있으나, 필수 정보 수집에 동의하지 않으면 가입할 수 없습니다. 운영자는 비밀번호 원문을 조회할 수 없습니다.</div><div class="button-row"><button class="primary" data-action="close">확인했어요</button></div>`);}
@@ -155,13 +156,80 @@ async function play(id){
  if(!S.member){go('login');return;}
  await api('/videos/'+id+'/access');let v=S.videos.find(x=>x.id===id)||S.catalogue.find(x=>x.id===id);
  if(!v)v=(await api('/videos')).items.find(x=>x.id===id);if(!v)throw new Error('영상 정보를 찾을 수 없습니다.');
- openModal(`<div class="eyebrow">YOUR LEARNING MOMENT</div><h2>${esc(v.title)}</h2><video id="player" class="player" controls controlslist="nodownload" playsinline preload="metadata" aria-label="${esc(v.title)}"></video><div class="player-actions"><div class="button-row"><button class="outline" data-action="back10">↶ 10초 뒤로</button><button class="outline" data-action="forward10">10초 앞으로 ↷</button><button class="outline" data-action="from-start">처음부터</button></div><select id="speed" aria-label="재생 속도">${[.75,1,1.25,1.5,2].map(n=>`<option value="${n}" ${n===1?'selected':''}>${n}배속</option>`).join('')}</select><button class="outline" data-action="fullscreen">전체화면</button></div><p class="form-note">시청 권한은 재생 중에도 확인됩니다.</p>`,true);
+ openModal(`<div class="eyebrow">YOUR LEARNING MOMENT</div><h2>${esc(v.title)}</h2><video id="player" class="player" controls controlslist="nodownload" playsinline preload="metadata" aria-label="${esc(v.title)}"></video><p id="player-network-status" class="form-note" role="status" aria-live="polite"></p><div class="player-actions"><div class="button-row"><button class="outline" data-action="back10">↶ 10초 뒤로</button><button class="outline" data-action="forward10">10초 앞으로 ↷</button><button class="outline" data-action="from-start">처음부터</button></div><select id="speed" aria-label="재생 속도">${[.75,1,1.25,1.5,2].map(n=>`<option value="${n}" ${n===1?'selected':''}>${n}배속</option>`).join('')}</select><button class="outline" data-action="fullscreen">전체화면</button></div><p class="form-note">시청 권한은 재생 중에도 확인됩니다.</p>`,true);
  playerId=id;document.body.classList.add('playing');const el=$('#player');el.src='/api/videos/'+encodeURIComponent(id)+'/stream';
  el.addEventListener('loadedmetadata',()=>{if(v.seconds&&v.seconds<el.duration-3)el.currentTime=v.seconds;},{once:true});
- el.addEventListener('error',()=>toast('영상 형식 또는 연결 상태를 확인해 주세요. MP4의 H.264/AAC 형식을 권장합니다.'));
- let busy=false;
- const check=async()=>{if(busy||playerId!==id)return;busy=true;try{await api('/videos/'+id+'/access','GET',undefined,{signal:AbortSignal.timeout(4500)});}catch(e){stopPlayer();openModal(`<h2>재생이 중단되었습니다.</h2><p>${esc(e.message)}</p><button class="primary" data-action="close">확인</button>`);}finally{busy=false;}};
- heartbeat=setInterval(check,3000);
+ let busy=false,networkMisses=0,recoveryAttempts=0,lastPosition=Math.max(0,Number(v.seconds)||0);
+ const streamPath='/api/videos/'+encodeURIComponent(id)+'/stream';
+ const showStatus=(message='',retry=false)=>{
+  const box=$('#player-network-status');if(!box)return;
+  box.textContent=message;
+  if(retry){const b=document.createElement('button');b.type='button';b.className='outline small';b.dataset.action='retry-video';b.textContent='이어서 다시 연결';b.style.marginLeft='12px';box.appendChild(b);}
+ };
+ const reconnect=(manual=false)=>{
+  if(playerId!==id||!el.isConnected||videoRecoveryTimer)return;
+  if(recoveryAttempts>=4&&!manual){showStatus('영상 연결이 계속 지연되고 있습니다. 다시 연결을 눌러 주세요.',true);return;}
+  if(manual)recoveryAttempts=0;
+  recoveryAttempts++;
+  const pos=lastPosition,rate=el.playbackRate,shouldPlay=!el.paused||!!el.error;
+  showStatus('일시적으로 연결이 끊겼습니다. 보던 위치에서 다시 연결하고 있습니다.');
+  const reload=()=>{
+   videoRecoveryTimer=null;
+   if(playerId!==id||!el.isConnected)return;
+   el.onloadedmetadata=()=>{
+    el.onloadedmetadata=null;
+    try{
+     if(Number.isFinite(pos)&&pos>0)el.currentTime=Math.min(pos,Number.isFinite(el.duration)?Math.max(0,el.duration-1):pos);
+     el.playbackRate=rate;
+    }catch(_){}
+    if(shouldPlay)el.play().catch(()=>showStatus('영상의 ▶ 재생 버튼을 눌러 이어서 시청해 주세요.',true));
+   };
+   el.src=streamPath+'?reconnect='+Date.now()+'-'+recoveryAttempts;
+   el.load();
+  };
+  if(manual)reload();else videoRecoveryTimer=setTimeout(reload,Math.min(1200*2**(recoveryAttempts-1),7000));
+ };
+ manualVideoRecovery=()=>reconnect(true);
+ el.addEventListener('timeupdate',()=>{
+  if(Number.isFinite(el.currentTime)&&el.currentTime>=0)lastPosition=el.currentTime;
+ });
+ el.addEventListener('playing',()=>{
+  recoveryAttempts=0;clearTimeout(videoStallTimer);videoStallTimer=null;
+  clearTimeout(videoRecoveryTimer);videoRecoveryTimer=null;showStatus();
+ });
+ el.addEventListener('error',()=>{
+  if(playerId!==id)return;
+  if(el.error?.code===3){showStatus('영상 파일 형식 또는 인코딩 문제가 있습니다. H.264/AAC MP4를 권장합니다.',true);return;}
+  reconnect();
+ });
+ const scheduleStall=()=>{
+  if(playerId!==id||el.paused||videoStallTimer)return;
+  const at=el.currentTime;
+  videoStallTimer=setTimeout(()=>{
+   videoStallTimer=null;
+   if(playerId===id&&!el.paused&&el.readyState<3&&el.currentTime<=at+.25)reconnect();
+  },12000);
+ };
+ el.addEventListener('waiting',scheduleStall);
+ el.addEventListener('stalled',scheduleStall);
+ const check=async()=>{
+  if(busy||playerId!==id)return;
+  busy=true;
+  try{
+   await api('/videos/'+id+'/access','GET',undefined,{signal:AbortSignal.timeout(9000)});
+   if(playerId===id)networkMisses=0;
+  }catch(e){
+   if(playerId!==id)return;
+   if([401,403,404].includes(e.status)){
+    stopPlayer();
+    openModal(`<h2>시청 권한을 다시 확인해 주세요.</h2><p>${esc(e.message)}</p><button class="primary" data-action="close">확인</button>`);
+   }else{
+    networkMisses++;
+    if(networkMisses===1)toast('잠시 연결이 지연됐습니다. 시청 승인은 유지되며 자동으로 다시 확인합니다.');
+   }
+  }finally{busy=false;}
+ };
+ heartbeat=setInterval(check,5000);
  const save=()=>{if(playerId===id&&Number.isFinite(el.currentTime)&&el.currentTime>0)api('/videos/'+id+'/progress','POST',{seconds:el.currentTime},{keepalive:true}).catch(()=>{});};
  progressTimer=setInterval(save,7000);el.addEventListener('pause',save);
 }
@@ -273,6 +341,7 @@ document.addEventListener('click',async e=>{
  case 'back10':if($('#player'))$('#player').currentTime=Math.max(0,$('#player').currentTime-10);break;
  case 'forward10':if($('#player')){const p=$('#player');p.currentTime=Math.min(Number.isFinite(p.duration)?p.duration:p.currentTime+10,p.currentTime+10);}break;
  case 'from-start':if($('#player'))$('#player').currentTime=0;break;
+ case 'retry-video':if(manualVideoRecovery)manualVideoRecovery();break;
  case 'fullscreen':{const el=$('#player');if(el?.requestFullscreen)await el.requestFullscreen();else if(el?.webkitEnterFullscreen)el.webkitEnterFullscreen();else toast('영상의 기본 전체화면 버튼을 이용해 주세요.');break;}
  case 'export':{openModal(`<h2>회원 명단을 내려받을까요?</h2><p>전체 이름과 휴대폰 번호가 포함됩니다. 다운로드 기록이 남으며, 저장된 파일은 운영자가 안전하게 보관해야 합니다.</p><div class="button-row"><button class="outline" data-action="close">취소</button><button class="primary" id="confirm-export">명단 내려받기</button></div>`);$('#confirm-export').onclick=async()=>{if(window.JC_DEMO){toast('미리보기는 실제 명단을 제공하지 않습니다.');return;}try{const r=await fetch('/api/admin/export',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':S.csrf},body:'{}'});if(!r.ok)throw new Error('명단을 받지 못했습니다. 다시 로그인해 주세요.');const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download='준영클래스_회원명단.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);closeModal();toast('명단 내보내기 기록이 저장되었습니다.');}catch(err){toast(err.message);}};break;}
  }}

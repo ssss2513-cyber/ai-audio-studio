@@ -44,11 +44,11 @@
         <h3>${esc(video.title)}</h3>
         <p>${esc(intro.length>105?intro.slice(0,105)+'…':intro)}</p>
         ${video.seconds?`<div class="progress-track" aria-label="시청 진행률"><span style="width:${Math.min(100,video.seconds/Math.max(1,video.duration)*100)}%"></span></div>`:''}
-        <div class="card-bottom"><span>${video.seconds?'이어서 시청':'${empty}'}</span>
+        <div class="card-bottom"><span>${video.seconds?'이어서 시청':'프라이빗 클래스'}</span>
           <button type="button" data-play="${esc(video.id)}" aria-label="${esc(video.title)} 시청하기" title="클래스 시청하기">↗</button>
         </div>
       </div>
-    </article>`.replace("'${empty}'", "프라이빗 클래스");
+    </article>`;
   };
 
   playlistGroups=function(items){

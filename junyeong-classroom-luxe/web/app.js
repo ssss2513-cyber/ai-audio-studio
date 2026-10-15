@@ -31,7 +31,52 @@ function art(v){return `<div class="course-art ${esc(v.theme||'rose')}">${v.post
 function card(v,i=0){return `<article class="course-card" style="animation-delay:${i*.055}s">${art(v)}<div class="card-body"><div class="eyebrow">CLASS ${String(i+1).padStart(2,'0')} · ${v.seconds?'CONTINUE LEARNING':'MEMBERS COLLECTION'}</div><h3>${esc(v.title)}</h3><p>${esc(v.description||'천천히, 나만의 속도로 만나는 배움의 시간.')}</p>${v.seconds?`<div class="progress-track" aria-label="시청 진행률"><span style="width:${Math.min(100,v.seconds/Math.max(1,v.duration)*100)}%"></span></div>`:''}<div class="card-bottom"><span>${v.seconds?'이어서 보실 수 있어요':'승인 회원 전용'}</span><button data-play="${esc(v.id)}">${v.seconds?'이어보기':'클래스 보기'} <span aria-hidden="true">↗</span></button></div></div></article>`;}
 function empty(title='첫 번째 클래스를 기다리고 있어요',text='운영자가 영상을 등록하면 이곳에서 만나실 수 있습니다.'){return `<div class="empty"><div class="empty-icon" aria-hidden="true">✧</div><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`;}
 function steps(){return `<div class="steps"><article class="step"><b>01</b><h3>간편하게 가입해요</h3><p>이름과 휴대폰 번호, 8자 이상 비밀번호만 입력해 주세요.</p></article><article class="step"><b>02</b><h3>시청 승인을 확인해요</h3><p>가입 후 내 정보에서 승인 상태를 확인할 수 있어요.</p></article><article class="step"><b>03</b><h3>나만의 속도로 배워요</h3><p>원하는 영상을 고르고, 멈췄던 곳에서 이어서 시청하세요.</p></article></div>`;}
-function home(){return `<section class="hero"><div class="hero-copy"><div class="eyebrow">A PRIVATE SPACE FOR YOUR GROWTH</div><h1>나를 위한 시간,<br><em>배움이 피어나는 곳.</em></h1><p>좋은 배움은 일상을 조금 더 아름답게 만드니까.<br>오롯이 나에게 집중하는 시간, 준영 클래스에서 시작해요.</p><div class="button-row"><button class="primary" data-go="${S.member?'classes':'join'}">${S.member?'내 클래스 만나기':'회원가입하고 시작하기'} <span aria-hidden="true">↗</span></button><button class="outline" data-go="classes">클래스 둘러보기</button></div><div class="hero-note"><span></span>복잡한 본인인증 없이, 편안하게 시작하세요.</div></div><div class="atelier" aria-hidden="true"><div class="arch-halo"></div><div class="arch"><div class="atelier-label">A moment for you.<small>THE ROSE COLLECTION</small></div><div class="art-circle"></div></div><div class="plinth"></div><div class="invitation"><small>AN INVITATION TO LEARN</small><strong>오늘, 나를 위한 클래스</strong><div class="fine-line"></div><p>서두르지 않아도 괜찮아요.<br>나만의 속도로 함께해요.</p></div><div class="pearl"></div><span class="atelier-corner">JUNYEONG CLASS · ROSE ATELIER</span><span class="edition">Made for your moments</span></div></section><div class="trust-strip"><span><b>PRIVATE CLASS</b>회원만을 위한 배움</span><span><b>AT YOUR PACE</b>원할 때, 편안하게</span><span><b>ON ANY SCREEN</b>휴대폰과 컴퓨터에서</span></div><section class="section"><div class="section-heading"><div><div class="eyebrow">THE COLLECTION</div><h2>일상에 더하는, 새로운 배움</h2><p>당신의 다음 이야기를 채워 줄 클래스를 만나보세요.</p></div><a class="subtle-link" href="#classes">전체 클래스 ↗</a></div>${S.catalogue.length?`<div class="card-grid">${S.catalogue.slice(0,3).map(card).join('')}</div>`:empty()}</section><section class="journey"><div class="section"><div class="section-heading"><div><div class="eyebrow">YOUR FIRST CHAPTER</div><h2>처음이어도, 어렵지 않아요.</h2></div><a href="#guide" class="subtle-link">이용 방법 보기 ↗</a></div>${steps()}</div></section>`;}
+function home(){return "\n<section class=\"yadam-shell\">\n  <div class=\"yadam-top\"><span class=\"yadam-flower\" aria-hidden=\"true\">✧</span><span>MAISON LUMIEL · 오늘의 야담</span><span class=\"yadam-flower\" aria-hidden=\"true\">✧</span></div>\n  <header class=\"yadam-lead\">\n    <span class=\"eyebrow\">A CURATED STORY, JUST FOR YOU</span>\n    <h1>오늘은 어떤 <em>이야기</em>에<br>마음이 머물까요?</h1>\n    <p>최근 30일 동안 많은 사랑을 받은 야담 가운데<br>채널 구독자 수에 비해 조회수가 돋보이는 영상 한 편을 전합니다.</p>\n  </header>\n  <div class=\"yadam-theater\">\n    <div class=\"yadam-deco yadam-deco-left\" aria-hidden=\"true\"></div>\n    <div class=\"yadam-deco yadam-deco-right\" aria-hidden=\"true\"></div>\n    <div id=\"yadam-feature\" class=\"yadam-feature\" aria-live=\"polite\" aria-busy=\"true\">\n      <div class=\"yadam-loading\"><span class=\"yadam-spinner\" aria-hidden=\"true\"></span><p>오늘의 인기 야담을 고르고 있어요.</p></div>\n    </div>\n  </div>\n  <div class=\"yadam-actions\">\n    <button id=\"yadam-next\" class=\"primary yadam-next\" type=\"button\">✧ 다른 인기 야담 보기 <span aria-hidden=\"true\">↗</span></button>\n    <p>30일 내 업로드 · 조회수 ÷ 구독자 수 기준<br>출처: YouTube · 게시자 채널에서 제공한 영상</p>\n  </div>\n  <div class=\"yadam-bottommark\" aria-hidden=\"true\">MAISON LUMIEL <span>✧</span> STORIES COLLECTION</div>\n</section>";}
+
+let yadamFeatureRequest=0;
+async function loadYadamFeature(){
+ const host=$('#yadam-feature'), button=$('#yadam-next');
+ if(!host)return;
+ if(button)button.onclick=()=>loadYadamFeature();
+ const serial=++yadamFeatureRequest;
+ let previous='';
+ try{previous=sessionStorage.getItem('maison-lumiel-yadam-last')||'';}catch{}
+ host.setAttribute('aria-busy','true');
+ host.innerHTML='<div class="yadam-loading"><span class="yadam-spinner" aria-hidden="true"></span><p>최근 인기 야담을 살펴보고 있어요.</p></div>';
+ if(button)button.disabled=true;
+ try{
+  if(window.JC_DEMO){
+   host.innerHTML='<div class="yadam-empty"><span class="yadam-empty-art">✧</span><h2>오늘의 이야기 공간</h2><p>이 화면은 디자인 미리보기입니다.<br>실제 영상은 YouTube Data API 키 연결 후 표시됩니다.</p></div>';
+   return;
+  }
+  const result=await api('/yadam-feature?exclude='+encodeURIComponent(previous));
+  if(serial!==yadamFeatureRequest || !document.contains(host))return;
+  const video=result.video;
+  if(result.status!=='ok'||!video){
+   host.innerHTML='<div class="yadam-empty"><span class="yadam-empty-art">✧</span><h2>오늘의 야담을 준비하고 있어요.</h2><p>'+esc(result.message||'영상 정보를 확인해 주세요.')+'</p></div>';
+   return;
+  }
+  if(!/^[A-Za-z0-9_-]{11}$/.test(video.id))throw Error('유효하지 않은 영상 정보입니다.');
+  try{sessionStorage.setItem('maison-lumiel-yadam-last',video.id);}catch{}
+  const embed='https://www.youtube-nocookie.com/embed/'+encodeURIComponent(video.id)+'?autoplay=1&mute=1&playsinline=1&rel=0';
+  const ratio=Number(video.ratio)||0;
+  const views=(Number(video.views)||0).toLocaleString('ko-KR');
+  const subs=(Number(video.subscribers)||0).toLocaleString('ko-KR');
+  host.innerHTML='<div class="yadam-player-frame"><iframe title="'+esc(video.title)+' — YouTube 야담 영상" src="'+embed+'" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen loading="eager"></iframe></div>'
+   +'<div class="yadam-info"><div><div class="eyebrow">TODAY’S FEATURED STORY</div><h2>'+esc(video.title)+'</h2><p class="yadam-channel">'+esc(video.channel)+' · 최근 30일 업로드</p></div>'
+   +'<div class="yadam-stats"><strong>'+esc(ratio.toFixed(2))+'배</strong><small>구독자 대비 조회수</small><span>조회수 '+esc(views)+' · 구독자 '+esc(subs)+'</span></div></div>'
+   +'<div class="yadam-credits"><span>영상은 YouTube 공식 플레이어로 재생됩니다. 브라우저 정책에 따라 자동재생은 음소거 상태로 시작할 수 있습니다.</span><a href="'+esc(video.watchUrl)+'" target="_blank" rel="noopener noreferrer">YouTube에서 보기 ↗</a></div>';
+ }catch(error){
+  if(serial!==yadamFeatureRequest || !document.contains(host))return;
+  host.innerHTML='<div class="yadam-empty"><span class="yadam-empty-art">✧</span><h2>영상을 불러오지 못했어요.</h2><p>'+esc(error.message||'잠시 후 다시 시도해 주세요.')+'</p></div>';
+ }finally{
+  if(serial===yadamFeatureRequest){
+   host.removeAttribute('aria-busy');
+   if(button)button.disabled=false;
+  }
+ }
+}
+
 function stateNotice(){
  const m=S.member;if(!m)return `<div class="notice"><h3>로그인하고 나의 클래스를 만나보세요.</h3><p>영상 제목은 미리 둘러볼 수 있어요. 실제 시청은 가입 후 승인이 필요합니다.</p><div class="button-row"><button class="primary small" data-go="login">로그인</button><button class="outline small" data-go="join">회원가입</button></div></div>`;
  if(m.role==='admin')return '';
@@ -87,7 +132,7 @@ async function admin(){
 }
 async function render(){
  const seq=++S.render;header();const view=location.hash.slice(1)||(location.pathname==='/admin'?'admin':'home');
- try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;$('#main').innerHTML=html;header();}
+ try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;document.body.classList.toggle('yadam-home',view==='home');$('#main').innerHTML=html;header();if(view==='home')void loadYadamFeature();}
  catch(e){if(seq!==S.render)return;$('#main').innerHTML=`<div class="error-page">${empty('화면을 불러오지 못했습니다',e.message)}<div class="button-row" style="margin-top:20px"><button class="primary" data-action="refresh">다시 확인</button><button class="outline" data-go="login">로그인</button></div></div>`;}
 }
 async function refresh(){const [m,a]=await Promise.all([api('/meta'),api('/session')]);S.meta=m;S.member=a.member;S.csrf=a.csrf;S.catalogue=(await api('/catalogue')).items;await render();}

@@ -52,6 +52,7 @@ function home(){return "\n<section class=\"yadam-shell\">\n  <div class=\"yadam-
 let yadamFeatureRequest=0;
 async function loadYadamFeature(){
  const host=$('#yadam-feature'), button=$('#yadam-next');
+ const music=document.getElementById('lumiel-background-music');if(music&&!music.paused)music.pause();
  if(!host)return;
  if(button)button.onclick=()=>loadYadamFeature();
  const serial=++yadamFeatureRequest;
@@ -92,34 +93,6 @@ async function loadYadamFeature(){
   if(serial===yadamFeatureRequest){host.removeAttribute('aria-busy');if(button)button.disabled=false;}
  }
 }
-async function initYadamSettings(){
- const panel=$('#yadam-api-panel');if(!panel)return;
- const status=$('#yt-api-status'), input=$('#yt-api-value'), save=$('#yt-api-save'), remove=$('#yt-api-remove');
- const current=async()=>{
-  const s=await api('/admin/yadam-config');
-  status.textContent=s.configured?'YouTube Data API 연결됨 · 최근 수집 후보 '+(s.candidateCount||0)+'개':'아직 API 키가 연결되지 않았습니다.';
- };
- try{await current();}catch(error){status.textContent=error.message;}
- save.onclick=async()=>{
-  const key=input.value.trim();
-  if(!key){status.textContent='YouTube API 키를 입력해 주세요.';return;}
-  save.disabled=true;
-  status.textContent='연결 정보를 확인하고 있습니다.';
-  try{
-   await api('/admin/yadam-config','POST',{apiKey:key,clear:false});
-   input.value='';
-   await current();
-   toast('YouTube 연결 정보를 저장했습니다.');
-  }catch(error){status.textContent=error.message;}finally{save.disabled=false;}
- };
- remove.onclick=async()=>{
-  if(!confirm('YouTube API 연결 정보를 삭제할까요?'))return;
-  remove.disabled=true;
-  try{await api('/admin/yadam-config','POST',{clear:true,apiKey:''});await current();toast('YouTube 연결을 해제했습니다.');}
-  catch(error){status.textContent=error.message;}finally{remove.disabled=false;}
- };
-}
-
 function stateNotice(){
  const m=S.member;if(!m)return `<div class="notice"><h3>로그인하고 나의 클래스를 만나보세요.</h3><p>영상 제목은 미리 둘러볼 수 있어요. 실제 시청은 가입 후 승인이 필요합니다.</p><div class="button-row"><button class="primary small" data-go="login">로그인</button><button class="outline small" data-go="join">회원가입</button></div></div>`;
  if(m.role==='admin')return '';
@@ -194,12 +167,11 @@ async function admin(){
  const d=await api('/admin/audits?page='+S.page);
  content=`${intro}<h1>처리 기록</h1><p class="admin-intro">정보 열람과 권한 변경 기록을 확인하세요.</p><div class="panel"><div class="table-wrap"><table><thead><tr><th>처리</th><th>대상 번호</th><th>처리 시각</th><th>사유</th></tr></thead><tbody>${d.items.map(x=>`<tr><td>${esc(actionLabel(x.action))}</td><td>${esc(x.subject.slice(0,8))}</td><td>${new Date(x.created*1000).toLocaleString('ko-KR')}</td><td>${esc(x.reason||'—')}</td></tr>`).join('')}</tbody></table></div><div class="pagination"><button class="outline small" data-page="${S.page-1}" ${S.page<=1?'disabled':''}>이전</button><span>${S.page} 페이지</span><button class="outline small" data-page="${S.page+1}" ${d.items.length<50?'disabled':''}>다음</button></div></div>`;
  }
- if(S.tab==='settings')content += '<section class="panel" id="yadam-api-panel"><div class="eyebrow">YOUTUBE DATA API</div><h2>메인 인기 야담 자동 추천</h2><p>지난 30일의 야담 영상에서 조회수 ÷ 구독자 수가 높은 영상을 고릅니다. 키는 서버에 암호화해 보관하고 회원에게 공개하지 않습니다.</p><label class="field"><span>YouTube Data API v3 키</span><input id="yt-api-value" type="password" autocomplete="off" placeholder="AIza로 시작하는 키를 입력해 주세요"></label><div class="button-row"><button type="button" class="primary" id="yt-api-save">YouTube API 연결</button><button type="button" class="outline" id="yt-api-remove">연결 해제</button></div><p id="yt-api-status" role="status" aria-live="polite">연결 상태 확인 중…</p></section>';
  return adminShell(content);
 }
 async function render(){
  const seq=++S.render;header();const view=location.hash.slice(1)||(location.pathname==='/admin'?'admin':'home');
- try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='tools')html=await yadamTools();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;document.body.classList.toggle('yadam-home',view==='home');$('#main').innerHTML=html;header();if(view==='home')void loadYadamFeature();if(view==='admin'&&S.tab==='settings')void initYadamSettings();}
+ try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='tools')html=await yadamTools();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;document.body.classList.toggle('yadam-home',view==='home');$('#main').innerHTML=html;header();if(view==='home')void loadYadamFeature();}
  catch(e){if(seq!==S.render)return;$('#main').innerHTML=`<div class="error-page">${empty('화면을 불러오지 못했습니다',e.message)}<div class="button-row" style="margin-top:20px"><button class="primary" data-action="refresh">다시 확인</button><button class="outline" data-go="login">로그인</button></div></div>`;}
 }
 async function refresh(){const [m,a]=await Promise.all([api('/meta'),api('/session')]);S.meta=m;S.member=a.member;S.csrf=a.csrf;S.catalogue=(await api('/catalogue')).items;await render();}

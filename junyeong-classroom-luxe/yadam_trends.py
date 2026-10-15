@@ -31,13 +31,13 @@ def collect(key):
     for q in TERMS:
         items=call(key,"search",part="snippet",q=q,type="video",order="viewCount",maxResults=50,
             publishedAfter=since.strftime("%Y-%m-%dT%H:%M:%SZ"),regionCode="KR",
-            relevanceLanguage="ko",safeSearch="moderate").get("items",[])
+            relevanceLanguage="ko",safeSearch="moderate",videoEmbeddable="true").get("items",[])
         for it in items:
             vid=(it.get("id") or {}).get("videoId")
             if vid and re.fullmatch(r"[A-Za-z0-9_-]{11}",vid) and vid not in ids: ids.append(vid)
     videos=[]
     for b in batches(ids):
-        videos+=call(key,"videos",part="snippet,statistics,contentDetails",id=",".join(b)).get("items",[])
+        videos+=call(key,"videos",part="snippet,statistics,contentDetails,status",id=",".join(b)).get("items",[])
     channels={}
     ch_ids={(x.get("snippet") or {}).get("channelId") for x in videos}
     for b in batches(sorted(ch_ids-{None,""})):
@@ -45,6 +45,8 @@ def collect(key):
             channels[x["id"]]=x
     ranked=[]
     for v in videos:
+        status=v.get("status") or {}
+        if not status.get("embeddable") or status.get("privacyStatus")!="public":continue
         sn=v.get("snippet") or {};stats=v.get("statistics") or {}
         channel=channels.get(sn.get("channelId"),{})
         chs=channel.get("statistics") or {};chsn=channel.get("snippet") or {}

@@ -1,0 +1,35 @@
+name: Maison Lumiel live yadam home checks
+on:
+  push:
+    branches: [maison-lumiel]
+    paths:
+      - "junyeong-classroom-luxe/**"
+      - ".github/workflows/maison-yadam-live.yml"
+  workflow_dispatch:
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check server Python code
+        working-directory: junyeong-classroom-luxe
+        run: python -m py_compile app.py cloud_app.py yadam_trends.py brand_build.py
+      - name: Check live browser JavaScript
+        working-directory: junyeong-classroom-luxe
+        run: |
+          node --check web/app.js
+          node --check web/lumiel.js
+      - name: Confirm brand build retains new feature
+        working-directory: junyeong-classroom-luxe
+        run: |
+          python brand_build.py
+          node --check web/app.js
+          node --check web/lumiel.js
+          grep -q 'yadam_home.css' web/index.html
+          grep -q 'public/yadam-trends' web/app.js

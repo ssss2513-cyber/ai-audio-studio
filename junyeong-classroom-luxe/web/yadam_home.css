@@ -1,0 +1,73 @@
+
+/* Maison Lumiel — one-story cinematic homepage. Other member/admin pages unchanged. */
+body.yadam-home {
+ background: radial-gradient(ellipse at 10% 19%,#f4e2e5 0,transparent 36%),radial-gradient(ellipse at 92% 76%,#ece2eb 0,transparent 40%),#fcf9f7;
+}
+.yadam-home .desktop-nav,.yadam-home .mobile-nav,.yadam-home .site-footer .footer-links {display:none!important}
+.yadam-home .site-footer {background:transparent}
+.yadam-shell {max-width:1160px;margin:0 auto;padding:42px 28px 76px;position:relative}
+.yadam-top {display:flex;align-items:center;justify-content:center;gap:16px;letter-spacing:.26em;color:#8b6974;font-size:11px;font-weight:600}
+.yadam-flower {color:#c3a68d;font-size:20px;display:inline-block}
+.yadam-lead {text-align:center;max-width:880px;margin:28px auto 40px;animation:yadam-enter .65s ease both}
+.yadam-lead .eyebrow {color:#a67b88;letter-spacing:.29em}
+.yadam-lead h1 {font-family:var(--serif);font-weight:500;letter-spacing:-.055em;color:#473741;font-size:clamp(30px,5vw,54px);line-height:1.42;margin:14px 0 16px}
+.yadam-lead h1 em {font-style:normal;color:#a15c79}
+.yadam-lead p {font-size:clamp(15px,1.7vw,18px);line-height:1.9;color:#706169}
+.yadam-theater {position:relative;padding:22px;border:1px solid #e7d7da;border-radius:25px;background:linear-gradient(138deg,#fffdfb,#f9f0ef 68%,#f3e7ee);box-shadow:0 25px 72px #65515f17,0 8px 18px #8e536c0d;overflow:hidden}
+.yadam-theater::before {content:"";position:absolute;width:280px;height:280px;right:-150px;top:-150px;background:radial-gradient(circle,#edd3ddaa,transparent 72%);pointer-events:none;animation:yadam-glow 8s ease-in-out infinite alternate}
+.yadam-deco {pointer-events:none;position:absolute;z-index:0;width:130px;height:130px;border:1px solid #d3b6a8a6;border-radius:50%}
+.yadam-deco-left {top:-94px;left:16px}
+.yadam-deco-right {bottom:-92px;right:26px}
+.yadam-feature {position:relative;z-index:1;background:#fffdfa;border:1px solid #ebdfdf;border-radius:15px;overflow:hidden;min-height:290px;animation:yadam-enter .85s .1s ease both}
+.yadam-loading,.yadam-empty {min-height:350px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;color:#806c75}
+.yadam-loading p,.yadam-empty p {font-size:16px;line-height:1.8}
+.yadam-empty h2 {font:500 27px/1.5 var(--serif);margin:12px 0;color:#57434e}
+.yadam-empty-art {font-size:42px;color:#b68d9c}
+.yadam-spinner {width:26px;height:26px;border-radius:50%;border:2px solid #e2ccd3;border-top-color:#96546e;animation:yadam-spin .9s linear infinite;margin-bottom:16px}
+.yadam-player-frame {width:100%;aspect-ratio:16/9;background:#1b161b;overflow:hidden}
+.yadam-player-frame iframe {display:block;width:100%;height:100%;border:0;min-height:230px}
+.yadam-info {display:flex;align-items:center;justify-content:space-between;gap:22px;padding:24px 30px 18px}
+.yadam-info h2 {font:500 clamp(19px,2.4vw,28px)/1.55 var(--serif);color:#473741;margin:7px 0 9px;word-break:keep-all}
+.yadam-info .eyebrow {font-size:10px;letter-spacing:.21em;color:#a27387}
+.yadam-channel {font-size:14px;color:#8a7b80}
+.yadam-stats {min-width:164px;padding:5px 0 5px 20px;border-left:1px solid #e7d9da;text-align:right;display:flex;flex-direction:column;gap:2px}
+.yadam-stats strong {font:500 31px/1.3 var(--serif);color:#96546f}
+.yadam-stats small {font-size:12px;color:#786b73}
+.yadam-stats span {font-size:11px;color:#91868b}
+.yadam-credits {padding:15px 30px 20px;border-top:1px solid #f0e8e7;display:flex;gap:18px;align-items:center;justify-content:space-between;color:#84787d;font-size:12px}
+.yadam-credits a {color:#885269;white-space:nowrap;text-decoration:underline;text-underline-offset:3px}
+.yadam-actions {display:flex;flex-direction:column;align-items:center;text-align:center;gap:14px;padding-top:29px}
+.yadam-actions .yadam-next {border-radius:999px;min-height:58px;padding:15px 38px;background:linear-gradient(120deg,#865069,#ad7390);box-shadow:0 12px 28px #91536d32;transition:transform .2s,box-shadow .2s}
+.yadam-actions .yadam-next:hover:not(:disabled) {transform:translateY(-3px);box-shadow:0 17px 31px #91536d3d}
+.yadam-actions p {font-size:12px;color:#8c8086;line-height:1.65}
+.yadam-bottommark {text-align:center;letter-spacing:.27em;font-size:10px;color:#bda6ad;margin-top:46px}
+.yadam-bottommark span {padding:0 10px;color:#ae8291}
+#yadam-api-panel {margin-top:24px}
+#yadam-api-panel .field {margin-top:20px}
+#yt-api-status {font-size:14px;color:#795d69;margin-top:14px}
+@keyframes yadam-enter {from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes yadam-glow {from{opacity:.5;transform:translate(-12px,12px)}to{opacity:1;transform:translate(13px,-8px)}}
+@keyframes yadam-spin {to{transform:rotate(360deg)}}
+@media(max-width:700px) {
+ .yadam-shell {padding:22px 14px 44px}
+ .yadam-top {font-size:9px;letter-spacing:.15em;gap:11px}
+ .yadam-lead {margin:22px auto 24px}
+ .yadam-lead h1 {font-size:clamp(28px,7.7vw,38px);line-height:1.43}
+ .yadam-lead p {font-size:14px}
+ .yadam-theater {padding:8px;border-radius:18px}
+ .yadam-feature {border-radius:12px;min-height:250px}
+ .yadam-loading,.yadam-empty {min-height:275px}
+ .yadam-info {display:block;padding:18px 18px 12px}
+ .yadam-info h2 {font-size:19px}
+ .yadam-stats {text-align:left;border-left:0;border-top:1px solid #eee1e6;min-width:0;margin-top:17px;padding:12px 0 0;display:block}
+ .yadam-stats strong {font-size:26px;margin-right:8px}
+ .yadam-stats span {display:block}
+ .yadam-credits {padding:13px 18px 16px;flex-direction:column;align-items:flex-start;gap:6px}
+ .yadam-actions {padding-top:22px}
+ .yadam-actions .yadam-next {width:100%;max-width:360px}
+ .yadam-bottommark {letter-spacing:.12em}
+}
+body.no-motion .yadam-shell *,body.no-motion .yadam-shell *::before,body.no-motion .yadam-shell *::after {animation:none!important;transition:none!important}
+@media(prefers-reduced-motion:reduce) {
+ .yadam-shell *,.yadam-shell *::before,.yadam-shell *::after {animation:none!important;transition:none!important}
+}

@@ -71,3 +71,6 @@ body.no-motion .yadam-shell *,body.no-motion .yadam-shell *::before,body.no-moti
 @media(prefers-reduced-motion:reduce) {
  .yadam-shell *,.yadam-shell *::before,.yadam-shell *::after {animation:none!important;transition:none!important}
 }
+
+/* A playing story should not be overlaid by the separate background-music controller. */
+.yadam-home #lumiel-music-control{display:none!important}

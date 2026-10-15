@@ -589,6 +589,13 @@ def stream(ident: str,req: Request):
                 remaining-=len(block); yield block
     return StreamingResponse(chunks(),status_code=status,media_type=v['mime'],headers=headers)
 
+from yadam_feature import select_feature
+
+@app.get('/api/yadam-feature')
+def yadam_feature_endpoint(exclude: str = ''):
+    # Only the last played YouTube ID is accepted; the API key stays on the server.
+    return select_feature(exclude[:30])
+
 app.mount('/assets',StaticFiles(directory=ROOT/'web'),name='assets')
 @app.get('/')
 @app.get('/admin')

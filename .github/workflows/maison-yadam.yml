@@ -1,0 +1,28 @@
+name: Maison Lumiel Yadam checks
+on:
+  push:
+    branches:
+      - junyeong-classroom-luxe-v1
+    paths:
+      - "junyeong-classroom-luxe/**"
+      - ".github/workflows/maison-yadam.yml"
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check server and JavaScript syntax
+        working-directory: junyeong-classroom-luxe
+        run: |
+          python -m py_compile app.py yadam_feature.py manage.py
+          node --check web/app.js
+      - name: Test YouTube ranking (offline mocks)
+        working-directory: junyeong-classroom-luxe
+        run: python -m unittest discover -s tests -p test_yadam_feature.py -v

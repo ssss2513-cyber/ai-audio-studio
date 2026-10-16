@@ -443,5 +443,9 @@ document.addEventListener('submit',async function(event){
  finally{if(button.isConnected)button.disabled=false;}
 },true);
 
-// Keep the richer member/admin enhancements, but not old intro video + three-card homepage.
-home = __maisonSingleSpotlightHome;
+// Keep the original 28-second Maison Lumiel welcome film above the new single rotating yadam recommendation.
+// No lecture lists or other site tabs are added to the public home screen.
+home = function maisonLumielHomeWithIntroduction() {
+ return '<div class="luxe-home-page restored-intro-home">' +
+   lumielIntroSection() + __maisonSingleSpotlightHome() + '</div>';
+};

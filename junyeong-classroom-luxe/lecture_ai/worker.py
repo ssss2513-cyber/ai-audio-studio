@@ -19,19 +19,26 @@ from .provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL, 
 def validate_segments(raw, start, end):
     if not isinstance(raw, dict) or not isinstance(raw.get('segments'), list):
         raise ValueError('분석 결과 형식을 확인하지 못했습니다. 이어서 분석을 눌러 주세요.')
-    result=[]
+    result=[];invalid_times=[]
     for s in raw['segments'][:200]:
-        a,b=float(s.get('start',0)),float(s.get('end',0))
-        if not math.isfinite(a+b) or a<0 or b<=a or a>=end-start or b>end-start+2:
-            raise ValueError('분석 시간 정보가 올바르지 않습니다. 이어서 분석을 눌러 주세요.')
+        if not isinstance(s,dict):continue
+        try:a,b=float(s.get('start')),float(s.get('end'))
+        except (TypeError,ValueError):a,b=None,None
+        valid=a is not None and b is not None and math.isfinite(a+b) and 0<=a<b and a<end-start and b<=end-start+2
         body=str(s.get('text','')).strip()
         if body:
-            result.append(dict(start=start+a,end=min(end,start+b),title=str(s.get('title',''))[:200],
+            # Preserve useful content without inventing a timestamp or moving it to a wrong moment.
+            # Missing/invalid times are explicitly unknown in the existing citation UI.
+            result.append(dict(start=start+a if valid else None,end=min(end,start+b) if valid else None,title=str(s.get('title',''))[:200],
                 text=body[:10000],transcript=str(s.get('transcript',''))[:10000],
-                screen_text=str(s.get('screen_text',''))[:6000],timing='estimated'))
+                screen_text=str(s.get('screen_text',''))[:6000],timing='estimated' if valid else 'unknown'))
+            if not valid:
+                invalid_times.append([v if v is not None and math.isfinite(v) else None for v in (a,b)])
     if not result:
         raise ValueError('이 구간의 분석 결과가 없습니다. 이어서 분석을 눌러 주세요.')
-    return sorted(result,key=lambda x:x['start'])
+    if invalid_times:
+        print('LECTURE_TIMING '+json.dumps(dict(clip_seconds=end-start,unknown=len(invalid_times),bounds=invalid_times[:3])),flush=True)
+    return sorted(result,key=lambda x:(x['start'] is None,x['start'] or 0))
 
 
 def probe(source):
@@ -192,6 +199,11 @@ class Worker:
                 row=c.execute("SELECT id FROM lectures WHERE status='error' AND pause=0 AND (error LIKE 'AI 연결 오류 (503)%' OR error LIKE 'AI 연결 오류 (429)%') ORDER BY created_at LIMIT 1").fetchone()
                 if row:c.execute("UPDATE lectures SET status='queued',error='',phase='연결 복구 후 이어서 분석' WHERE id=?",(row[0],))
             self.lib.configure(recovery_20261016_v2=True)
+        if not self.lib.config().get('recovery_20261016_timing'):
+            with self.lib.connect() as c:
+                row=c.execute("SELECT id FROM lectures WHERE status='error' AND pause=0 AND error LIKE '분석 시간 정보가 올바르지%' ORDER BY created_at LIMIT 1").fetchone()
+                if row:c.execute("UPDATE lectures SET status='queued',error='',phase='분석 결과 저장 복구' WHERE id=?",(row[0],))
+            self.lib.configure(recovery_20261016_timing=True)
         self.thread=threading.Thread(target=self.run,daemon=True,name='maison-lecture-worker')
         self.thread.start()
 
@@ -280,6 +292,10 @@ class Worker:
                             {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
                             ANALYSIS_SYSTEM,ANALYSIS_SCHEMA,'analysis')
                         segments=validate_segments(raw,start,end)
+                        if any(s['timing']=='unknown' for s in segments):
+                            note='일부 설명은 AI 시간값을 확인하지 못해 시간 링크 없이 저장했습니다. 답변 내용과 원본 강의는 확인할 수 있습니다.'
+                            previous=self.lib.lecture(lid)['warning'] or ''
+                            if note not in previous:self.lib.update(lid,warning=(previous+' '+note).strip())
                         tmp=cache.with_suffix('.tmp');tmp.write_text(json.dumps(segments,ensure_ascii=False),encoding='utf-8');os.replace(tmp,cache)
                     finally:
                         clip.unlink(missing_ok=True)

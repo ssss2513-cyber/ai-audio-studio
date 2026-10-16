@@ -18,7 +18,7 @@ os.environ.pop('GEMINI_API_KEY',None)
 import app as core
 from fastapi.testclient import TestClient
 from lecture_ai.routes import install
-from lecture_ai.worker import DriveSource,make_clip,probe
+from lecture_ai.worker import DriveSource,make_clip,probe,validate_segments
 from lecture_ai.store import clip_windows
 from lecture_ai.provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL
 
@@ -227,6 +227,16 @@ class LectureTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_invalid_timestamp_keeps_text_without_fabricating_citation(self):
+        raw={'segments':[dict(start=0,end=25,text='정상 설명'),dict(start=250,end=600,text='시간 오류 설명'),
+                         dict(start=None,end=None,text='시간 없는 설명')]}
+        segments=validate_segments(raw,300,603)
+        self.assertEqual(len(segments),3)
+        self.assertEqual((segments[0]['start'],segments[0]['end']),(300,325))
+        for segment in segments[1:]:
+            self.assertIsNone(segment['start']);self.assertIsNone(segment['end'])
+            self.assertEqual(segment['timing'],'unknown')
+
     def test_http_retry_and_secret_free_diagnostics(self):
         api=Gemini('secret-key')
         class Response(io.BytesIO):headers={}

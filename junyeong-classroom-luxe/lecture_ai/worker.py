@@ -11,11 +11,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, wait, FIRST_COMPLETED
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 from .store import now
 from .provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL, ANALYSIS_SCHEMA, ANALYSIS_SYSTEM
+from .key_pool import KeyPool, PoolUnavailable
 
 RETRY_DELAYS=(120,300,600,1200,1800,3600)
 CLIP_MAX_BYTES=192*1024**2
@@ -204,12 +205,16 @@ class Worker:
         self.core=core;self.lib=library;self.auth_headers=auth_headers
         self.stop=threading.Event();self.wake=threading.Event();self.lock=threading.RLock()
         self.active=None;self.thread=None
+        self.inflight=set()
+        self.keys=KeyPool(core,library,lambda key:self.provider(key))
         self.temp=Path(tempfile.gettempdir())/'maison-lecture-ai'
         self.temp.mkdir(mode=0o700,exist_ok=True)
 
-    def provider(self):
+    def provider(self,key=None):
         cfg=self.lib.config()
-        key=os.getenv('GEMINI_API_KEY','') or (self.core.dec(cfg['key_encrypted']) if cfg.get('key_encrypted') else '')
+        if key is None:
+            records=self.keys.records()
+            key=self.core.dec(records[0]['secret']) if records else ''
         return Gemini(key,cfg.get('model','gemini-3.8-flash'),cfg.get('embedding_model','gemini-embedding-2'),self.usage,
             fallback_model=cfg.get('fallback_model',FALLBACK_MODEL))
 
@@ -284,6 +289,19 @@ class Worker:
     def start(self):
         if self.thread and self.thread.is_alive():return
         self.stop.clear()
+        self.keys.records()
+        key_status=self.keys.snapshot()
+        print('LECTURE_KEYS '+json.dumps(dict(configured=len(key_status),
+            available=sum(k['status']=='ready' for k in key_status),parallel_limit=self.keys.capacity())),flush=True)
+        cfg=self.lib.config()
+        if not cfg.get('key_pool_queue_migrated'):
+            # Preserve known exhaustion on the imported key; the pool now schedules its reset.
+            blocked=cfg.get('queue_blocked','')
+            if '429' in blocked and '일일' in blocked:
+                with self.lib.connect() as c:
+                    c.execute("UPDATE lectures SET status='queued' WHERE pause=0 AND status='error' AND error LIKE '%429%'")
+                self.lib.configure(queue_blocked='',provider_retry_at=0)
+            self.lib.configure(key_pool_queue_migrated=True)
         # Reclaim only our derivative clips after an interrupted deployment.
         for p in self.temp.glob('*.mp4'):p.unlink(missing_ok=True)
         with self.lib.connect() as c:
@@ -329,6 +347,13 @@ class Worker:
                     paused=bool(self.lib.lecture(row[0])['pause'])
                     self.lib.update(row[0],status='paused' if paused else 'queued',
                         phase='일시정지' if paused else '서버 재시작 후 이어서 분석',phase_at=now())
+                except PoolUnavailable as error:
+                    paused=bool(self.lib.lecture(row[0])['pause'])
+                    self.lib.update(row[0],status='paused' if paused else 'retrying' if error.retry_at else 'error',
+                        error=str(error),retry_at=0 if paused else error.retry_at,
+                        phase='일시정지' if paused else '사용 가능한 API 키 대기',phase_at=now())
+                    if not paused:
+                        self.lib.configure(provider_retry_at=error.retry_at,queue_blocked='' if error.retry_at else str(error))
                 except Exception as err:
                     safe=str(err) if isinstance(err,(ProviderError,ValueError,RuntimeError)) else '분석 연결이 중단되었습니다. 이어서 분석을 눌러 주세요.'
                     if self.defer_error(row[0],err):continue
@@ -342,19 +367,70 @@ class Worker:
                     with self.lock:self.active=None
             else:self.wake.wait(3);self.wake.clear()
 
+    def wake_available_keys(self):
+        self.lib.configure(queue_blocked='',provider_retry_at=0)
+        with self.lib.connect() as c:
+            c.execute("UPDATE lectures SET status='queued',retry_at=0,retry_count=0 WHERE pause=0 AND (status='retrying' OR (status='error' AND (error LIKE '%API 키%' OR error LIKE '%429%' OR error LIKE '%401%' OR error LIKE '%403%'))) ")
+        self.wake.set()
+
+    def note(self,lid,text):
+        with self.lock:
+            previous=self.lib.lecture(lid)['warning'] or ''
+            if text not in previous:self.lib.update(lid,warning=(previous+' '+text).strip())
+
+    def process_part(self,lid,index,window,clip,video,version,cancelled):
+        start,end=window;cache=self.lib.root/'temp'/f'{lid}-{index}.json'
+        model_used=''
+        with self.lock:self.inflight.add((lid,index))
+        try:
+            if cache.exists():segments=json.loads(cache.read_text('utf-8'))
+            else:
+                def analyze(api):
+                    remote=None
+                    try:
+                        if cancelled():raise ProviderCancelled()
+                        self.video(lid)
+                        if self.version(self.metadata(video))!=version:
+                            raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+                        remote=api.upload(clip)
+                        raw=api.generate([{'fileData':{'fileUri':remote['uri'],'mimeType':'video/mp4'}},
+                            {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
+                            ANALYSIS_SYSTEM,ANALYSIS_SCHEMA,'analysis')
+                        segments=validate_segments(raw,start,end)
+                        # Save paid analysis before embedding or cancellation can interrupt the task.
+                        tmp=cache.with_suffix('.tmp');tmp.write_text(json.dumps(segments,ensure_ascii=False),encoding='utf-8');os.replace(tmp,cache)
+                        return segments,api.effective_model
+                    finally:
+                        # Files belong to their uploading project: always remove with the same key.
+                        if remote:api.remove(remote['name'])
+                segments,model_used=self.keys.call(analyze,cancelled=cancelled,validate=True,
+                    on_event=lambda event,stage,details:self.provider_event(lid,event,f'{index+1}구간 · '+stage,details))
+            if any(s.get('timing')=='unknown' for s in segments):
+                self.note(lid,'일부 설명은 AI 시간값을 확인하지 못해 시간 링크 없이 저장했습니다. 답변 내용과 원본 강의는 확인할 수 있습니다.')
+            vectors=None;embedding_model=self.lib.config().get('embedding_model','gemini-embedding-2')
+            try:
+                vectors,embedding_model=self.keys.call(lambda api:(api.embed([s['title']+'\n'+s['text']+'\n'+s.get('screen_text','') for s in segments]),api.embedding_model),
+                    scope='embedding',cancelled=cancelled)
+            except ProviderError:
+                self.note(lid,'일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
+            self.lib.save_part(lid,index,segments,embedding_model,vectors)
+            with self.lock:
+                row=self.lib.lecture(lid)
+                details={'model_used':model_used} if model_used else {}
+                self.phase(lid,f"{row['completed']}/{row['total']}구간 저장 완료",**details)
+            cache.unlink(missing_ok=True)
+        finally:
+            if clip:clip.unlink(missing_ok=True)
+            with self.lock:self.inflight.discard((lid,index))
+
     def process(self,lid):
-        api=self.provider()
-        if not api.key:raise ProviderError('관리자의 AI 설정에서 Gemini API 키를 등록해 주세요.')
-        api.cancelled=lambda:self.stop.is_set() or bool(self.lib.lecture(lid)['pause'])
-        api.on_event=lambda event,stage,details:self.provider_event(lid,event,stage,details)
-        self.phase(lid,'분석 모델 확인 중')
-        # Model listing checks credentials and availability without spending a generation request.
-        # The first actual lecture request verifies generation; settings still offers an explicit check.
-        api.validate_models()
-        self.lib.update(lid,model_used=api.model)
+        cancelled=lambda:self.stop.is_set() or bool(self.lib.lecture(lid)['pause'])
+        old=self.lib.lecture(lid)
+        # Avoid encoding a large clip when every credential is already known to be unavailable.
+        available=self.keys.acquire('embedding' if old['kind']=='reindex' else 'generation',cancelled,set())
+        self.keys.release(available['id'])
         self.phase(lid,'Drive 원본 정보 확인')
         video=self.video(lid);meta=self.metadata(video);version=self.version(meta)
-        old=self.lib.lecture(lid)
         if old['sha256'] and old['sha256']!=version:
             raise ValueError('Drive 원본이 변경되었습니다. 이 강의의 다시 분석을 눌러 주세요.')
         if old['media'] and old['media']!=video['external_id']:
@@ -362,67 +438,63 @@ class Worker:
         self.lib.update(lid,sha256=version,media=video['external_id'])
         if old['kind']=='reindex':
             from .store import normalize
+            model=self.lib.config().get('embedding_model','gemini-embedding-2')
             with self.lib.connect() as c:
-                rows=[dict(r) for r in c.execute('SELECT id,title,text,screen_text FROM chunks WHERE lecture_id=? AND (embedding IS NULL OR embedding_model!=?)',(lid,api.embedding_model))]
+                rows=[dict(r) for r in c.execute('SELECT id,title,text,screen_text FROM chunks WHERE lecture_id=? AND (embedding IS NULL OR embedding_model!=?)',(lid,model))]
             for at in range(0,len(rows),16):
-                if self.stop.is_set() or self.lib.lecture(lid)['pause']:
-                    self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
                 group=rows[at:at+16]
-                vecs=api.embed([r['title']+'\n'+r['text']+'\n'+r['screen_text'] for r in group])
+                vecs,used_model=self.keys.call(lambda api:(api.embed([r['title']+'\n'+r['text']+'\n'+r['screen_text'] for r in group]),api.embedding_model),scope='embedding',cancelled=cancelled)
                 with self.lib.connect() as c:
-                    c.executemany('UPDATE chunks SET embedding=?,embedding_model=? WHERE id=?',[(normalize(v),api.embedding_model,r['id']) for r,v in zip(group,vecs)])
+                    c.executemany('UPDATE chunks SET embedding=?,embedding_model=? WHERE id=?',[(normalize(v),used_model,r['id']) for r,v in zip(group,vecs)])
             self.lib.update(lid,status='ready',kind='video',warning='',error='');return
         with DriveSource(video['external_id'],self.auth_headers,int(meta.get('size') or 0),None) as source:
             length=float((meta.get('videoMediaMetadata') or {}).get('durationMillis') or 0)/1000 or probe(source)
-            if not math.isfinite(length) or not 0<length<=48*3600:raise ValueError('영상 길이가 지원 범위를 벗어났습니다.')
             windows=self.lib.analysis_plan(lid,length);done=self.lib.parts_done(lid)
             missing=[i for i in range(len(windows)) if i not in done]
-            with ClipPrefetch(source,windows,self.temp,lid,api.cancelled) as clips:
-                for position,i in enumerate(missing):
-                    start,end=windows[i]
-                    if self.stop.is_set() or self.lib.lecture(lid)['pause']:
-                        self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
-                    self.video(lid)
-                    if self.version(self.metadata(video))!=version:
-                        raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-                    if shutil.disk_usage(self.lib.root).free<64*1024**2 or shutil.disk_usage(self.temp).free<CLIP_FREE_BYTES:
-                        raise RuntimeError('분석 자료를 저장할 공간이 부족합니다. 관리자에게 문의해 주세요.')
-                    cache=self.lib.root/'temp'/f'{lid}-{i}.json'
-                    clip=self.temp/f'{lid}-{i}.mp4'
-                    if cache.exists():segments=json.loads(cache.read_text('utf-8'))
-                    else:
-                        remote=None
-                        try:
-                            self.phase(lid,f'{i+1}/{len(windows)}구간 · 약 {max(1,round((end-start)/60))}분 영상 준비 중')
-                            clip=clips.take(i)
-                            api.check_cancelled()
-                            if self.version(self.metadata(video))!=version:
-                                raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-                            for following in missing[position+1:]:
-                                if not (self.lib.root/'temp'/f'{lid}-{following}.json').exists():
-                                    clips.start(following);break
-                            remote=api.upload(clip)
-                            raw=api.generate([{'fileData':{'fileUri':remote['uri'],'mimeType':'video/mp4'}},
-                                {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
-                                ANALYSIS_SYSTEM,ANALYSIS_SCHEMA,'analysis')
-                            segments=validate_segments(raw,start,end)
-                            if any(s['timing']=='unknown' for s in segments):
-                                note='일부 설명은 AI 시간값을 확인하지 못해 시간 링크 없이 저장했습니다. 답변 내용과 원본 강의는 확인할 수 있습니다.'
-                                previous=self.lib.lecture(lid)['warning'] or ''
-                                if note not in previous:self.lib.update(lid,warning=(previous+' '+note).strip())
-                            tmp=cache.with_suffix('.tmp');tmp.write_text(json.dumps(segments,ensure_ascii=False),encoding='utf-8');os.replace(tmp,cache)
-                        finally:
-                            clip.unlink(missing_ok=True)
-                            if remote:api.remove(remote['name'])
-                    vectors=None
-                    try:vectors=api.embed([s['title']+'\n'+s['text']+'\n'+s['screen_text'] for s in segments])
-                    except ProviderError:
-                        self.lib.update(lid,warning='일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
-                    self.lib.save_part(lid,i,segments,api.embedding_model,vectors)
-                    self.lib.configure(provider_retry_at=0)
-                    self.phase(lid,f'{i+1}/{len(windows)}구간 저장 완료',model_used=api.effective_model)
-                    cache.unlink(missing_ok=True)
+            parallelism=self.keys.capacity();pending={};errors=[]
+            self.phase(lid,f'최대 {parallelism}개 구간 병렬 분석 준비')
+            def collect(block=False):
+                if not pending:return
+                completed,_=wait(pending,timeout=.5 if block else 0,return_when=FIRST_COMPLETED)
+                for future in completed:
+                    pending.pop(future)
+                    try:future.result()
+                    except Exception as error:errors.append(error)
+            with ClipPrefetch(source,windows,self.temp,lid,cancelled) as clips:
+                with ThreadPoolExecutor(max_workers=parallelism,thread_name_prefix='lecture-analysis') as pool:
+                    try:
+                        for position,index in enumerate(missing):
+                            while len(pending)>=parallelism and not errors:
+                                if cancelled():raise ProviderCancelled()
+                                collect(True)
+                            collect()
+                            if errors:break
+                            if cancelled():raise ProviderCancelled()
+                            if shutil.disk_usage(self.lib.root).free<64*1024**2:
+                                raise RuntimeError('분석 자료를 저장할 공간이 부족합니다.')
+                            clip=None
+                            if not (self.lib.root/'temp'/f'{lid}-{index}.json').exists():
+                                self.phase(lid,f'{index+1}/{len(windows)}구간 · 영상 준비 중')
+                                clip=clips.take(index)
+                                collect()
+                                if errors:break
+                                for following in missing[position+1:]:
+                                    if not (self.lib.root/'temp'/f'{lid}-{following}.json').exists():
+                                        clips.start(following);break
+                            future=pool.submit(self.process_part,lid,index,windows[index],clip,video,version,cancelled)
+                            pending[future]=index
+                        while pending:
+                            collect(True)
+                            if errors:clips.stopping.set()
+                    except BaseException:
+                        clips.stopping.set()
+                        raise
+                if errors:
+                    # Successful parallel parts have already committed even when another key failed.
+                    raise next((e for e in errors if not isinstance(e,PoolUnavailable)),errors[0])
         self.video(lid)
         if self.version(self.metadata(video))!=version:
             raise ValueError('Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+        if len(self.lib.parts_done(lid))!=len(windows):
+            raise RuntimeError('일부 구간이 남아 있습니다. 저장된 다음 구간부터 이어서 분석해 주세요.')
         self.lib.update(lid,status='ready',error='',pause=0,phase='분석 완료',phase_at=now())

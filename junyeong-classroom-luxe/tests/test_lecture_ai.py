@@ -22,6 +22,7 @@ from lecture_ai.routes import install
 from lecture_ai.worker import DriveSource,make_clip,probe,validate_segments
 from lecture_ai.store import Library,clip_windows
 from lecture_ai.provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL
+from lecture_ai.key_pool import PoolUnavailable
 
 worker=install(core,lambda:{'Authorization':'Bearer test-only'})
 lib=worker.lib
@@ -76,6 +77,115 @@ class LectureTests(unittest.TestCase):
         FakeProvider.calls=[]
 
     def configure(self):lib.configure(key_encrypted=core.enc('test-key'))
+
+    def pool_keys(self,count=2,project=''):
+        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(label=f'키 {i+1}',api_key=f'private-key-{i}',project=project) for i in range(count)],'parallelism':10})
+        self.assertEqual(response.status_code,200,response.text)
+        return response.json()['keys']
+
+    def test_ten_key_settings_are_encrypted_preserved_and_admin_only(self):
+        with patch('lecture_ai.provider.Gemini.request',side_effect=AssertionError('Saving must not call AI')):
+            keys=self.pool_keys(10)
+        response=self.admin.get('/api/admin/ai/settings')
+        for i in range(10):self.assertNotIn(f'private-key-{i}',response.text)
+        self.assertNotIn('private-key-',json.dumps(lib.config()))
+        originals=[r['secret'] for r in worker.keys.records()]
+        saved=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(id=k['id'],api_key='',label=k['label']) for k in keys]})
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertEqual([r['secret'] for r in worker.keys.records()],originals)
+        extra=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(api_key='extra-key-value')]})
+        self.assertEqual(extra.status_code,422)
+        replace=[dict(id=k['id'],remove=True) for k in keys]+[dict(api_key=f'replacement-key-{i}') for i in range(10)]
+        self.assertEqual(self.admin.post('/api/admin/ai/settings',json={'keys':replace}).status_code,200)
+        self.assertEqual(len(worker.keys.records()),10)
+        self.assertEqual(self.student.post('/api/admin/ai/settings',json={'keys':[]}).status_code,403)
+        self.assertFalse(self.student.get('/api/ai/lectures').json()['keys'])
+
+    def test_duplicate_key_and_shared_project_quota_are_handled(self):
+        duplicate=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(api_key='same-key-123'),dict(api_key='same-key-123')]})
+        self.assertEqual(duplicate.status_code,422)
+        keys=self.pool_keys(2,project='same-project')
+        worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay','quotaValue':'20'}]))
+        self.assertTrue(all(k['status']=='daily' for k in worker.keys.snapshot()))
+        with self.assertRaises(PoolUnavailable) as blocked:worker.keys.acquire('generation',None,set())
+        self.assertGreater(blocked.exception.retry_at,time.time())
+        # Embedding has a distinct model quota; an exhausted generation quota does not discard its cache.
+        row=worker.keys.acquire('embedding',None,set());worker.keys.release(row['id'])
+        self.assertEqual(worker.keys.capacity(),1)
+
+    def test_key_rotation_reuploads_with_correct_owner_and_keeps_checkpoint(self):
+        self.pool_keys(2);vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        video=worker.video(vid);meta={'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'120000'}}
+        uploads=[];calls=[];removed=[];case=self
+        class Analysis(FakeProvider):
+            def __init__(self,key):self.key=key
+            def upload(self,path):uploads.append(self.key);return {'name':'files/'+self.key,'uri':'uri/'+self.key}
+            def remove(self,name):removed.append((self.key,name))
+            def generate(self,parts,*args):
+                case.assertEqual(parts[0]['fileData']['fileUri'],'uri/'+self.key)
+                calls.append(self.key)
+                if len(calls)==1:raise ProviderError('일일 한도',code=429,retryable=False,quota=[{'quotaId':'GenerateRequestsPerDay','quotaValue':'20'}])
+                return {'segments':[dict(start=0,end=100,title='설명',text='보존',transcript='보존',screen_text='')]}
+        with patch.object(worker,'provider',side_effect=lambda key=None:Analysis(key)),patch.object(worker,'metadata',return_value=meta),patch('lecture_ai.worker.DriveSource',return_value=contextlib.nullcontext('loopback')),patch('lecture_ai.worker.make_clip'):
+            worker.process(vid);worker.process(vid)
+        self.assertEqual(len(calls),2);self.assertEqual(len(set(calls)),2)
+        self.assertEqual(uploads,calls);self.assertEqual(len(removed),2)
+        self.assertEqual(lib.parts_done(vid),{0});self.assertEqual(lib.lecture(vid)['status'],'ready')
+        self.assertEqual(sum(k['status']=='daily' for k in worker.keys.snapshot()),1)
+
+    def test_ten_keys_run_in_parallel_with_one_encoder_and_distinct_parts(self):
+        self.pool_keys(10);vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        meta={'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':str(18000*1000)}}
+        barrier=threading.Barrier(10);guard=threading.Lock();busy=set();peak=0;encoded=[];case=self
+        class Analysis(FakeProvider):
+            def __init__(self,key):self.key=key
+            def upload(self,path):return {'name':'files/mock','uri':str(path)}
+            def remove(self,name):pass
+            def generate(self,*args):
+                nonlocal peak
+                with guard:
+                    case.assertNotIn(self.key,busy);busy.add(self.key);peak=max(peak,len(busy))
+                try:barrier.wait(timeout=5)
+                finally:
+                    with guard:busy.remove(self.key)
+                return {'segments':[dict(start=0,end=100,title='설명',text='병렬 기록',transcript='기록',screen_text='')]}
+        def prepare(source,path,start,end,cancelled=None):encoded.append((start,end))
+        with patch.object(worker,'provider',side_effect=lambda key=None:Analysis(key)),patch.object(worker,'metadata',return_value=meta),patch('lecture_ai.worker.DriveSource',return_value=contextlib.nullcontext('loopback')),patch('lecture_ai.worker.make_clip',side_effect=prepare):
+            worker.process(vid)
+        self.assertEqual(peak,10);self.assertEqual(len(encoded),10)
+        self.assertEqual(lib.parts_done(vid),set(range(10)))
+        self.assertEqual(lib.lecture(vid)['completed'],10)
+        self.assertFalse(worker.keys.busy);self.assertFalse(worker.inflight)
+
+    def test_all_exhausted_keys_wait_without_encoding_or_overriding_pause(self):
+        keys=self.pool_keys(2);vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        for key in keys:worker.keys.failed(key['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay'}]))
+        with patch('lecture_ai.worker.make_clip') as encode,patch.object(worker,'provider') as provider:
+            with self.assertRaises(PoolUnavailable):worker.process(vid)
+        encode.assert_not_called();provider.assert_not_called()
+        worker.stop.clear()
+        try:
+            with patch.object(worker.wake,'wait',side_effect=lambda *args:worker.stop.set()):worker.run()
+        finally:worker.stop.clear()
+        self.assertEqual(lib.lecture(vid)['status'],'retrying')
+        lib.update(vid,status='paused',pause=1)
+        worker.wake_available_keys()
+        self.assertEqual(lib.lecture(vid)['status'],'paused')
+
+    def test_zero_quota_skips_key_until_explicit_resume_and_does_not_repeat(self):
+        keys=self.pool_keys(1)
+        error=ProviderError('허용량 0',code=429,quota=[{'quotaId':'RequestsPerMinute','quotaValue':'0'}])
+        worker.keys.failed(keys[0]['id'],'generation',error)
+        for _ in range(2):
+            with self.assertRaises(PoolUnavailable) as raised:worker.keys.acquire('generation',None,set())
+            self.assertEqual(raised.exception.retry_at,0)
+        self.assertEqual(worker.keys.snapshot()[0]['status'],'quota_zero')
+        self.assertEqual(self.student.post('/api/admin/ai/keys/'+keys[0]['id']+'/resume',json={}).status_code,403)
+        self.assertEqual(self.admin.post('/api/admin/ai/keys/'+keys[0]['id']+'/resume',json={}).status_code,200)
+        self.assertEqual(worker.keys.snapshot()[0]['status'],'ready')
 
     def test_access_and_csrf(self):
         anon=TestClient(core.app)
@@ -408,7 +518,8 @@ class LectureTests(unittest.TestCase):
                 raise ProviderError('temporary',code=503)
         with patch.object(worker,'provider',return_value=Analysis()),patch.object(worker,'metadata',return_value=meta),patch('lecture_ai.worker.DriveSource',return_value=contextlib.nullcontext('loopback')),patch('lecture_ai.worker.make_clip',side_effect=prepare):
             with self.assertRaises(ProviderError) as error:worker.process(vid)
-        self.assertEqual(error.exception.code,503)
+        self.assertIsInstance(error.exception,PoolUnavailable)
+        self.assertGreater(error.exception.retry_at,time.time())
         self.assertTrue(next_cancelled.is_set())
         self.assertEqual(lib.parts_done(vid),{0})
         self.assertFalse(list(worker.temp.glob(vid+'-*.mp4')))
@@ -423,6 +534,14 @@ class LectureTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_pool_mode_returns_minute_quota_without_repeating_request(self):
+        api=Gemini('test');api.rotate_on_quota=True
+        error=urllib.error.HTTPError('https://generativelanguage.googleapis.com',429,'Quota',{},io.BytesIO(json.dumps({'error':{
+            'status':'RESOURCE_EXHAUSTED','details':[{'violations':[{'quotaId':'GenerateRequestsPerMinute','quotaValue':'5'}]}]}}).encode()))
+        with patch('urllib.request.urlopen',side_effect=error) as request,patch.object(api,'wait') as pause:
+            with self.assertRaises(ProviderError):api.request('/v1beta/test')
+        request.assert_called_once();pause.assert_not_called()
+
     def test_analysis_budget_and_truncated_result_are_handled_without_extra_calls(self):
         api=Gemini('test');limits=[]
         def request(url,payload,**kwargs):

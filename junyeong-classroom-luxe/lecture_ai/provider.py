@@ -40,6 +40,7 @@ class Gemini:
         self.on_event=on_event;self.cancelled=cancelled
         self.effective_model=self.model;self._models=None
         self._output_limits={}
+        self.rotate_on_quota=False
 
     def event(self, event, stage, **details):
         # Deliberately never log URLs, keys, request bodies, video names, or AI output.
@@ -155,6 +156,7 @@ class Gemini:
             except (ValueError,UnicodeError):
                 error=ProviderError(f'{stage}: Google AI 응답 형식을 읽지 못했습니다.',stage=stage)
             self.event('error',stage,code=error.code,status=error.provider_status,attempt=attempt+1,quota=error.quota)
+            if error.code==429 and self.rotate_on_quota:raise error from None
             if error.retryable and attempt<attempts-1:
                 delay=self.retry_delay(attempt,error.retry_after)
                 self.event('retry',stage,code=error.code,seconds=round(delay),attempt=attempt+2,attempts=attempts)
@@ -213,7 +215,7 @@ class Gemini:
                 if not file or not file.get('name'):raise ProviderError('영상 업로드 확인 응답이 없습니다.',code=0,stage='영상 업로드')
                 break
             except ProviderError as error:
-                if not error.retryable:raise
+                if not error.retryable or (error.code==429 and self.rotate_on_quota):raise
                 try:
                     recovered,_=self.request('/v1beta/'+name,method='GET',attempts=1,stage='업로드 완료 여부 확인')
                     if recovered.get('name')==name and recovered.get('state') in ('ACTIVE','PROCESSING'):

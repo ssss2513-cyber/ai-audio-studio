@@ -11,8 +11,19 @@ from .worker import Worker
 from .provider import Gemini, ProviderError, FALLBACK_MODEL, ANSWER_SYSTEM, ANSWER_SCHEMA
 
 
+class ApiKeySpec(BaseModel):
+    id: str=Field(default='',max_length=32)
+    label: str=Field(default='',max_length=40)
+    project: str=Field(default='',max_length=100)
+    api_key: str=Field(default='',max_length=256)
+    enabled: bool=True
+    remove: bool=False
+
+
 class Settings(BaseModel):
     api_key: str=Field(default='',max_length=256)
+    keys: list[ApiKeySpec]|None=Field(default=None,max_length=20)
+    parallelism: int=Field(default=10,ge=1,le=10)
     model: str=Field(default='gemini-3.8-flash',max_length=100)
     embedding_model: str=Field(default='gemini-embedding-2',max_length=100)
     fallback_model: str=Field(default=FALLBACK_MODEL,max_length=100)
@@ -51,13 +62,14 @@ def install(core,auth_headers):
         return member,videos
 
     def configured():
-        return bool(os.getenv('GEMINI_API_KEY') or lib.config().get('key_encrypted'))
+        return any(k['enabled'] for k in worker.keys.snapshot())
 
     def safe_settings():
         cfg=lib.config()
         return dict(configured=configured(),model=cfg.get('model','gemini-3.8-flash'),
                     embedding_model=cfg.get('embedding_model','gemini-embedding-2'),
-                    fallback_model=cfg.get('fallback_model',FALLBACK_MODEL),connection=cfg.get('connection',{}))
+                    fallback_model=cfg.get('fallback_model',FALLBACK_MODEL),connection=cfg.get('connection',{}),
+                    keys=worker.keys.snapshot(),parallelism=cfg.get('parallelism',10),max_keys=10)
 
     def queue(video,action):
         lid=video['id']
@@ -105,10 +117,13 @@ def install(core,auth_headers):
             item['progress']=lib.analysis_progress(r) if r else 0
             if admin:item.update(error=r.get('error',''),warning=r.get('warning',''),pause=bool(r.get('pause')),
                 phase=r.get('phase',''),phase_at=r.get('phase_at',''),model_used=r.get('model_used',''),retry_at=r.get('retry_at',0))
+            if admin:
+                with worker.lock:item['active_parts']=sum(lid==v['id'] for lid,_ in worker.inflight)
             items.append(item)
         return dict(items=items,configured=configured(),admin=admin,ready=sum(x['status']=='ready' for x in items),
                     queue_blocked=lib.config().get('queue_blocked','') if admin else '',
-                    queue_retry_at=lib.config().get('provider_retry_at',0) if admin else 0)
+                    queue_retry_at=lib.config().get('provider_retry_at',0) if admin else 0,
+                    keys=worker.keys.snapshot() if admin else [],parallelism=worker.keys.capacity() if admin else 0)
 
     @core.app.get('/api/admin/ai/settings')
     def get_settings(req: Request):
@@ -122,11 +137,21 @@ def install(core,auth_headers):
             model=Gemini.model_name(body.model.strip());embed=Gemini.model_name(body.embedding_model.strip())
             fallback=Gemini.model_name(body.fallback_model.strip()) if body.fallback_model.strip() else ''
             values=dict(model=model,embedding_model=embed,fallback_model=fallback)
+            if body.keys is not None:
+                worker.keys.save([k.model_dump() for k in body.keys],body.parallelism)
+                lib.configure(**values,connection=dict(ok=None,at=now(),message='키와 병렬 설정을 저장했습니다. 사용 가능 여부는 실제 분석 중 확인하며 한도가 소진된 키는 건너뜁니다.'))
+                worker.wake_available_keys()
+                with core.db() as c:core.audit(c,member['id'],'lecture-ai','ai_keys_saved',str(len(worker.keys.snapshot())))
+                return safe_settings()
             key=body.api_key.strip() or worker.provider().key
             provider=Gemini(key,model,embed,worker.usage,fallback_model=fallback)
             provider.validate_models()
             if body.api_key.strip():values['key_encrypted']=core.enc(key)
             lib.configure(**values)
+            records=worker.keys.snapshot()
+            first=records[0] if records else {}
+            worker.keys.save([dict(id=first.get('id',''),label=first.get('label','키 1'),
+                project=first.get('project',''),api_key=body.api_key.strip() or key,enabled=True)],body.parallelism)
         except (ValueError,ProviderError) as e:core.fail(422,str(e))
         # Saving a valid key and successfully running the model are separate results.
         # A temporary service failure must not discard a correctly stored key.
@@ -142,10 +167,19 @@ def install(core,auth_headers):
         with core.db() as c:core.audit(c,member['id'],'lecture-ai','ai_settings')
         return safe_settings()
 
+    @core.app.post('/api/admin/ai/keys/{key_id}/resume')
+    def resume_key(key_id: str,req: Request):
+        member=core.require(req,admin=True,write=True)
+        try:worker.keys.retry_key(key_id)
+        except ValueError as error:core.fail(404,str(error))
+        worker.wake_available_keys()
+        with core.db() as c:core.audit(c,member['id'],'lecture-ai','ai_key_resume',key_id)
+        return safe_settings()
+
     @core.app.get('/api/admin/ai/models')
     def models(req: Request):
         core.require(req,admin=True)
-        try:return worker.provider().models()
+        try:return worker.keys.call(lambda api:api.models(),scope='discovery')
         except ProviderError as e:core.fail(502,str(e))
 
     @core.app.post('/api/admin/ai/lectures/{lid}')
@@ -177,12 +211,12 @@ def install(core,auth_headers):
         if not configured():core.fail(409,'운영자가 AI 연결을 준비하고 있습니다. 잠시 후 이용해 주세요.')
         if not ask_slots.acquire(False):core.fail(429,'다른 질문에 답하고 있습니다. 잠시 후 다시 질문해 주세요.')
         try:
-            provider=worker.provider();vector=None
+            vector=None;embedding_model=lib.config().get('embedding_model','gemini-embedding-2')
             previous=[q[:500] for q in body.previous_questions]
             query='\n'.join(previous[-2:]+[body.question])
-            try:vector=provider.embed([query],query=True)[0]
+            try:vector,embedding_model=worker.keys.call(lambda api:(api.embed([query],query=True)[0],api.embedding_model),scope='embedding')
             except ProviderError:pass
-            hits=lib.search(query,vector,provider.embedding_model,body.lecture_id or None,limit=16,allowed_ids=list(videos))
+            hits=lib.search(query,vector,embedding_model,body.lecture_id or None,limit=16,allowed_ids=list(videos))
             if not hits:
                 return dict(supported=False,paragraphs=[dict(text='분석이 완료된 강의에서 관련 내용을 찾지 못했습니다. 강의 제목이나 사용한 용어를 함께 적어 주세요.',sources=[])],sources=[],followups=[])
             # Check access immediately before sending evidence, and again before returning it.
@@ -192,8 +226,8 @@ def install(core,auth_headers):
             evidence=[dict(id=r['id'],lecture=current[r['lecture_id']]['title'],registered_date=r['lecture_date'],
                 topic=r['title'],text=r['text'][:5000],transcript=r['transcript'][:3500],screen_text=r['screen_text'][:2000]) for r in hits]
             payload=dict(question=body.question,previous_questions=previous,EVIDENCE=evidence)
-            answer=provider.generate([{'text':json.dumps(payload,ensure_ascii=False)}],
-                ANSWER_SYSTEM+'\nregistered_date는 강의 등록일이며 실제 촬영일로 단정하지 마세요.',ANSWER_SCHEMA)
+            answer=worker.keys.call(lambda api:api.generate([{'text':json.dumps(payload,ensure_ascii=False)}],
+                ANSWER_SYSTEM+'\nregistered_date는 강의 등록일이며 실제 촬영일로 단정하지 마세요.',ANSWER_SCHEMA))
             _,current=allowed(req)
             if any(r['lecture_id'] not in current for r in hits):core.fail(403,'강의 공개 상태가 변경되었습니다. 다시 질문해 주세요.')
             valid={r['id']:r for r in hits};paragraphs=[];used=set()

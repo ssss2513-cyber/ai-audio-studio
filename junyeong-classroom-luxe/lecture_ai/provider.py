@@ -17,12 +17,13 @@ TRANSIENT={429,500,502,503,504}
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, message, *, code=None, stage='', provider_status='', retry_after=None, retryable=None, quota=None):
+    def __init__(self, message, *, code=None, stage='', provider_status='', retry_after=None, retryable=None, quota=None, quota_kind=''):
         super().__init__(message)
         self.code=code;self.stage=stage;self.provider_status=provider_status
         self.retryable=(code in TRANSIENT or code==0) if retryable is None else retryable
         self.retry_after=retry_after
         self.quota=quota or []
+        self.quota_kind=quota_kind
 
 
 class ProviderCancelled(RuntimeError):
@@ -96,15 +97,19 @@ class Gemini:
         if 'api key not valid' in message or 'api_key_invalid' in message:
             label='API 키가 유효하지 않습니다.'
         retryable=exc.code in TRANSIENT
+        quota_kind=''
         if exc.code==429:
             quota_text=' '.join(q.get('quotaId','')+' '+q.get('quotaMetric','') for q in quota).lower()
             if any(q.get('quotaValue')=='0' for q in quota) or re.search(r'limit:\s*0(?:\D|$)',message):
+                quota_kind='zero'
                 label='이 프로젝트에서 해당 모델에 허용된 사용량이 0입니다. AI Studio에서 모델별 할당량과 결제 연결 상태를 확인해 주세요.'
                 retryable=False
             elif 'perday' in quota_text or 'per_day' in quota_text:
+                quota_kind='daily'
                 label='해당 모델의 일일 사용량 한도를 소진했습니다. 한도 초기화 또는 할당량 확인이 필요합니다.'
                 retryable=False
             elif 'perminute' in quota_text or 'per_minute' in quota_text:
+                quota_kind='rate'
                 label='해당 모델의 분당 요청 또는 입력 토큰 한도에 도달했습니다.'
             if quota:
                 label+=' [한도: '+', '.join(q.get('quotaId') or q.get('quotaMetric','') for q in quota[:2])+']'
@@ -112,7 +117,7 @@ class Gemini:
         retry_after=float(retry) if re.fullmatch(r'\d+(\.\d+)?',retry) else suggested_delay
         suffix=f' / {status}' if status else ''
         return ProviderError(f'{stage} 실패 (HTTP {exc.code}{suffix}): {label}',
-            code=exc.code,stage=stage,provider_status=status,retry_after=retry_after,retryable=retryable,quota=quota)
+            code=exc.code,stage=stage,provider_status=status,retry_after=retry_after,retryable=retryable,quota=quota,quota_kind=quota_kind)
 
     @staticmethod
     def model_name(name):

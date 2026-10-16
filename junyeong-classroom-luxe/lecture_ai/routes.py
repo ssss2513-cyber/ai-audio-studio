@@ -15,6 +15,7 @@ class ApiKeySpec(BaseModel):
     id: str=Field(default='',max_length=32)
     label: str=Field(default='',max_length=40)
     project: str=Field(default='',max_length=100)
+    share_project_quota: bool=False
     api_key: str=Field(default='',max_length=256)
     enabled: bool=True
     remove: bool=False

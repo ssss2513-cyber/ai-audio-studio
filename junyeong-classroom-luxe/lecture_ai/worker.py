@@ -290,9 +290,8 @@ class Worker:
         if self.thread and self.thread.is_alive():return
         self.stop.clear()
         self.keys.records()
-        key_status=self.keys.snapshot()
-        print('LECTURE_KEYS '+json.dumps(dict(configured=len(key_status),
-            available=sum(k['status']=='ready' for k in key_status),parallel_limit=self.keys.capacity())),flush=True)
+        if self.keys.repair_legacy_project_waits():self.wake_available_keys()
+        self.keys.report('startup')
         cfg=self.lib.config()
         if not cfg.get('key_pool_queue_migrated'):
             # Preserve known exhaustion on the imported key; the pool now schedules its reset.
@@ -335,7 +334,12 @@ class Worker:
         while not self.stop.is_set():
             cfg=self.lib.config()
             if cfg.get('queue_blocked') or float(cfg.get('provider_retry_at') or 0)>time.time():
-                self.wake.wait(15);self.wake.clear();continue
+                # A key can be added while a previous request is returning its pool wait.
+                # Re-evaluate the pool instead of allowing that stale global wait to block new keys.
+                if cfg.get('provider_retry_scope') and self.keys.has_available(cfg['provider_retry_scope']):
+                    self.wake_available_keys()
+                else:
+                    self.wake.wait(15);self.wake.clear();continue
             with self.lock:
                 with self.lib.connect() as c:
                     row=c.execute("SELECT id FROM lectures WHERE pause=0 AND (status='queued' OR (status='retrying' AND retry_at<=?)) ORDER BY created_at LIMIT 1",(time.time(),)).fetchone()
@@ -353,7 +357,8 @@ class Worker:
                         error=str(error),retry_at=0 if paused else error.retry_at,
                         phase='일시정지' if paused else '사용 가능한 API 키 대기',phase_at=now())
                     if not paused:
-                        self.lib.configure(provider_retry_at=error.retry_at,queue_blocked='' if error.retry_at else str(error))
+                        self.lib.configure(provider_retry_at=error.retry_at,provider_retry_scope=error.scope,queue_blocked='' if error.retry_at else str(error))
+                    self.keys.report('waiting')
                 except Exception as err:
                     safe=str(err) if isinstance(err,(ProviderError,ValueError,RuntimeError)) else '분석 연결이 중단되었습니다. 이어서 분석을 눌러 주세요.'
                     if self.defer_error(row[0],err):continue
@@ -368,7 +373,7 @@ class Worker:
             else:self.wake.wait(3);self.wake.clear()
 
     def wake_available_keys(self):
-        self.lib.configure(queue_blocked='',provider_retry_at=0)
+        self.lib.configure(queue_blocked='',provider_retry_at=0,provider_retry_scope='')
         with self.lib.connect() as c:
             c.execute("UPDATE lectures SET status='queued',retry_at=0,retry_count=0 WHERE pause=0 AND (status='retrying' OR (status='error' AND (error LIKE '%API 키%' OR error LIKE '%429%' OR error LIKE '%401%' OR error LIKE '%403%'))) ")
         self.wake.set()

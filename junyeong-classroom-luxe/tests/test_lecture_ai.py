@@ -78,8 +78,8 @@ class LectureTests(unittest.TestCase):
 
     def configure(self):lib.configure(key_encrypted=core.enc('test-key'))
 
-    def pool_keys(self,count=2,project=''):
-        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(label=f'키 {i+1}',api_key=f'private-key-{i}',project=project) for i in range(count)],'parallelism':10})
+    def pool_keys(self,count=2,project='',share_project_quota=False):
+        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(label=f'키 {i+1}',api_key=f'private-key-{i}',project=project,share_project_quota=share_project_quota) for i in range(count)],'parallelism':10})
         self.assertEqual(response.status_code,200,response.text)
         return response.json()['keys']
 
@@ -104,14 +104,70 @@ class LectureTests(unittest.TestCase):
     def test_duplicate_key_and_shared_project_quota_are_handled(self):
         duplicate=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(api_key='same-key-123'),dict(api_key='same-key-123')]})
         self.assertEqual(duplicate.status_code,422)
-        keys=self.pool_keys(2,project='same-project')
+        keys=self.pool_keys(2,project='same-project',share_project_quota=True)
         worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay','quotaValue':'20'}]))
-        self.assertTrue(all(k['status']=='daily' for k in worker.keys.snapshot()))
+        self.assertEqual([k['status'] for k in worker.keys.snapshot()],['daily','shared'])
+        self.assertEqual([k['origin'] for k in worker.keys.snapshot()],['provider','project'])
         with self.assertRaises(PoolUnavailable) as blocked:worker.keys.acquire('generation',None,set())
         self.assertGreater(blocked.exception.retry_at,time.time())
         # Embedding has a distinct model quota; an exhausted generation quota does not discard its cache.
         row=worker.keys.acquire('embedding',None,set());worker.keys.release(row['id'])
         self.assertEqual(worker.keys.capacity(),1)
+
+    def test_same_display_name_does_not_exhaust_other_nine_keys(self):
+        keys=self.pool_keys(10,project='Default Gemini Project')
+        worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay','quotaValue':'20'}]))
+        snapshot=worker.keys.snapshot()
+        self.assertEqual(sum(k['status']=='daily' for k in snapshot),1)
+        self.assertEqual(sum(k['status']=='ready' for k in snapshot),9)
+        row=worker.keys.acquire('generation',None,set())
+        self.assertNotEqual(row['id'],keys[0]['id']);worker.keys.release(row['id'])
+        self.assertEqual(worker.keys.capacity(),10)
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out):worker.keys.report('diagnostic')
+        self.assertNotIn('private-key-',out.getvalue())
+        self.assertNotIn('Default Gemini Project',out.getvalue())
+        self.assertEqual(json.loads(out.getvalue().split(' ',1)[1])['available'],9)
+
+    def test_legacy_copied_project_waits_rechecked_once_direct_waits_retained(self):
+        keys=self.pool_keys(3,project='Default Gemini Project');rows=worker.keys.records()
+        old=dict(reason='daily',until=time.time()+3600,error='동일한 기존 기록')
+        for row in rows[:2]:row['states']={'generation':dict(old)}
+        rows[2]['project']='other-project';rows[2]['states']={'generation':dict(old)}
+        lib.configure(api_keys=rows)
+        self.assertEqual(worker.keys.repair_legacy_project_waits(),2)
+        self.assertEqual([k['status'] for k in worker.keys.snapshot()],['ready','ready','daily'])
+        worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay'}]))
+        self.assertEqual(worker.keys.repair_legacy_project_waits(),0)
+        self.assertEqual(worker.keys.snapshot()[0]['status'],'daily')
+
+    def test_disabling_shared_wait_preserves_direct_provider_failure(self):
+        keys=self.pool_keys(2,project='same-project',share_project_quota=True)
+        worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay'}]))
+        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(id=k['id'],project='same-project',share_project_quota=False) for k in keys]})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual([k['status'] for k in response.json()['keys']],['daily','ready'])
+
+    def test_new_available_key_wakes_stale_pool_wait_without_overriding_pause(self):
+        self.pool_keys(1);vid=seed_video();self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        lib.update(vid,status='retrying',retry_at=time.time()+3600)
+        lib.configure(provider_retry_at=time.time()+3600,provider_retry_scope='generation')
+        worker.stop.clear()
+        try:
+            with patch.object(worker,'process',side_effect=lambda lid:worker.stop.set()) as process:worker.run()
+        finally:worker.stop.clear()
+        process.assert_called_once_with(vid)
+        self.assertFalse(lib.config()['provider_retry_at'])
+
+    def test_zero_message_without_quota_value_remains_zero_not_minute_wait(self):
+        keys=self.pool_keys(1)
+        raw=urllib.error.HTTPError('https://example.invalid',429,'quota',{},io.BytesIO(json.dumps({'error':{'message':'Quota exceeded, limit: 0','status':'RESOURCE_EXHAUSTED'}}).encode()))
+        error=Gemini.http_error(raw,'분석')
+        worker.keys.failed(keys[0]['id'],'generation',error)
+        self.assertEqual(worker.keys.snapshot()[0]['status'],'quota_zero')
+        with self.assertRaises(PoolUnavailable) as raised:worker.keys.acquire('generation',None,set())
+        self.assertEqual(raised.exception.retry_at,0)
+        self.assertIn('허용량 0 1개',str(raised.exception))
 
     def test_key_rotation_reuploads_with_correct_owner_and_keeps_checkpoint(self):
         self.pool_keys(2);vid=seed_video()

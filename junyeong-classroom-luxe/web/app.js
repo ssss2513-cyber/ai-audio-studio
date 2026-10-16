@@ -146,7 +146,7 @@ function guide(){return `${pageTitle('A GENTLE GUIDE','처음부터, 함께 천�
  ['비밀번호가 기억나지 않아요.','운영자에게 문의해 주세요. 입력한 전화번호만으로 계정을 넘겨주거나 비밀번호를 바꾸지 않습니다. 비밀번호 원문은 운영자도 볼 수 없습니다.'],
  ['움직이는 효과를 끄고 싶어요.','상단의 “모션 끄기”를 눌러 주세요. 영상 시청 중에는 배경 장식의 움직임도 멈춥니다. 휴대폰의 동작 줄이기 설정 역시 반영합니다.']
  ].map(([t,d])=>`<details class="help-item"><summary>${t}</summary><p>${d}</p></details>`).join('')}<div class="notice" style="margin-top:35px"><h3>도움이 필요하신가요?</h3><p>아래 이메일로 문의해 주세요. 비밀번호는 보내지 마세요.</p><a class="subtle-link" href="mailto:${esc(S.meta.contact)}">${esc(S.meta.contact)} ↗</a></div></section>`;}
-function adminShell(content){const tabs=[['overview','현황'],['videos','영상 관리'],['members','회원 관리'],['settings','서비스 설정'],['audits','처리 기록']];return `<div class="admin-layout"><aside class="admin-sidebar"><div class="eyebrow">CURATOR'S DESK</div>${tabs.map(([k,t])=>`<button class="${S.tab===k?'active':''}" data-tab="${k}">${t}</button>`).join('')}<p>섬세하게 관리하고,<br>편안하게 연결해요.<br><br>ROSE ATELIER<br>Version 1.0.0</p></aside><section class="admin-content">${content}</section></div>`;}
+function adminShell(content){const tabs=[['overview','현황'],['videos','영상 관리'],['members','회원 관리'],['settings','서비스 설정'],['audits','처리 기록']];return `<div class="admin-layout"><aside class="admin-sidebar"><div class="eyebrow">CURATOR'S DESK</div><button data-go="assistant">강의 비서 · AI 분석 ↗</button>${tabs.map(([k,t])=>`<button class="${S.tab===k?'active':''}" data-tab="${k}">${t}</button>`).join('')}<p>섬세하게 관리하고,<br>편안하게 연결해요.<br><br>ROSE ATELIER<br>Version 1.0.0</p></aside><section class="admin-content">${content}</section></div>`;}
 function actionLabel(a){return actions[a]||({join:'회원가입',login:'로그인',view_contact:'회원 연락처 열람',export_csv:'회원 명단 내보내기',update_settings:'서비스 설정 변경',upload_start:'영상 업로드 시작',upload_finish:'영상 업로드 완료',upload_cancel:'업로드 취소',video_publish:'영상 공개',video_private:'영상 비공개',video_trash:'영상 휴지통 이동',video_purge:'영상 영구 삭제',video_restore:'영상 복원',video_edit:'영상 정보 수정',poster:'썸네일 변경',create_admin:'운영자 계정 생성'}[a]||a);}
 async function admin(){
  if(!S.member||S.member.role!=='admin')return authForm('login',true);
@@ -171,7 +171,7 @@ async function admin(){
 }
 async function render(){
  const seq=++S.render;header();const view=location.hash.slice(1)||(location.pathname==='/admin'?'admin':'home');
- try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='tools')html=await yadamTools();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;document.body.classList.toggle('yadam-home',view==='home');$('#main').innerHTML=html;header();if(view==='home')void loadYadamFeature();}
+ try{let html;if(view==='home')html=home();else if(view==='classes')html=await classes();else if(view==='tools')html=await yadamTools();else if(view==='assistant')html=await lectureAssistantPage();else if(view==='join'||view==='login')html=authForm(view);else if(view==='guide')html=guide();else if(view==='admin')html=await admin();else html=account();if(seq!==S.render)return;document.body.classList.toggle('yadam-home',view==='home');$('#main').innerHTML=html;header();if(view==='home')void loadYadamFeature();}
  catch(e){if(seq!==S.render)return;$('#main').innerHTML=`<div class="error-page">${empty('화면을 불러오지 못했습니다',e.message)}<div class="button-row" style="margin-top:20px"><button class="primary" data-action="refresh">다시 확인</button><button class="outline" data-go="login">로그인</button></div></div>`;}
 }
 async function refresh(){const [m,a]=await Promise.all([api('/meta'),api('/session')]);S.meta=m;S.member=a.member;S.csrf=a.csrf;S.catalogue=(await api('/catalogue')).items;await render();}
@@ -406,5 +406,6 @@ let off=matchMedia('(prefers-reduced-motion: reduce)').matches;try{off=off||loca
 if(window.JC_DEMO)$('#preview-bar').hidden=false;
 $('#main').innerHTML='<div class="loading">나를 위한 배움의 공간을 준비하고 있어요.</div>';
 refresh().catch(e=>{$('#main').innerHTML=`<div class="error-page"><div class="notice"><h3>프로그램 연결을 확인해 주세요.</h3><p>${esc(e.message)}</p><button class="outline" data-action="refresh">다시 확인</button></div></div>`;});
+
 
 

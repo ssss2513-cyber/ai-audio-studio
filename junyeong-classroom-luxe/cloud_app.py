@@ -77,7 +77,7 @@ def recover_admin(body: Recover, req: Request):
 @app.get('/api/health')
 def health():
  with core.db() as c: c.execute('SELECT 1').fetchone()
- return {'ok':True,'brand':'Maison Lumiel','version':'2.1.0','storage':'private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk'}
+ return {'ok':True,'brand':'Maison Lumiel','version':'2.2.0','lectureAssistant':True,'storage':'google-drive' if os.getenv('GOOGLE_DRIVE_FOLDER_ID') else ('private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk')}
 
 if os.getenv('S3_BUCKET'):
  import cloud_storage
@@ -119,13 +119,18 @@ def drive_sync(req: Request):
  import requests
  params={
   'q':f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
-  'fields':'files(id,name,mimeType,size,modifiedTime,videoMediaMetadata)',
+  'fields':'nextPageToken,files(id,name,mimeType,size,modifiedTime,videoMediaMetadata)',
   'pageSize':'1000',
-  'orderBy':'name'
+  'orderBy':'name', 'supportsAllDrives':'true', 'includeItemsFromAllDrives':'true'
  }
- r=requests.get('https://www.googleapis.com/drive/v3/files',headers=_drive_auth_headers(),params=params,timeout=30)
- if r.status_code!=200: core.fail(502,'Google Drive 영상 목록을 읽지 못했습니다. 폴더 공유와 Drive API 설정을 확인해 주세요.')
- files=r.json().get('files',[])
+ files=[]
+ while True:
+  r=requests.get('https://www.googleapis.com/drive/v3/files',headers=_drive_auth_headers(),params=params,timeout=30)
+  if r.status_code!=200: core.fail(502,'Google Drive 영상 목록을 읽지 못했습니다. 폴더 공유와 Drive API 설정을 확인해 주세요.')
+  page=r.json();files.extend(page.get('files',[]))
+  token=page.get('nextPageToken')
+  if not token:break
+  params['pageToken']=token
  added=0; updated=0
  with core.db() as c:
   for f in files:
@@ -221,3 +226,9 @@ def brand_intro(req: Request):
 @app.api_route('/api/public/brand-poster.jpg',methods=['GET','HEAD'])
 def brand_intro_poster(req: Request):
  return _public_brand_media(req,'13ayyUIBfCoWuTH9ghVCwHDNvrxhWJ4AP','image/jpeg',86400)
+
+
+
+# Drive-backed cumulative lecture assistant, using the existing member sessions.
+from lecture_ai.routes import install as install_lecture_ai
+install_lecture_ai(core, _drive_auth_headers)

@@ -20,6 +20,24 @@ if not marker.exists():
   c.execute('UPDATE settings SET value=? WHERE id=1',(json.dumps(s,ensure_ascii=False),))
  marker.write_text('2')
 
+
+# Owner-requested change: new memberships must be pending until manually approved.
+# Applied ONCE to the durable SQLite settings, without resetting existing members,
+# their approval states, video records, or any other service preferences.
+approval_migration = core.DATA/'manual-approval-20261017.v1'
+if not approval_migration.exists():
+ with core.db() as c:
+  c.execute('BEGIN IMMEDIATE')
+  row=c.execute('SELECT value FROM settings WHERE id=1').fetchone()
+  current=json.loads(row['value'])
+  if current.get('autoApprove',False):
+   current['autoApprove']=False
+   current['revision']=int(current.get('revision',0))+1
+   c.execute('UPDATE settings SET value=? WHERE id=1',
+             (json.dumps(current,ensure_ascii=False),))
+  core.audit(c,'operator-request','settings','disable_auto_approval')
+ approval_migration.write_text('manual-approval-enabled',encoding='utf-8')
+
 class Setup(BaseModel):
  token: str=Field(min_length=32,max_length=150)
  password: str=Field(min_length=8,max_length=128)

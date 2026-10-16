@@ -325,8 +325,11 @@ function lumielAdminSetupPanel(){
  '<span id="lumiel-yadam-key-status" class="luxe-yadam-config-status">확인 중…</span></div>'+
  '<p>API 키는 서버에 암호화해 보관하며 홈페이지 방문자에게 노출하지 않습니다. 6시간마다 영상 표본을 새로 확인합니다.</p>'+
  '<form id="lumiel-yadam-key-form" autocomplete="off">'+
- '<label class="field"><span>YouTube Data API 키</span>'+
- '<input id="lumiel-yadam-key" name="apiKey" type="password" autocomplete="off" maxlength="200" required placeholder="Google Cloud에서 발급한 키를 입력하세요"></label>'+
+ '<div class="field lumiel-key-entry"><label for="lumiel-yadam-key">YouTube Data API 키</label>'+
+ '<input id="lumiel-yadam-key" name="apiKey" type="text" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" maxlength="200" required aria-describedby="lumiel-key-input-status" placeholder="발급받은 API 키를 여기에 입력하거나 붙여넣으세요">'+
+ '<div class="lumiel-key-controls"><button type="button" class="outline small" data-lumiel-paste-key="true">복사한 키 붙여넣기</button>'+
+ '<button type="button" class="outline small" data-lumiel-toggle-key="true" aria-pressed="false">키 숨기기</button></div>'+
+ '<small id="lumiel-key-input-status" role="status" aria-live="polite">입력한 키가 이곳에 표시됩니다. 다른 사람이 화면을 볼 때는 숨기기를 눌러 주세요.</small></div>'+
  '<div class="button-row"><button type="submit" class="primary">키 연결하고 저장</button>'+
  '<button type="button" class="outline" data-lumiel-clear-key="true">키 연결 해제</button></div></form>'+
  '<p class="form-note">Google Cloud에서 YouTube Data API v3가 활성화된 키를 입력하세요. 계정 비밀번호가 아니라 API 키입니다.</p>'+
@@ -414,13 +417,37 @@ const lumielPageObserver=new MutationObserver(lumielEnhancePage);
 const lumielMain=document.getElementById('main');
 if(lumielMain)lumielPageObserver.observe(lumielMain,{childList:true});
 document.addEventListener('click',async function(event){
- const btn=event.target.closest('[data-lumiel-order-open],[data-lumiel-move-up],[data-lumiel-move-down],#lumiel-order-save,[data-lumiel-clear-key]');
+ const btn=event.target.closest('[data-lumiel-order-open],[data-lumiel-move-up],[data-lumiel-move-down],#lumiel-order-save,[data-lumiel-clear-key],[data-lumiel-paste-key],[data-lumiel-toggle-key]');
  if(!btn)return;
  event.preventDefault();event.stopImmediatePropagation();
  if(btn.dataset.lumielOrderOpen)lumielOrderOpen();
  else if(btn.dataset.lumielMoveUp)lumielOrderMove(btn.dataset.lumielMoveUp,-1);
  else if(btn.dataset.lumielMoveDown)lumielOrderMove(btn.dataset.lumielMoveDown,1);
  else if(btn.id==='lumiel-order-save')await lumielOrderSave(btn);
+ else if(btn.dataset.lumielPasteKey){
+  const input=document.getElementById('lumiel-yadam-key');
+  if(!input)return;
+  try{
+   const text=(await navigator.clipboard.readText()).trim();
+   if(!text){toast('복사한 API 키가 없습니다. 키를 복사한 뒤 다시 눌러 주세요.');input.focus();return;}
+   input.value=text.slice(0,200);
+   input.dispatchEvent(new Event('input',{bubbles:true}));
+   input.focus();
+   toast('API 키를 입력칸에 붙여넣었습니다. 저장 버튼을 눌러 주세요.');
+  }catch(error){
+   input.focus();
+   toast('자동 붙여넣기가 제한되었습니다. 입력칸을 눌러 Ctrl+V로 붙여넣어 주세요.');
+  }
+ }
+ else if(btn.dataset.lumielToggleKey){
+  const input=document.getElementById('lumiel-yadam-key');
+  if(!input)return;
+  const hidden=input.type==='text';
+  input.type=hidden?'password':'text';
+  btn.textContent=hidden?'키 표시하기':'키 숨기기';
+  btn.setAttribute('aria-pressed',String(hidden));
+  input.focus();
+ }
  else if(btn.dataset.lumielClearKey&&confirm('YouTube API 키 연결을 해제하시겠습니까?')){
   try{await api('/admin/yadam-config','POST',{clear:true});toast('API 키 연결이 해제되었습니다.');lumielCheckKeyStatus();}
   catch(e){toast(e.message);}
@@ -428,6 +455,13 @@ document.addEventListener('click',async function(event){
 },true);
 document.addEventListener('change',function(event){
  if(event.target.id==='lumiel-order-playlist')lumielOrderSelect(event.target.value);
+},true);
+document.addEventListener('input',function(event){
+ if(event.target.id!=='lumiel-yadam-key')return;
+ const info=document.getElementById('lumiel-key-input-status');
+ if(!info)return;
+ const count=event.target.value.trim().length;
+ info.textContent=count?'키 '+count+'자 입력됨 · 내용은 저장 버튼을 누른 후 서버에서 검증합니다.':'키를 직접 입력하거나 붙여넣기 버튼을 눌러 주세요.';
 },true);
 document.addEventListener('submit',async function(event){
  const form=event.target;

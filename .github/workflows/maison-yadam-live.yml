@@ -25,6 +25,9 @@ jobs:
         run: |
           node --check web/app.js
           node --check web/lumiel.js
+      - name: Check manual-approval rules
+        working-directory: junyeong-classroom-luxe
+        run: python -m unittest discover -s tests -p 'test_manual_approval.py' -v
       - name: Confirm brand build retains new feature
         working-directory: junyeong-classroom-luxe
         run: |

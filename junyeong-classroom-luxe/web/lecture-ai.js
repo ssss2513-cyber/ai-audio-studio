@@ -1,8 +1,10 @@
 'use strict';
 const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null};
-const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
+const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',retrying:'자동 재개 대기',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
 const laKeyState=cfg=>cfg.configured?'✓ API 키 저장됨 · 보안을 위해 값은 다시 표시하지 않습니다. 변경할 때만 새 키를 입력하세요.':'Google AI Studio에서 발급한 Gemini API 키를 한 번 등록해 주세요.';
 const laTime=n=>{n=Math.max(0,Math.floor(Number(n)||0));return [Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':');};
+const laResumeTime=n=>new Date(Number(n)*1000).toLocaleTimeString('ko-KR',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+const laQueueStatus=d=>d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:Number(d.queue_retry_at)>Date.now()/1000?`AI 서버 응답 지연으로 잠시 대기합니다. 한국 시간 ${laResumeTime(d.queue_retry_at)}부터 자동으로 이어서 분석합니다. 저장된 구간은 유지됩니다.`:'';
 
 async function lectureAssistantPage(){
  clearTimeout(LA.poll);
@@ -13,7 +15,7 @@ async function lectureAssistantPage(){
  const tabs=d.admin?`<div class="la-tabs" role="group" aria-label="강의 비서 메뉴">${[['chat','질문하기'],['manage','강의 분석'],['settings','AI 설정']].map(([k,t])=>`<button class="${LA.tab===k?'primary':'outline'} small" data-la-tab="${k}">${t}</button>`).join('')}</div>`:'';
  let html='';
  if(LA.tab==='manage'){
-  html=`<div class="la-help"><b>늘 하던 대로 Drive에 올려 주세요.</b><p>① 영상 불러오기 → ② 새 강의 분석 → ③ 질문 가능 표시 확인. 원본은 Drive에 두고 분석 내용만 누적합니다. 6시간 강의는 약 72개 구간으로 나누어 처리합니다.</p><p>영상의 음성과 화면을 Google Gemini로 분석합니다. 사용량에 따라 API 요금이 발생할 수 있습니다.</p></div><div class="button-row"><button class="outline" data-la-action="sync">Drive 영상 불러오기</button><button class="primary" data-la-action="queue" ${d.configured?'':'disabled'}>새 강의 모두 분석</button><button class="text-btn" data-la-action="refresh">새로고침</button></div>${!d.configured?'<div class="notice">먼저 AI 설정에서 Gemini API 키를 등록해 주세요.</div>':''}<div id="la-queue-status" class="notice" ${d.queue_blocked?'':'hidden'}>${d.queue_blocked?esc('자동 분석 대기: '+d.queue_blocked):''}</div><div id="la-lecture-list" class="la-lecture-list">${laRows()}</div>`;
+  html=`<div class="la-help"><b>늘 하던 대로 Drive에 올려 주세요.</b><p>① 영상 불러오기 → ② 새 강의 분석 → ③ 질문 가능 표시 확인. 원본은 Drive에 두고 분석 내용만 누적합니다. 6시간 강의는 약 72개 구간으로 나누어 처리합니다.</p><p>영상의 음성과 화면을 Google Gemini로 분석합니다. 사용량에 따라 API 요금이 발생할 수 있습니다.</p></div><div class="button-row"><button class="outline" data-la-action="sync">Drive 영상 불러오기</button><button class="primary" data-la-action="queue" ${d.configured?'':'disabled'}>새 강의 모두 분석</button><button class="text-btn" data-la-action="refresh">새로고침</button></div>${!d.configured?'<div class="notice">먼저 AI 설정에서 Gemini API 키를 등록해 주세요.</div>':''}<div id="la-queue-status" class="notice" ${laQueueStatus(d)?'':'hidden'}>${esc(laQueueStatus(d))}</div><div id="la-lecture-list" class="la-lecture-list">${laRows()}</div>`;
   LA.poll=setTimeout(laPoll,8000);
  }else if(LA.tab==='settings'){
   const cfg=await api('/admin/ai/settings');
@@ -27,9 +29,10 @@ async function lectureAssistantPage(){
 function laRows(){
  if(!LA.items.length)return '<div class="panel"><h3>연결된 Drive 강의가 없습니다.</h3><p>Drive에 영상을 올린 뒤 위의 영상 불러오기를 눌러 주세요.</p></div>';
  return LA.items.map(v=>{
-  const active=['queued','analyzing'].includes(v.status);
+  const active=['queued','analyzing','retrying'].includes(v.status);
   const percent=v.total?Math.floor(100*v.completed/v.total):0;
-  return `<article class="la-lecture"><div><small>${esc(v.playlist)} · ${v.state==='private'?'관리자 전용':'수강생 공개'}</small><h3>${esc(v.title)}</h3><span class="pill ${v.status==='ready'?'approved':v.status==='error'?'blocked':'pending'}">${esc(laLabels[v.status]||v.status)}</span>${v.total?` <span>${v.completed} / ${v.total}구간 · ${percent}%</span><progress max="${v.total}" value="${v.completed}" aria-label="${esc(v.title)} 분석 진행률"></progress>`:''}${v.phase?`<p class="la-note">현재 단계: ${esc(v.phase)}</p>`:''}${v.model_used?`<p class="form-note">사용 모델: ${esc(v.model_used)}</p>`:''}${v.error?`<p class="la-error">${esc(v.error)}</p>`:''}${v.warning?`<p class="la-note">${esc(v.warning)}</p>`:''}${v.pause&&active?'<p>현재 구간 저장 후 멈춥니다.</p>':''}</div><div class="button-row">${active?`<button class="outline small" data-la-job="pause" data-id="${esc(v.id)}" ${v.pause?'disabled':''}>일시정지</button>`:`${v.status!=='ready'?`<button class="primary small" data-la-job="start" data-id="${esc(v.id)}" ${LA.configured?'':'disabled'}>${v.status==='new'?'AI 분석':'이어서 분석'}</button>`:''}${v.warning&&v.status==='ready'?`<button class="outline small" data-la-job="reindex" data-id="${esc(v.id)}">색인 보완</button>`:''}${v.status!=='new'?`<button class="text-btn" data-la-job="rebuild" data-id="${esc(v.id)}">다시 분석</button>`:''}`}</div></article>`;
+  const phase=v.status==='retrying'?(Number(v.retry_at)>Date.now()/1000?`한국 시간 ${laResumeTime(v.retry_at)} 자동 재개 예정 · 저장된 다음 구간부터 처리합니다.`:'자동 재개 순서 대기 · 저장된 다음 구간부터 처리합니다.'):v.phase;
+  return `<article class="la-lecture"><div><small>${esc(v.playlist)} · ${v.state==='private'?'관리자 전용':'수강생 공개'}</small><h3>${esc(v.title)}</h3><span class="pill ${v.status==='ready'?'approved':v.status==='error'?'blocked':'pending'}">${esc(laLabels[v.status]||v.status)}</span>${v.total?` <span>${v.completed} / ${v.total}구간 · ${percent}%</span><progress max="${v.total}" value="${v.completed}" aria-label="${esc(v.title)} 분석 진행률"></progress>`:''}${phase?`<p class="la-note">현재 단계: ${esc(phase)}</p>`:''}${v.model_used?`<p class="form-note">사용 모델: ${esc(v.model_used)}</p>`:''}${v.error?`<p class="${v.status==='retrying'?'la-note':'la-error'}">${v.status==='retrying'?'최근 응답: ':''}${esc(v.error)}</p>`:''}${v.warning?`<p class="la-note">${esc(v.warning)}</p>`:''}${v.pause&&active?'<p>현재 구간 저장 후 멈춥니다.</p>':''}</div><div class="button-row">${active?`<button class="outline small" data-la-job="pause" data-id="${esc(v.id)}" ${v.pause?'disabled':''}>일시정지</button>`:`${v.status!=='ready'?`<button class="primary small" data-la-job="start" data-id="${esc(v.id)}" ${LA.configured?'':'disabled'}>${v.status==='new'?'AI 분석':'이어서 분석'}</button>`:''}${v.warning&&v.status==='ready'?`<button class="outline small" data-la-job="reindex" data-id="${esc(v.id)}">색인 보완</button>`:''}${v.status!=='new'?`<button class="text-btn" data-la-job="rebuild" data-id="${esc(v.id)}">다시 분석</button>`:''}`}</div></article>`;
  }).join('');
 }
 
@@ -41,7 +44,7 @@ function laMessages(){
 async function laPoll(){
  clearTimeout(LA.poll);
  if(location.hash!=='#assistant'||LA.tab!=='manage')return;
- try{const d=await api('/ai/lectures');LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;const list=$('#la-lecture-list');if(list)list.innerHTML=laRows();const notice=$('#la-queue-status');if(notice){notice.hidden=!d.queue_blocked;notice.textContent=d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:'';}}
+ try{const d=await api('/ai/lectures');LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;const list=$('#la-lecture-list');if(list)list.innerHTML=laRows();const notice=$('#la-queue-status');if(notice){const status=laQueueStatus(d);notice.hidden=!status;notice.textContent=status;}}
  catch(e){const notice=$('#la-queue-status');if(notice){notice.hidden=false;notice.textContent='진행 상태를 불러오지 못했습니다. 잠시 후 자동으로 다시 확인합니다.';}}
  LA.poll=setTimeout(laPoll,8000);
 }

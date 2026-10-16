@@ -255,13 +255,14 @@ class Gemini:
         except ProviderError as error:
             # Same provider and key; only server-side availability errors trigger the configured alternate.
             # Authentication, billing/quota, bad input and safety errors must never silently switch models.
-            if error.code not in (500,502,503,504) or not self.fallback_model or selected==self.fallback_model:raise
+            alternative=self.fallback_model if selected==self.model else self.model
+            if error.code not in (500,502,503,504) or not alternative or alternative==selected:raise
             available=self._models or self.models()
-            if self.fallback_model not in available['generation']:raise error
-            self.event('fallback',stage,model=self.fallback_model,code=error.code)
-            data,_=self.request('/v1beta/models/'+self.fallback_model+':generateContent',payload,
-                stage=stage+' · '+self.fallback_model,attempts=3,timeout=90 if kind=='connection' else 600)
-            self.effective_model=self.fallback_model
+            if alternative not in available['generation']:raise error
+            self.event('fallback',stage,model=alternative,code=error.code)
+            data,_=self.request('/v1beta/models/'+alternative+':generateContent',payload,
+                stage=stage+' · '+alternative,attempts=3,timeout=90 if kind=='connection' else 600)
+            self.effective_model=alternative
         if self.usage:
             self.usage(kind,data.get('usageMetadata',{}))
         candidates=data.get('candidates',[])

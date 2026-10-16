@@ -19,7 +19,7 @@ import app as core
 from fastapi.testclient import TestClient
 from lecture_ai.routes import install
 from lecture_ai.worker import DriveSource,make_clip,probe,validate_segments
-from lecture_ai.store import clip_windows
+from lecture_ai.store import Library,clip_windows
 from lecture_ai.provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL
 
 worker=install(core,lambda:{'Authorization':'Bearer test-only'})
@@ -120,19 +120,84 @@ class LectureTests(unittest.TestCase):
         finally:worker.stop.clear()
 
     def test_one_time_recovery_preserves_user_pause(self):
-        self.configure();first=seed_video();paused=seed_video()
+        self.configure();first=seed_video();paused=seed_video();recent=seed_video()
         self.admin.post('/api/admin/ai/queue-new',json={})
         lib.update(first,status='error',error='AI 연결 오류 (503): retry')
-        lib.update(paused,status='error',error='AI 연결 오류 (429): quota',pause=1)
+        lib.update(paused,status='error',error='강의 분석 실패 (HTTP 503 / UNAVAILABLE)',pause=1)
+        lib.update(recent,status='error',error='강의 분석 실패 (HTTP 503 / UNAVAILABLE)')
         try:
             with patch('lecture_ai.worker.threading.Thread'):
                 worker.thread=None;worker.start()
                 self.assertEqual(lib.lecture(first)['status'],'queued')
                 self.assertEqual(lib.lecture(paused)['status'],'error')
+                self.assertEqual(lib.lecture(recent)['status'],'retrying')
                 lib.update(first,status='error')
+                lib.update(recent,status='error')
                 worker.thread=None;worker.start()
                 self.assertEqual(lib.lecture(first)['status'],'error')
+                self.assertEqual(lib.lecture(recent)['status'],'error')
         finally:worker.thread=None
+
+    def test_transient_failure_persists_and_cools_down_the_whole_queue(self):
+        self.configure();first=seed_video();second=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+first,json={'action':'start'})
+        self.admin.post('/api/admin/ai/lectures/'+second,json={'action':'start'})
+        lib.save_part(first,0,[dict(text='저장한 내용')])
+        worker.stop.clear();worker.wake.clear()
+        def stop_wait(*args):worker.stop.set()
+        try:
+            with patch.object(worker,'process',side_effect=ProviderError('일시 서버 오류',code=503)) as process,patch.object(worker.wake,'wait',side_effect=stop_wait):
+                worker.run()
+            process.assert_called_once_with(first)
+            persisted=Library(lib.root)
+            row=persisted.lecture(first)
+            self.assertEqual(row['status'],'retrying')
+            self.assertEqual(row['retry_count'],1)
+            self.assertGreater(row['retry_at'],time.time()+110)
+            self.assertEqual(persisted.config()['provider_retry_at'],row['retry_at'])
+            self.assertEqual(persisted.parts_done(first),{0})
+            self.assertEqual(persisted.lecture(second)['status'],'queued')
+            data=self.admin.get('/api/ai/lectures').json()
+            self.assertEqual(data['queue_retry_at'],row['retry_at'])
+            self.assertEqual(next(v for v in data['items'] if v['id']==first)['retry_at'],row['retry_at'])
+            worker.stop.clear()
+            def finish(lid):
+                self.assertEqual(lib.parts_done(lid),{0})
+                lib.update(lid,status='ready');worker.stop.set()
+            with patch('lecture_ai.worker.time.time',return_value=row['retry_at']+1),patch.object(worker,'process',side_effect=finish) as resumed:
+                worker.run()
+            resumed.assert_called_once_with(first)
+        finally:worker.stop.clear()
+
+    def test_user_pause_cancels_scheduled_resume(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        self.assertTrue(worker.defer_error(vid,ProviderError('일시 오류',code=503)))
+        due=lib.lecture(vid)['retry_at']
+        self.assertEqual(self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'pause'}).status_code,200)
+        self.assertEqual(lib.lecture(vid)['status'],'paused')
+        self.assertEqual(lib.lecture(vid)['retry_at'],0)
+        worker.stop.clear()
+        try:
+            with patch('lecture_ai.worker.time.time',return_value=due+1),patch.object(worker,'process') as process,patch.object(worker.wake,'wait',side_effect=lambda *a:worker.stop.set()):
+                worker.run()
+            process.assert_not_called()
+        finally:worker.stop.clear()
+
+    def test_retry_budget_resets_after_progress_and_is_bounded(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        error=ProviderError('서버 일시 오류',code=503,retry_after=180)
+        self.assertTrue(worker.defer_error(vid,error))
+        self.assertGreater(lib.lecture(vid)['retry_at'],time.time()+170)
+        lib.save_part(vid,0,[dict(text='저장 완료')])
+        self.assertEqual(lib.lecture(vid)['retry_count'],0)
+        self.assertTrue(worker.defer_error(vid,error))
+        self.assertEqual(lib.lecture(vid)['retry_count'],1)
+        lib.update(vid,retry_count=6)
+        self.assertFalse(worker.defer_error(vid,error))
+        self.assertIn('6회',lib.config()['queue_blocked'])
+        self.assertFalse(worker.defer_error(vid,ProviderError('사용량 소진',code=429,retryable=False)))
 
     def test_cumulative_queue_and_resume_preserves_parts(self):
         self.configure();v1=seed_video();v2=seed_video()
@@ -306,6 +371,24 @@ class ProviderTests(unittest.TestCase):
     def test_pause_interrupts_backoff(self):
         api=Gemini('test',cancelled=lambda:True)
         with self.assertRaises(ProviderCancelled):api.wait(30)
+
+    def test_fallback_can_return_to_primary_without_looping(self):
+        for both_fail in (False,True):
+            with self.subTest(both_fail=both_fail):
+                api=Gemini('test');api.effective_model=FALLBACK_MODEL
+                api._models={'generation':[api.model,FALLBACK_MODEL]}
+                calls=[]
+                def request(url,*args,**kwargs):
+                    calls.append(url)
+                    if FALLBACK_MODEL in url or both_fail:raise ProviderError('일시 오류',code=503)
+                    return {'candidates':[{'content':{'parts':[{'text':'{"ok":true}'}]}}]},{}
+                with patch.object(api,'request',side_effect=request):
+                    if both_fail:
+                        with self.assertRaises(ProviderError):api.generate([], '', {})
+                    else:
+                        self.assertTrue(api.generate([], '', {})['ok'])
+                        self.assertEqual(api.effective_model,api.model)
+                self.assertEqual(len(calls),2)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

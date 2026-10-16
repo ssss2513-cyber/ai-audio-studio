@@ -66,7 +66,7 @@ def install(core,auth_headers):
             with lib.connect() as c:
                 old=c.execute('SELECT * FROM lectures WHERE id=?',(lid,)).fetchone()
                 if action=='pause':
-                    if old:c.execute("UPDATE lectures SET pause=1,status=CASE WHEN status='queued' THEN 'paused' ELSE status END WHERE id=?",(lid,))
+                    if old:c.execute("UPDATE lectures SET pause=1,retry_at=0,status=CASE WHEN status IN ('queued','retrying') THEN 'paused' ELSE status END WHERE id=?",(lid,))
                     return 'paused'
                 if not configured():core.fail(409,'AI 설정에서 Gemini API 키를 먼저 등록해 주세요.')
                 if worker.active==lid or (old and old['status']=='analyzing'):
@@ -85,7 +85,7 @@ def install(core,auth_headers):
                         VALUES(?,?,?,?,?,?,?,'queued','video')''',
                         (lid,video['title'],registered,now(),video['title'],video['size'],video['external_id']))
                 else:
-                    c.execute("UPDATE lectures SET status='queued',pause=0,error='',phase='순서 대기',title=?,kind=? WHERE id=?",(video['title'],'reindex' if action=='reindex' or old['kind']=='reindex' else 'video',lid))
+                    c.execute("UPDATE lectures SET status='queued',pause=0,error='',phase='순서 대기',retry_at=0,retry_count=0,title=?,kind=? WHERE id=?",(video['title'],'reindex' if action=='reindex' or old['kind']=='reindex' else 'video',lid))
         lib.configure(queue_blocked='')
         worker.wake.set()
         return 'queued'
@@ -103,10 +103,11 @@ def install(core,auth_headers):
                 state=v['state'],status=r.get('status','new'),completed=r.get('completed',0),
                 total=r.get('total',0),chunks=r.get('chunks',0))
             if admin:item.update(error=r.get('error',''),warning=r.get('warning',''),pause=bool(r.get('pause')),
-                phase=r.get('phase',''),phase_at=r.get('phase_at',''),model_used=r.get('model_used',''))
+                phase=r.get('phase',''),phase_at=r.get('phase_at',''),model_used=r.get('model_used',''),retry_at=r.get('retry_at',0))
             items.append(item)
         return dict(items=items,configured=configured(),admin=admin,ready=sum(x['status']=='ready' for x in items),
-                    queue_blocked=lib.config().get('queue_blocked','') if admin else '')
+                    queue_blocked=lib.config().get('queue_blocked','') if admin else '',
+                    queue_retry_at=lib.config().get('provider_retry_at',0) if admin else 0)
 
     @core.app.get('/api/admin/ai/settings')
     def get_settings(req: Request):

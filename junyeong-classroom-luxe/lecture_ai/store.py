@@ -133,6 +133,8 @@ class Library:
             columns={r[1] for r in db.execute('PRAGMA table_info(lectures)')}
             for name in ('phase','phase_at','model_used'):
                 if name not in columns:db.execute(f"ALTER TABLE lectures ADD COLUMN {name} TEXT DEFAULT ''")
+            for name,kind in (('retry_at','REAL'),('retry_count','INTEGER')):
+                if name not in columns:db.execute(f'ALTER TABLE lectures ADD COLUMN {name} {kind} DEFAULT 0')
         with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
             os.chmod(self.path, 0o600)
@@ -177,7 +179,7 @@ class Library:
         return lid
 
     def update(self, lid, **values):
-        allowed={'status','duration','completed','total','error','media','sha256','pause','warning','title','lecture_date','kind','phase','phase_at','model_used'}
+        allowed={'status','duration','completed','total','error','media','sha256','pause','warning','title','lecture_date','kind','phase','phase_at','model_used','retry_at','retry_count'}
         if not values or not set(values)<=allowed:
             raise ValueError('수정할 수 없는 항목입니다.')
         with self.connect() as db:
@@ -202,7 +204,7 @@ class Library:
             db.execute('INSERT INTO parts VALUES(?,?,?) ON CONFLICT(lecture_id,part) DO UPDATE SET payload=excluded.payload',
                        (lid,part,json.dumps(segments,ensure_ascii=False)))
             done=db.execute('SELECT COUNT(*) FROM parts WHERE lecture_id=?',(lid,)).fetchone()[0]
-            db.execute('UPDATE lectures SET completed=? WHERE id=?',(done,lid))
+            db.execute('UPDATE lectures SET completed=?,retry_at=0,retry_count=0 WHERE id=?',(done,lid))
 
     def parts_done(self, lid):
         with self.connect() as db:

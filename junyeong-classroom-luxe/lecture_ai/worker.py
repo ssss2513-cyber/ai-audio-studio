@@ -10,10 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 from .store import clip_windows, now
 from .provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL, ANALYSIS_SCHEMA, ANALYSIS_SYSTEM
+
+RETRY_DELAYS=(120,300,600,1200,1800,3600)
 
 
 def validate_segments(raw, start, end):
@@ -151,9 +154,33 @@ class Worker:
         if event=='retry':
             self.phase(lid,f"{stage} · {details['seconds']}초 뒤 자동 재시도 ({details['attempt']}/{details['attempts']})")
         elif event=='fallback':
-            self.phase(lid,'기본 모델 응답 지연 · 대체 모델 연결 중',model_used=details['model'])
-            self.lib.update(lid,warning='기본 모델의 서버 오류로 '+details['model']+' 모델을 사용합니다.')
+            self.phase(lid,'AI 서버 응답 지연 · 다른 모델 연결 중',model_used=details['model'])
+            previous=self.lib.lecture(lid)['warning'] or ''
+            previous=re.sub(r'(?:기본 모델의|AI) 서버 오류로 [^\n]+? 모델을 사용합니다\.', '', previous).strip()
+            notes=[previous] if previous else []
+            self.lib.update(lid,warning='\n'.join([f"AI 서버 오류로 {details['model']} 모델을 사용합니다.",*notes]).strip())
         elif event=='request':self.phase(lid,stage)
+
+    def defer_error(self,lid,error):
+        """Durable bounded retries across restarts; completed parts are never resubmitted."""
+        if not isinstance(error,ProviderError) or not error.retryable:return False
+        with self.lock:
+            row=self.lib.lecture(lid)
+            if row['pause']:
+                self.lib.update(lid,status='paused',retry_at=0,phase='일시정지');return True
+            count=int(row['retry_count'] or 0)
+            if count>=len(RETRY_DELAYS):
+                self.lib.configure(queue_blocked='AI 연결 오류가 계속되어 자동 재개 6회 후 멈췄습니다. 저장된 구간은 유지됩니다. '+str(error))
+                return False
+            delay=max(RETRY_DELAYS[count],min(error.retry_after or 0,3600))
+            resume_at=time.time()+delay
+            self.lib.update(lid,status='retrying',error=str(error)[:1000],retry_at=resume_at,retry_count=count+1)
+            self.phase(lid,f'AI 연결 대기 · {round(delay/60)}분 뒤 자동 재개 ({count+1}/{len(RETRY_DELAYS)})')
+            # Cooling down the provider also stops other queued videos from hammering the same API.
+            self.lib.configure(provider_retry_at=resume_at)
+            print('LECTURE_RETRY '+json.dumps(dict(lecture_id=lid,code=error.code,retry_at=resume_at,
+                retry_count=count+1,completed=row['completed'])),flush=True)
+            return True
 
     def usage(self,kind,data):
         with self.lib.connect() as c:
@@ -204,16 +231,21 @@ class Worker:
                 row=c.execute("SELECT id FROM lectures WHERE status='error' AND pause=0 AND error LIKE '분석 시간 정보가 올바르지%' ORDER BY created_at LIMIT 1").fetchone()
                 if row:c.execute("UPDATE lectures SET status='queued',error='',phase='분석 결과 저장 복구' WHERE id=?",(row[0],))
             self.lib.configure(recovery_20261016_timing=True)
+        if not self.lib.config().get('recovery_20261016_backoff'):
+            with self.lib.connect() as c:
+                c.execute("UPDATE lectures SET status='retrying',retry_at=0,retry_count=0,phase='저장된 다음 구간부터 자동 재개' WHERE status='error' AND pause=0 AND (error LIKE '%HTTP 503%' OR error LIKE 'AI 연결 오류 (503)%')")
+            self.lib.configure(recovery_20261016_backoff=True)
         self.thread=threading.Thread(target=self.run,daemon=True,name='maison-lecture-worker')
         self.thread.start()
 
     def run(self):
         while not self.stop.is_set():
-            if self.lib.config().get('queue_blocked'):
+            cfg=self.lib.config()
+            if cfg.get('queue_blocked') or float(cfg.get('provider_retry_at') or 0)>time.time():
                 self.wake.wait(15);self.wake.clear();continue
             with self.lock:
                 with self.lib.connect() as c:
-                    row=c.execute("SELECT id FROM lectures WHERE status='queued' AND pause=0 ORDER BY created_at LIMIT 1").fetchone()
+                    row=c.execute("SELECT id FROM lectures WHERE pause=0 AND (status='queued' OR (status='retrying' AND retry_at<=?)) ORDER BY created_at LIMIT 1",(time.time(),)).fetchone()
                 self.active=row[0] if row else None
                 if row:self.lib.update(row[0],status='analyzing',error='')
             if row:
@@ -224,6 +256,7 @@ class Worker:
                         phase='일시정지' if paused else '서버 재시작 후 이어서 분석',phase_at=now())
                 except Exception as err:
                     safe=str(err) if isinstance(err,(ProviderError,ValueError,RuntimeError)) else '분석 연결이 중단되었습니다. 이어서 분석을 눌러 주세요.'
+                    if self.defer_error(row[0],err):continue
                     self.lib.update(row[0],status='error',error=safe[:1000])
                     self.phase(row[0],'처리 중단')
                     print('LECTURE_FAILURE '+json.dumps(dict(lecture_id=row[0],error=safe[:1000],type=type(err).__name__),ensure_ascii=False),flush=True)
@@ -305,6 +338,7 @@ class Worker:
                 except ProviderError:
                     self.lib.update(lid,warning='일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
                 self.lib.save_part(lid,i,segments,api.embedding_model,vectors)
+                self.lib.configure(provider_retry_at=0)
                 self.phase(lid,f'{i+1}/{len(windows)}구간 저장 완료',model_used=api.effective_model)
                 cache.unlink(missing_ok=True)
         self.video(lid)

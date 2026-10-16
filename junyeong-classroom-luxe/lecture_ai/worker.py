@@ -13,7 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 from .store import clip_windows, now
-from .provider import Gemini, ProviderError, ANALYSIS_SCHEMA, ANALYSIS_SYSTEM
+from .provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL, ANALYSIS_SCHEMA, ANALYSIS_SYSTEM
 
 
 def validate_segments(raw, start, end):
@@ -132,7 +132,21 @@ class Worker:
     def provider(self):
         cfg=self.lib.config()
         key=os.getenv('GEMINI_API_KEY','') or (self.core.dec(cfg['key_encrypted']) if cfg.get('key_encrypted') else '')
-        return Gemini(key,cfg.get('model','gemini-3.8-flash'),cfg.get('embedding_model','gemini-embedding-2'),self.usage)
+        return Gemini(key,cfg.get('model','gemini-3.8-flash'),cfg.get('embedding_model','gemini-embedding-2'),self.usage,
+            fallback_model=cfg.get('fallback_model',FALLBACK_MODEL))
+
+    def phase(self,lid,text,**details):
+        self.lib.update(lid,phase=text,phase_at=now(),**details)
+        print('LECTURE_JOB '+json.dumps(dict(lecture_id=lid,phase=text,**details),ensure_ascii=False),flush=True)
+
+    def provider_event(self,lid,event,stage,details):
+        if stage=='임시 영상 정리':return
+        if event=='retry':
+            self.phase(lid,f"{stage} · {details['seconds']}초 뒤 자동 재시도 ({details['attempt']}/{details['attempts']})")
+        elif event=='fallback':
+            self.phase(lid,'기본 모델 응답 지연 · 대체 모델 연결 중',model_used=details['model'])
+            self.lib.update(lid,warning='기본 모델의 서버 오류로 '+details['model']+' 모델을 사용합니다.')
+        elif event=='request':self.phase(lid,stage)
 
     def usage(self,kind,data):
         with self.lib.connect() as c:
@@ -172,11 +186,19 @@ class Worker:
         for p in self.temp.glob('*.mp4'):p.unlink(missing_ok=True)
         with self.lib.connect() as c:
             c.execute("UPDATE lectures SET status=CASE WHEN pause=1 THEN 'paused' ELSE 'queued' END WHERE status='analyzing'")
+        if not self.lib.config().get('recovery_20261016_v2'):
+            # Resume one previously requested job once after this repair; never override a user pause.
+            with self.lib.connect() as c:
+                row=c.execute("SELECT id FROM lectures WHERE status='error' AND pause=0 AND (error LIKE 'AI 연결 오류 (503)%' OR error LIKE 'AI 연결 오류 (429)%') ORDER BY created_at LIMIT 1").fetchone()
+                if row:c.execute("UPDATE lectures SET status='queued',error='',phase='연결 복구 후 이어서 분석' WHERE id=?",(row[0],))
+            self.lib.configure(recovery_20261016_v2=True)
         self.thread=threading.Thread(target=self.run,daemon=True,name='maison-lecture-worker')
         self.thread.start()
 
     def run(self):
         while not self.stop.is_set():
+            if self.lib.config().get('queue_blocked'):
+                self.wake.wait(15);self.wake.clear();continue
             with self.lock:
                 with self.lib.connect() as c:
                     row=c.execute("SELECT id FROM lectures WHERE status='queued' AND pause=0 ORDER BY created_at LIMIT 1").fetchone()
@@ -184,9 +206,18 @@ class Worker:
                 if row:self.lib.update(row[0],status='analyzing',error='')
             if row:
                 try:self.process(row[0])
+                except ProviderCancelled:
+                    paused=bool(self.lib.lecture(row[0])['pause'])
+                    self.lib.update(row[0],status='paused' if paused else 'queued',
+                        phase='일시정지' if paused else '서버 재시작 후 이어서 분석',phase_at=now())
                 except Exception as err:
                     safe=str(err) if isinstance(err,(ProviderError,ValueError,RuntimeError)) else '분석 연결이 중단되었습니다. 이어서 분석을 눌러 주세요.'
-                    self.lib.update(row[0],status='error',error=safe[:500])
+                    self.lib.update(row[0],status='error',error=safe[:1000])
+                    self.phase(row[0],'처리 중단')
+                    print('LECTURE_FAILURE '+json.dumps(dict(lecture_id=row[0],error=safe[:1000],type=type(err).__name__),ensure_ascii=False),flush=True)
+                    if isinstance(err,ProviderError) and err.code in (401,403,429):
+                        # Avoid repeating the same account-wide failure for every queued lecture.
+                        self.lib.configure(queue_blocked=safe[:1000])
                 finally:
                     with self.lock:self.active=None
             else:self.wake.wait(3);self.wake.clear()
@@ -194,6 +225,12 @@ class Worker:
     def process(self,lid):
         api=self.provider()
         if not api.key:raise ProviderError('관리자의 AI 설정에서 Gemini API 키를 등록해 주세요.')
+        api.cancelled=lambda:self.stop.is_set() or bool(self.lib.lecture(lid)['pause'])
+        api.on_event=lambda event,stage,details:self.provider_event(lid,event,stage,details)
+        self.phase(lid,'AI 응답 확인 중')
+        used=api.check_connection()
+        self.lib.update(lid,model_used=used)
+        self.phase(lid,'Drive 원본 정보 확인')
         video=self.video(lid);meta=self.metadata(video);version=self.version(meta)
         old=self.lib.lecture(lid)
         if old['sha256'] and old['sha256']!=version:
@@ -207,7 +244,7 @@ class Worker:
                 rows=[dict(r) for r in c.execute('SELECT id,title,text,screen_text FROM chunks WHERE lecture_id=? AND (embedding IS NULL OR embedding_model!=?)',(lid,api.embedding_model))]
             for at in range(0,len(rows),16):
                 if self.stop.is_set() or self.lib.lecture(lid)['pause']:
-                    self.lib.update(lid,status='paused');return
+                    self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
                 group=rows[at:at+16]
                 vecs=api.embed([r['title']+'\n'+r['text']+'\n'+r['screen_text'] for r in group])
                 with self.lib.connect() as c:
@@ -221,7 +258,7 @@ class Worker:
             for i,(start,end) in enumerate(windows):
                 if i in done:continue
                 if self.stop.is_set() or self.lib.lecture(lid)['pause']:
-                    self.lib.update(lid,status='paused');return
+                    self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
                 self.video(lid)
                 if self.version(self.metadata(video))!=version:
                     raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
@@ -233,7 +270,9 @@ class Worker:
                 else:
                     remote=None
                     try:
+                        self.phase(lid,f'{i+1}/{len(windows)}구간 · Drive 영상 준비 중')
                         make_clip(source,clip,start,end)
+                        api.check_cancelled()
                         if self.version(self.metadata(video))!=version:
                             raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
                         remote=api.upload(clip)
@@ -250,8 +289,9 @@ class Worker:
                 except ProviderError:
                     self.lib.update(lid,warning='일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
                 self.lib.save_part(lid,i,segments,api.embedding_model,vectors)
+                self.phase(lid,f'{i+1}/{len(windows)}구간 저장 완료',model_used=api.effective_model)
                 cache.unlink(missing_ok=True)
         self.video(lid)
         if self.version(self.metadata(video))!=version:
             raise ValueError('Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-        self.lib.update(lid,status='ready',error='',pause=0)
+        self.lib.update(lid,status='ready',error='',pause=0,phase='분석 완료',phase_at=now())

@@ -3,25 +3,114 @@ from __future__ import annotations
 import contextlib
 import json
 from pathlib import Path
+import random
 import re
+import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE='https://generativelanguage.googleapis.com'
+FALLBACK_MODEL='gemini-3.5-flash-lite'
+TRANSIENT={429,500,502,503,504}
 
 
 class ProviderError(RuntimeError):
+    def __init__(self, message, *, code=None, stage='', provider_status='', retry_after=None, retryable=None, quota=None):
+        super().__init__(message)
+        self.code=code;self.stage=stage;self.provider_status=provider_status
+        self.retryable=(code in TRANSIENT or code==0) if retryable is None else retryable
+        self.retry_after=retry_after
+        self.quota=quota or []
+
+
+class ProviderCancelled(RuntimeError):
     pass
 
 
 class Gemini:
-    def __init__(self, key, model='gemini-3.8-flash', embedding_model='gemini-embedding-2', usage=None):
+    def __init__(self, key, model='gemini-3.8-flash', embedding_model='gemini-embedding-2', usage=None,
+                 fallback_model=FALLBACK_MODEL, on_event=None, cancelled=None):
         self.key=key
         self.model=self.model_name(model)
         self.embedding_model=self.model_name(embedding_model)
         self.usage=usage
+        self.fallback_model=self.model_name(fallback_model) if fallback_model else ''
+        self.on_event=on_event;self.cancelled=cancelled
+        self.effective_model=self.model;self._models=None
+
+    def event(self, event, stage, **details):
+        # Deliberately never log URLs, keys, request bodies, video names, or AI output.
+        print('LECTURE_AI '+json.dumps(dict(event=event,stage=stage,**details),ensure_ascii=False),flush=True)
+        if self.on_event:self.on_event(event,stage,details)
+
+    def check_cancelled(self):
+        if self.cancelled and self.cancelled():raise ProviderCancelled('분석을 일시정지했습니다.')
+
+    def wait(self, delay):
+        if not self.cancelled:
+            time.sleep(delay);return
+        deadline=time.monotonic()+delay
+        while time.monotonic()<deadline:
+            self.check_cancelled()
+            time.sleep(min(1,max(0,deadline-time.monotonic())))
+        self.check_cancelled()
+
+    @staticmethod
+    def retry_delay(attempt, retry_after=None):
+        return min(60,max(0,retry_after)) if retry_after is not None else min(45,5*2**attempt)+random.uniform(0,2)
+
+    @staticmethod
+    def http_error(exc, stage):
+        # Retain machine-readable diagnostics, not an upstream message that may echo private input.
+        try:detail=json.loads(exc.read(32768)).get('error',{})
+        except (ValueError,OSError):detail={}
+        status=detail.get('status','') if isinstance(detail,dict) else ''
+        status=status if isinstance(status,str) and re.fullmatch(r'[A-Z_]{1,60}',status) else ''
+        message=str(detail.get('message','')).lower() if isinstance(detail,dict) else ''
+        quota=[]
+        suggested_delay=None
+        for info in (detail.get('details',[]) if isinstance(detail,dict) else []):
+            if not isinstance(info,dict):continue
+            for violation in info.get('violations',[]):
+                if not isinstance(violation,dict):continue
+                item={}
+                for field in ('quotaMetric','quotaId','quotaValue'):
+                    value=str(violation.get(field,''))
+                    if value and re.fullmatch(r'[a-zA-Z0-9_./-]{1,180}',value):item[field]=value
+                if item:quota.append(item)
+            retry=info.get('retryDelay','')
+            if isinstance(retry,str) and re.fullmatch(r'\d+(\.\d+)?s',retry):suggested_delay=float(retry[:-1])
+        labels={400:'요청 형식 또는 영상 형식을 확인해야 합니다.',401:'API 키 인증에 실패했습니다.',
+                403:'API 사용 권한 또는 프로젝트 설정을 확인해 주세요.',
+                404:'요청한 모델 또는 업로드 파일을 사용할 수 없습니다.',413:'분석 구간이 너무 큽니다.',
+                429:'API 사용량 한도에 도달했습니다.',500:'Google AI 내부 처리 오류입니다.',
+                502:'Google AI 연결 중 오류가 발생했습니다.',503:'Google AI가 현재 요청을 처리하지 못합니다.',
+                504:'Google AI 처리 시간이 초과되었습니다.'}
+        label=labels.get(exc.code,'Google AI 요청에 실패했습니다.')
+        if 'high demand' in message or 'overload' in message or 'capacity' in message:
+            label='해당 AI 모델의 처리 용량이 부족합니다.'
+        if 'api key not valid' in message or 'api_key_invalid' in message:
+            label='API 키가 유효하지 않습니다.'
+        retryable=exc.code in TRANSIENT
+        if exc.code==429:
+            quota_text=' '.join(q.get('quotaId','')+' '+q.get('quotaMetric','') for q in quota).lower()
+            if any(q.get('quotaValue')=='0' for q in quota) or re.search(r'limit:\s*0(?:\D|$)',message):
+                label='이 프로젝트에서 해당 모델에 허용된 사용량이 0입니다. AI Studio에서 모델별 할당량과 결제 연결 상태를 확인해 주세요.'
+                retryable=False
+            elif 'perday' in quota_text or 'per_day' in quota_text:
+                label='해당 모델의 일일 사용량 한도를 소진했습니다. 한도 초기화 또는 할당량 확인이 필요합니다.'
+                retryable=False
+            elif 'perminute' in quota_text or 'per_minute' in quota_text:
+                label='해당 모델의 분당 요청 또는 입력 토큰 한도에 도달했습니다.'
+            if quota:
+                label+=' [한도: '+', '.join(q.get('quotaId') or q.get('quotaMetric','') for q in quota[:2])+']'
+        retry=(exc.headers or {}).get('Retry-After','')
+        retry_after=float(retry) if re.fullmatch(r'\d+(\.\d+)?',retry) else suggested_delay
+        suffix=f' / {status}' if status else ''
+        return ProviderError(f'{stage} 실패 (HTTP {exc.code}{suffix}): {label}',
+            code=exc.code,stage=stage,provider_status=status,retry_after=retry_after,retryable=retryable,quota=quota)
 
     @staticmethod
     def model_name(name):
@@ -29,7 +118,8 @@ class Gemini:
             raise ValueError('모델 이름이 올바르지 않습니다.')
         return name
 
-    def request(self, path, payload=None, method='POST', headers=None, binary=None, attempts=4):
+    def request(self, path, payload=None, method='POST', headers=None, binary=None, attempts=4,
+                stage='AI 연결',timeout=None):
         if not self.key:
             raise ProviderError('관리자 설정에서 Gemini API 키를 먼저 등록해 주세요.')
         url=path if path.startswith('https://') else BASE+path
@@ -42,6 +132,9 @@ class Gemini:
             data=json.dumps(payload,ensure_ascii=False).encode()
             request_headers['Content-Type']='application/json'
         for attempt in range(attempts):
+            self.check_cancelled()
+            started=time.monotonic()
+            self.event('request',stage,attempt=attempt+1,attempts=attempts)
             try:
                 with contextlib.ExitStack() as stack:
                     body=data
@@ -49,54 +142,90 @@ class Gemini:
                         body=stack.enter_context(open(binary,'rb'))
                         request_headers['Content-Length']=str(Path(binary).stat().st_size)
                     req=urllib.request.Request(url,data=body,method=method,headers=request_headers)
-                    with urllib.request.urlopen(req,timeout=600 if binary or method=='POST' else 45) as response:
+                    with urllib.request.urlopen(req,timeout=timeout or (600 if binary or method=='POST' else 45)) as response:
                         raw=response.read(16*1024*1024)
+                        self.event('response',stage,seconds=round(time.monotonic()-started,1))
                         return (json.loads(raw) if raw else {}),dict(response.headers)
             except urllib.error.HTTPError as exc:
-                if exc.code in (429,500,502,503,504) and attempt<attempts-1:
-                    retry=exc.headers.get('Retry-After','')
-                    delay=min(float(retry),45) if retry.isdigit() else min(3*(2**attempt),30)
-                    time.sleep(delay)
-                    continue
-                labels={400:'요청 형식 또는 영상 형식이 지원되지 않습니다.',401:'API 키를 확인해 주세요.',
-                        403:'API 사용 권한 또는 프로젝트 설정을 확인해 주세요.',404:'선택한 모델을 사용할 수 없습니다. 설정에서 모델 목록을 새로고침해 주세요.',
-                        413:'분석 구간이 너무 큽니다.',429:'API 사용량 한도에 도달했습니다. 잠시 뒤 이어서 분석해 주세요.'}
-                raise ProviderError(f'AI 연결 오류 ({exc.code}): '+labels.get(exc.code,'일시적인 응답 오류입니다. 다시 시도해 주세요.')) from None
+                error=self.http_error(exc,stage)
+                exc.close()
             except (urllib.error.URLError,TimeoutError,OSError):
-                if attempt<attempts-1:
-                    time.sleep(2*(attempt+1))
-                    continue
-                raise ProviderError('AI 서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 이어서 분석해 주세요.') from None
+                error=ProviderError(f'{stage}: Google AI와의 연결이 중단되거나 시간이 초과되었습니다.',code=0,stage=stage)
+            except (ValueError,UnicodeError):
+                error=ProviderError(f'{stage}: Google AI 응답 형식을 읽지 못했습니다.',stage=stage)
+            self.event('error',stage,code=error.code,status=error.provider_status,attempt=attempt+1,quota=error.quota)
+            if error.retryable and attempt<attempts-1:
+                delay=self.retry_delay(attempt,error.retry_after)
+                self.event('retry',stage,code=error.code,seconds=round(delay),attempt=attempt+2,attempts=attempts)
+                self.wait(delay)
+            else:raise error from None
         raise ProviderError('AI 응답을 받지 못했습니다.')
 
     def models(self):
         items=[];page=''
         for _ in range(10):
             path='/v1beta/models?pageSize=100'+('&pageToken='+urllib.parse.quote(page) if page else '')
-            data,_=self.request(path,method='GET',attempts=1)
+            data,_=self.request(path,method='GET',attempts=2,stage='모델 목록 확인')
             items.extend(data.get('models',[]))
             page=data.get('nextPageToken','')
             if not page:
                 break
-        return {'generation':[x['name'].removeprefix('models/') for x in items if 'generateContent' in x.get('supportedGenerationMethods',[])],
+        self._models={'generation':[x['name'].removeprefix('models/') for x in items if 'generateContent' in x.get('supportedGenerationMethods',[])],
                 'embedding':[x['name'].removeprefix('models/') for x in items if 'embedContent' in x.get('supportedGenerationMethods',[])]}
+        return self._models
+
+    def validate_models(self):
+        available=self._models or self.models()
+        if self.model not in available['generation']:
+            raise ProviderError(f'분석 모델 {self.model}은 이 API 키의 사용 가능 목록에 없습니다.')
+        if self.embedding_model not in available['embedding']:
+            raise ProviderError(f'검색 모델 {self.embedding_model}은 이 API 키의 사용 가능 목록에 없습니다.')
+        return available
+
+    def check_connection(self):
+        self.validate_models()
+        result=self.generate([{'text':'연결 확인입니다. {"ok": true}만 반환하세요.'}],
+            '연결 검사 요청에 JSON으로 응답하세요.',
+            {'type':'OBJECT','properties':{'ok':{'type':'BOOLEAN'}},'required':['ok']},'connection')
+        if result.get('ok') is not True:raise ProviderError('AI 연결 확인 응답이 올바르지 않습니다.')
+        return self.effective_model
 
     def upload(self, path):
         length=Path(path).stat().st_size
-        _,headers=self.request('/upload/v1beta/files',{'file':{'display_name':'lecture-analysis-part'}},headers={
-            'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
-            'X-Goog-Upload-Header-Content-Length':str(length),'X-Goog-Upload-Header-Content-Type':'video/mp4'})
-        upload=next((v for k,v in headers.items() if k.lower()=='x-goog-upload-url'),None)
-        if not upload:
-            raise ProviderError('AI 파일 업로드 주소를 받지 못했습니다.')
-        data,_=self.request(upload,binary=path,headers={'X-Goog-Upload-Offset':'0',
-                     'X-Goog-Upload-Command':'upload, finalize','Content-Type':'video/mp4'},attempts=1)
-        file=data['file']
+        file=None
+        for attempt in range(4):
+            # A known file name lets us recover a completed upload whose final response was lost.
+            # Never blindly replay a finalized resumable-upload URL with offset zero.
+            name='files/la-'+secrets.token_hex(14)
+            try:
+                _,headers=self.request('/upload/v1beta/files',{'file':{'name':name,'displayName':'lecture-analysis-part'}},headers={
+                    'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
+                    'X-Goog-Upload-Header-Content-Length':str(length),'X-Goog-Upload-Header-Content-Type':'video/mp4'},
+                    attempts=1,stage='영상 업로드 준비')
+                upload=next((v for k,v in headers.items() if k.lower()=='x-goog-upload-url'),None)
+                if not upload:raise ProviderError('AI 파일 업로드 주소를 받지 못했습니다.')
+                data,_=self.request(upload,binary=path,headers={'X-Goog-Upload-Offset':'0',
+                    'X-Goog-Upload-Command':'upload, finalize','Content-Type':'video/mp4'},attempts=1,stage='영상 업로드')
+                file=data.get('file')
+                if not file or not file.get('name'):raise ProviderError('영상 업로드 확인 응답이 없습니다.',code=0,stage='영상 업로드')
+                break
+            except ProviderError as error:
+                if not error.retryable:raise
+                try:
+                    recovered,_=self.request('/v1beta/'+name,method='GET',attempts=1,stage='업로드 완료 여부 확인')
+                    if recovered.get('name')==name and recovered.get('state') in ('ACTIVE','PROCESSING'):
+                        file=recovered;break
+                except ProviderError:pass
+                self.remove(name)
+                if attempt==3:raise error
+                delay=self.retry_delay(attempt,error.retry_after)
+                self.event('retry','영상 업로드',code=error.code,seconds=round(delay),attempt=attempt+2,attempts=4)
+                self.wait(delay)
         try:
             deadline=time.monotonic()+900
             while file.get('state')=='PROCESSING' and time.monotonic()<deadline:
-                time.sleep(4)
-                file,_=self.request('/v1beta/'+file['name'],method='GET')
+                self.wait(4)
+                file,_=self.request('/v1beta/'+file['name'],method='GET',stage='Google 영상 처리')
             if file.get('state')!='ACTIVE':
                 raise ProviderError('AI 영상 준비가 완료되지 않았습니다. 저장된 위치에서 다시 시도해 주세요.')
             return file
@@ -107,14 +236,32 @@ class Gemini:
     def remove(self, name):
         if re.fullmatch(r'files/[a-zA-Z0-9_-]+',name):
             with contextlib.suppress(Exception):
-                self.request('/v1beta/'+name,method='DELETE',attempts=1)
+                # Cleanup must also run after pause; it never contains lecture output.
+                cancelled=self.cancelled;self.cancelled=None
+                try:self.request('/v1beta/'+name,method='DELETE',attempts=1,stage='임시 영상 정리',timeout=15)
+                finally:self.cancelled=cancelled
 
     def generate(self, parts, system, schema, kind='answer'):
-        data,_=self.request('/v1beta/models/'+self.model+':generateContent',{
+        payload={
             'systemInstruction':{'parts':[{'text':system}]},
             'contents':[{'role':'user','parts':parts}],
             'generationConfig':{'temperature':0.15,'maxOutputTokens':16384,
-                                'responseMimeType':'application/json','responseSchema':schema}})
+                                'responseMimeType':'application/json','responseSchema':schema}}
+        stage={'analysis':'강의 내용 분석','answer':'질문 답변','connection':'실제 AI 응답 확인'}.get(kind,'AI 응답')
+        selected=self.effective_model
+        try:
+            data,_=self.request('/v1beta/models/'+selected+':generateContent',payload,
+                stage=stage+' · '+selected,attempts=3,timeout=90 if kind=='connection' else 600)
+        except ProviderError as error:
+            # Same provider and key; only server-side availability errors trigger the configured alternate.
+            # Authentication, billing/quota, bad input and safety errors must never silently switch models.
+            if error.code not in (500,502,503,504) or not self.fallback_model or selected==self.fallback_model:raise
+            available=self._models or self.models()
+            if self.fallback_model not in available['generation']:raise error
+            self.event('fallback',stage,model=self.fallback_model,code=error.code)
+            data,_=self.request('/v1beta/models/'+self.fallback_model+':generateContent',payload,
+                stage=stage+' · '+self.fallback_model,attempts=3,timeout=90 if kind=='connection' else 600)
+            self.effective_model=self.fallback_model
         if self.usage:
             self.usage(kind,data.get('usageMetadata',{}))
         candidates=data.get('candidates',[])
@@ -139,7 +286,7 @@ class Gemini:
                 if self.embedding_model=='gemini-embedding-001':
                     item['taskType']='RETRIEVAL_QUERY' if query else 'RETRIEVAL_DOCUMENT'
                 requests.append(item)
-            data,_=self.request('/v1beta/models/'+self.embedding_model+':batchEmbedContents',{'requests':requests})
+            data,_=self.request('/v1beta/models/'+self.embedding_model+':batchEmbedContents',{'requests':requests},stage='검색 자료 생성')
             out=[v['values'] for v in data.get('embeddings',[])]
             if len(out)!=len(requests):
                 raise ProviderError('의미 검색 자료를 완성하지 못했습니다.')

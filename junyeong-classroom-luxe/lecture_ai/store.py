@@ -130,6 +130,9 @@ class Library:
             CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,expires REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,input_tokens INTEGER,output_tokens INTEGER);
             ''')
+            columns={r[1] for r in db.execute('PRAGMA table_info(lectures)')}
+            for name in ('phase','phase_at','model_used'):
+                if name not in columns:db.execute(f"ALTER TABLE lectures ADD COLUMN {name} TEXT DEFAULT ''")
         with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
             os.chmod(self.path, 0o600)
@@ -174,7 +177,7 @@ class Library:
         return lid
 
     def update(self, lid, **values):
-        allowed={'status','duration','completed','total','error','media','sha256','pause','warning','title','lecture_date','kind'}
+        allowed={'status','duration','completed','total','error','media','sha256','pause','warning','title','lecture_date','kind','phase','phase_at','model_used'}
         if not values or not set(values)<=allowed:
             raise ValueError('수정할 수 없는 항목입니다.')
         with self.connect() as db:

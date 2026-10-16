@@ -1,5 +1,6 @@
 """Isolated auth, durable checkpoint, evidence, and actual range/FFmpeg checks. No paid AI calls."""
 import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 TEMP=tempfile.TemporaryDirectory()
@@ -18,7 +20,7 @@ from fastapi.testclient import TestClient
 from lecture_ai.routes import install
 from lecture_ai.worker import DriveSource,make_clip,probe
 from lecture_ai.store import clip_windows
-from lecture_ai.provider import ProviderError
+from lecture_ai.provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL
 
 worker=install(core,lambda:{'Authorization':'Bearer test-only'})
 lib=worker.lib
@@ -51,8 +53,12 @@ def seed_knowledge(vid,text='화면 설정은 환경설정에서 해상도를 �
 
 class FakeProvider:
     embedding_model='gemini-embedding-2'
+    model='gemini-3.8-flash'
+    effective_model=model
     key='test'
     calls=[]
+    def check_connection(self):return self.model
+    def check_cancelled(self):pass
     def embed(self,texts,query=False):return [[1,0] for _ in texts]
     def generate(self,parts,system,schema,kind='answer'):
         data=json.loads(parts[0]['text']);self.calls.append(data)
@@ -78,12 +84,55 @@ class LectureTests(unittest.TestCase):
 
     def test_key_encrypted_and_never_returned(self):
         self.assertFalse(self.admin.get('/api/admin/ai/settings').json()['configured'])
-        with patch('lecture_ai.routes.Gemini.models',return_value={'generation':[],'embedding':[]}):
+        with patch('lecture_ai.routes.Gemini.validate_models'),patch('lecture_ai.routes.Gemini.check_connection',return_value='gemini-3.8-flash'):
             r=self.admin.post('/api/admin/ai/settings',json={'api_key':'a-private-key'})
         self.assertEqual(r.status_code,200,r.text)
         self.assertNotIn('a-private-key',r.text)
         self.assertNotIn('a-private-key',lib.config()['key_encrypted'])
         self.assertEqual(worker.provider().key,'a-private-key')
+
+    def test_key_saved_even_when_actual_model_hits_quota(self):
+        with patch('lecture_ai.routes.Gemini.validate_models'),patch('lecture_ai.routes.Gemini.check_connection',side_effect=ProviderError('분당 한도',code=429)):
+            r=self.admin.post('/api/admin/ai/settings',json={'api_key':'a-private-key'})
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertTrue(r.json()['configured'])
+        self.assertFalse(r.json()['connection']['ok'])
+        self.assertEqual(worker.provider().key,'a-private-key')
+        self.assertEqual(lib.config()['queue_blocked'],'분당 한도')
+        # Empty input preserves the encrypted key; a working check can unblock pending work.
+        with patch('lecture_ai.routes.Gemini.validate_models'),patch('lecture_ai.routes.Gemini.check_connection',return_value='gemini-3.8-flash'):
+            r=self.admin.post('/api/admin/ai/settings',json={'api_key':''})
+        self.assertTrue(r.json()['connection']['ok'])
+        self.assertEqual(worker.provider().key,'a-private-key')
+        self.assertFalse(lib.config()['queue_blocked'])
+
+    def test_quota_stops_other_queued_lectures(self):
+        self.configure();first=seed_video();second=seed_video()
+        self.admin.post('/api/admin/ai/queue-new',json={})
+        worker.stop.clear();worker.wake.clear()
+        def stop_wait(*args):worker.stop.set()
+        try:
+            with patch.object(worker,'process',side_effect=ProviderError('허용량 0',code=429,retryable=False)) as process,patch.object(worker.wake,'wait',side_effect=stop_wait):
+                worker.run()
+            self.assertEqual(process.call_count,1)
+            self.assertTrue(lib.config()['queue_blocked'])
+            self.assertEqual(sorted(r['status'] for r in lib.list()),['error','queued'])
+        finally:worker.stop.clear()
+
+    def test_one_time_recovery_preserves_user_pause(self):
+        self.configure();first=seed_video();paused=seed_video()
+        self.admin.post('/api/admin/ai/queue-new',json={})
+        lib.update(first,status='error',error='AI 연결 오류 (503): retry')
+        lib.update(paused,status='error',error='AI 연결 오류 (429): quota',pause=1)
+        try:
+            with patch('lecture_ai.worker.threading.Thread'):
+                worker.thread=None;worker.start()
+                self.assertEqual(lib.lecture(first)['status'],'queued')
+                self.assertEqual(lib.lecture(paused)['status'],'error')
+                lib.update(first,status='error')
+                worker.thread=None;worker.start()
+                self.assertEqual(lib.lecture(first)['status'],'error')
+        finally:worker.thread=None
 
     def test_cumulative_queue_and_resume_preserves_parts(self):
         self.configure();v1=seed_video();v2=seed_video()
@@ -175,6 +224,78 @@ class LectureTests(unittest.TestCase):
                     make_clip(url,target,2,5)
             self.assertAlmostEqual(probe(str(target)),3,delta=.2)
             self.assertTrue(any(ranges))
+
+
+class ProviderTests(unittest.TestCase):
+    def test_http_retry_and_secret_free_diagnostics(self):
+        api=Gemini('secret-key')
+        class Response(io.BytesIO):headers={}
+        def error():
+            return urllib.error.HTTPError('https://generativelanguage.googleapis.com/?key=secret-key',503,'Unavailable',{},
+                io.BytesIO(json.dumps({'error':{'status':'UNAVAILABLE','message':'High demand secret-key private lecture text'}}).encode()))
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out),patch('urllib.request.urlopen',side_effect=[error(),Response(b'{}')]) as request,patch.object(api,'wait') as wait:
+            api.request('/v1beta/test',stage='영상 업로드 준비')
+        self.assertEqual(request.call_count,2);wait.assert_called_once()
+        self.assertIn('503',out.getvalue())
+        self.assertIn('영상 업로드 준비',out.getvalue())
+        self.assertNotIn('secret-key',out.getvalue());self.assertNotIn('private lecture',out.getvalue())
+
+    def test_zero_or_daily_quota_is_not_retried(self):
+        for value,quota_id in [('0','GenerateRequestsPerMinute'),('20','GenerateRequestsPerDay')]:
+            with self.subTest(quota_id=quota_id):
+                api=Gemini('test')
+                error=urllib.error.HTTPError('https://generativelanguage.googleapis.com',429,'Quota',{},io.BytesIO(json.dumps({'error':{
+                    'status':'RESOURCE_EXHAUSTED','message':'quota exceeded','details':[{'violations':[{'quotaId':quota_id,'quotaValue':value}]}]}}).encode()))
+                with patch('urllib.request.urlopen',side_effect=error) as request,patch.object(api,'wait') as wait:
+                    with self.assertRaises(ProviderError) as raised:api.request('/v1beta/test',stage='강의 분석')
+                self.assertEqual(request.call_count,1);wait.assert_not_called()
+                self.assertFalse(raised.exception.retryable)
+                self.assertIn(quota_id,str(raised.exception))
+
+    def test_upload_retry_uses_new_session_or_recovers_completed_file(self):
+        for recover in (False,True):
+            with self.subTest(recover=recover),tempfile.TemporaryDirectory() as folder:
+                path=Path(folder)/'part.mp4';path.write_bytes(b'video')
+                api=Gemini('test');starts=[];sent=[]
+                def request(url,payload=None,**kwargs):
+                    if url=='/upload/v1beta/files':
+                        starts.append(payload['file']['name'])
+                        return {},{'x-goog-upload-url':f'https://generativelanguage.googleapis.com/upload/{len(starts)}'}
+                    if kwargs.get('binary'):
+                        sent.append(url)
+                        if len(sent)==1:raise ProviderError('transient',code=503)
+                        return {'file':{'name':starts[-1],'uri':'video','state':'ACTIVE'}},{}
+                    if kwargs.get('method')=='DELETE':return {},{}
+                    if recover:return {'name':starts[0],'uri':'video','state':'ACTIVE'},{}
+                    raise ProviderError('not found',code=404)
+                with patch.object(api,'request',side_effect=request),patch.object(api,'wait'):
+                    file=api.upload(path)
+                self.assertEqual(file['state'],'ACTIVE')
+                self.assertEqual(len(starts),1 if recover else 2)
+                self.assertEqual(len(set(sent)),len(sent))
+
+    def test_fallback_only_on_server_errors(self):
+        for code in (503,429,403):
+            with self.subTest(code=code):
+                api=Gemini('test');api._models={'generation':[api.model,FALLBACK_MODEL]}
+                calls=[]
+                def request(url,*args,**kwargs):
+                    calls.append(url)
+                    if api.model in url:raise ProviderError('failure',code=code)
+                    return {'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':'{"ok":true}'}]}}]},{}
+                with patch.object(api,'request',side_effect=request):
+                    if code==503:
+                        self.assertTrue(api.generate([], '', {})['ok'])
+                        self.assertEqual(api.effective_model,FALLBACK_MODEL)
+                        self.assertEqual(len(calls),2)
+                    else:
+                        with self.assertRaises(ProviderError):api.generate([], '', {})
+                        self.assertEqual(len(calls),1)
+
+    def test_pause_interrupts_backoff(self):
+        api=Gemini('test',cancelled=lambda:True)
+        with self.assertRaises(ProviderCancelled):api.wait(30)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

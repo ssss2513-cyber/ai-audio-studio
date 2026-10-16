@@ -8,13 +8,14 @@ from fastapi import Request
 from pydantic import BaseModel, Field
 from .store import Library, now
 from .worker import Worker
-from .provider import Gemini, ProviderError, ANSWER_SYSTEM, ANSWER_SCHEMA
+from .provider import Gemini, ProviderError, FALLBACK_MODEL, ANSWER_SYSTEM, ANSWER_SCHEMA
 
 
 class Settings(BaseModel):
     api_key: str=Field(default='',max_length=256)
     model: str=Field(default='gemini-3.8-flash',max_length=100)
     embedding_model: str=Field(default='gemini-embedding-2',max_length=100)
+    fallback_model: str=Field(default=FALLBACK_MODEL,max_length=100)
 
 
 class Action(BaseModel):
@@ -55,7 +56,8 @@ def install(core,auth_headers):
     def safe_settings():
         cfg=lib.config()
         return dict(configured=configured(),model=cfg.get('model','gemini-3.8-flash'),
-                    embedding_model=cfg.get('embedding_model','gemini-embedding-2'))
+                    embedding_model=cfg.get('embedding_model','gemini-embedding-2'),
+                    fallback_model=cfg.get('fallback_model',FALLBACK_MODEL),connection=cfg.get('connection',{}))
 
     def queue(video,action):
         lid=video['id']
@@ -83,7 +85,8 @@ def install(core,auth_headers):
                         VALUES(?,?,?,?,?,?,?,'queued','video')''',
                         (lid,video['title'],registered,now(),video['title'],video['size'],video['external_id']))
                 else:
-                    c.execute("UPDATE lectures SET status='queued',pause=0,error='',title=?,kind=? WHERE id=?",(video['title'],'reindex' if action=='reindex' or old['kind']=='reindex' else 'video',lid))
+                    c.execute("UPDATE lectures SET status='queued',pause=0,error='',phase='순서 대기',title=?,kind=? WHERE id=?",(video['title'],'reindex' if action=='reindex' or old['kind']=='reindex' else 'video',lid))
+        lib.configure(queue_blocked='')
         worker.wake.set()
         return 'queued'
 
@@ -99,9 +102,11 @@ def install(core,auth_headers):
             item=dict(id=v['id'],title=v['title'],playlist=v['playlist'],duration=v['duration'],
                 state=v['state'],status=r.get('status','new'),completed=r.get('completed',0),
                 total=r.get('total',0),chunks=r.get('chunks',0))
-            if admin:item.update(error=r.get('error',''),warning=r.get('warning',''),pause=bool(r.get('pause')))
+            if admin:item.update(error=r.get('error',''),warning=r.get('warning',''),pause=bool(r.get('pause')),
+                phase=r.get('phase',''),phase_at=r.get('phase_at',''),model_used=r.get('model_used',''))
             items.append(item)
-        return dict(items=items,configured=configured(),admin=admin,ready=sum(x['status']=='ready' for x in items))
+        return dict(items=items,configured=configured(),admin=admin,ready=sum(x['status']=='ready' for x in items),
+                    queue_blocked=lib.config().get('queue_blocked','') if admin else '')
 
     @core.app.get('/api/admin/ai/settings')
     def get_settings(req: Request):
@@ -113,13 +118,25 @@ def install(core,auth_headers):
         member=core.require(req,admin=True,write=True)
         try:
             model=Gemini.model_name(body.model.strip());embed=Gemini.model_name(body.embedding_model.strip())
-            values=dict(model=model,embedding_model=embed)
-            if body.api_key.strip():
-                key=body.api_key.strip()
-                Gemini(key,model,embed).models()
-                values['key_encrypted']=core.enc(key)
+            fallback=Gemini.model_name(body.fallback_model.strip()) if body.fallback_model.strip() else ''
+            values=dict(model=model,embedding_model=embed,fallback_model=fallback)
+            key=body.api_key.strip() or worker.provider().key
+            provider=Gemini(key,model,embed,worker.usage,fallback_model=fallback)
+            provider.validate_models()
+            if body.api_key.strip():values['key_encrypted']=core.enc(key)
             lib.configure(**values)
         except (ValueError,ProviderError) as e:core.fail(422,str(e))
+        # Saving a valid key and successfully running the model are separate results.
+        # A temporary service failure must not discard a correctly stored key.
+        try:
+            effective=provider.check_connection()
+            connection=dict(ok=True,model=effective,at=now(),message='실제 AI 응답을 확인했습니다.')
+            lib.configure(queue_blocked='')
+            worker.wake.set()
+        except ProviderError as error:
+            connection=dict(ok=False,at=now(),message=str(error),code=error.code)
+            if error.code in (401,403,429):lib.configure(queue_blocked=str(error))
+        lib.configure(connection=connection)
         with core.db() as c:core.audit(c,member['id'],'lecture-ai','ai_settings')
         return safe_settings()
 

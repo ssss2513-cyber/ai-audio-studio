@@ -421,3 +421,45 @@ body.no-motion .luxe-yadam-card:hover{transform:none}
 .lumiel-order-row{gap:7px}
 .lumiel-order-number{min-width:35px}
 }
+
+
+/* YOUTUBE API KEY INPUT FIX — clickable, legible, and paste-friendly. */
+#lumiel-yadam-settings .lumiel-key-entry{
+ position:relative!important;z-index:3!important;display:flex!important;flex-direction:column!important;
+ align-items:stretch!important;gap:8px!important;pointer-events:auto!important;overflow:visible!important;
+}
+#lumiel-yadam-settings .lumiel-key-entry label{
+ display:block!important;color:#f4dcd0!important;font-size:17px!important;font-weight:600!important;
+ cursor:text!important;
+}
+#lumiel-yadam-settings #lumiel-yadam-key{
+ display:block!important;position:relative!important;z-index:4!important;
+ width:100%!important;min-height:58px!important;padding:14px 16px!important;
+ color:#f9e8dc!important;-webkit-text-fill-color:#f9e8dc!important;
+ caret-color:#ffe1cb!important;
+ background:#201419!important;border:2px solid #aa8279!important;border-radius:14px!important;
+ opacity:1!important;visibility:visible!important;pointer-events:auto!important;user-select:text!important;
+ -webkit-user-select:text!important;touch-action:manipulation!important;
+ font-size:17px!important;line-height:1.5!important;letter-spacing:normal!important;
+}
+#lumiel-yadam-settings #lumiel-yadam-key:focus{
+ outline:3px solid #edbb9d!important;outline-offset:3px!important;
+ border-color:#edbb9d!important;
+}
+#lumiel-yadam-settings .lumiel-key-controls{
+ position:relative;z-index:4;display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:4px 0 2px;
+}
+#lumiel-yadam-settings .lumiel-key-controls button{
+ min-height:46px!important;min-width:126px!important;padding:9px 16px!important;
+ font-size:15px!important;pointer-events:auto!important;
+}
+#lumiel-yadam-settings #lumiel-key-input-status{
+ display:block;color:#dcc0b8;font-size:13px;line-height:1.65;min-height:23px;overflow-wrap:anywhere;
+}
+#lumiel-yadam-settings #lumiel-yadam-key-form>.button-row{
+ position:relative;z-index:3;pointer-events:auto;flex-wrap:wrap;
+}
+@media(max-width:600px){
+ #lumiel-yadam-settings .lumiel-key-controls button{flex:1;min-width:120px!important}
+ #lumiel-yadam-settings #lumiel-yadam-key{font-size:16px!important}
+}

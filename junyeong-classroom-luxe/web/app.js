@@ -106,11 +106,46 @@ async function classes(){
  const list=can?(await api('/videos')).items:S.catalogue;S.videos=list;
  return `${pageTitle('MY COLLECTION',S.member?S.member.name+'님의 배움 공간':'클래스 둘러보기','재생목록별로 강의를 한눈에 보고, 원하는 순서대로 이어서 시청하세요.')}<section class="section" style="padding-top:28px">${stateNotice()}<div class="toolbar"><input id="course-search" type="search" placeholder="재생목록 또는 클래스 제목 검색" aria-label="클래스 검색"><select id="course-sort" aria-label="영상 정렬"><option value="default">관리자 배치순</option><option value="newest">최신순</option></select></div><div id="course-list">${list.length?playlistGroups(list):empty()}</div></section>`;
 }
+function gptCollection(){
+ // External ChatGPT GPT links provided by the site operator; each opens directly in a new tab.
+ // Keep all five tools together as ONE collection, divided into three production stages.
+ const groups=[
+  {stage:"01",name:"이야기 기획 · 집필",desc:"이야기의 뼈대를 잡고 본편 원고를 완성합니다.",items:[
+   {step:"01",name:"야담 시놉시스 제작",desc:"소재·작법 구조·챕터 시놉시스를 준비합니다.",url:"https://chatgpt.com/g/g-6a043cdc702081918b5996ee47484ee0-yadam-sinobsiseu-jejag-by-yuhun"},
+   {step:"02",name:"야담 오디오북 대본 제작",desc:"선택한 시놉시스를 낭독용 대본으로 완성합니다.",url:"https://chatgpt.com/g/g-6a046731b9c881919da07e6eefd367ee-yadam-odiobug-seukeuribteo"}
+  ]},
+  {stage:"02",name:"제목 · 도입부",desc:"처음 클릭과 초반 몰입에 필요한 요소를 만듭니다.",items:[
+   {step:"03",name:"제목과 도입부 생성",desc:"제목·썸네일 문구·인트로 설명을 구성합니다.",url:"https://chatgpt.com/g/g-69d8fc9f44ec8191834cbd255347a240-yadam-sseomneil-inteuro-seolmyeong-saengseonggi"}
+  ]},
+  {stage:"03",name:"영상 · 이미지 제작",desc:"인트로 동영상과 본편 장면 이미지를 제작합니다.",items:[
+   {step:"04",name:"Flow Omni 인트로 프롬프트",desc:"인트로 영상에 사용할 장면·동작 프롬프트를 만듭니다.",url:"https://chatgpt.com/g/g-6a4b4dcbb180819190bbb4a4fa9f109b-flow-omni-inteuro-dongyeongsang-peurompeuteo"},
+   {step:"05",name:"야담 이미지 플로우",desc:"본편 장면의 이미지·Flow 프롬프트를 제작합니다.",url:"https://chatgpt.com/g/g-69f6e703b758819180229c897401aae8-yadam-flow-peurompeuteu-maseuteo"}
+  ]}
+ ];
+ return '<section class="gpt-suite" aria-labelledby="gpt-suite-title">'+
+  '<div class="gpt-suite-top"><div><span class="gpt-suite-kicker">YOUR YADAM CREATION WORKFLOW</span>'+
+  '<h2 id="gpt-suite-title">야담 제작 GPT 통합 모음</h2>'+
+  '<p>제작에 필요한 GPT 5개를 한곳에 모았습니다. 단계별로 선택해 바로 사용하세요.</p></div>'+
+  '<span class="gpt-suite-total">5개의 GPT · 3단계</span></div>'+
+  '<div class="gpt-suite-groups">'+groups.map(function(group){
+   return '<div class="gpt-suite-group"><div class="gpt-suite-group-head">'+
+    '<span class="gpt-suite-group-num">STAGE '+esc(group.stage)+'</span><h3>'+esc(group.name)+'</h3>'+
+    '<p>'+esc(group.desc)+'</p></div>'+
+    '<div class="gpt-suite-items">'+group.items.map(function(tool){
+     return '<div class="gpt-suite-item"><span class="gpt-suite-step">'+esc(tool.step)+'</span>'+
+      '<div class="gpt-suite-item-text"><strong>'+esc(tool.name)+'</strong><p>'+esc(tool.desc)+'</p></div>'+
+      '<a class="gpt-suite-open" href="'+esc(tool.url)+'" target="_blank" rel="noopener noreferrer" aria-label="'+esc(tool.name)+' GPT 새 창에서 열기">GPT 실행 <span aria-hidden="true">↗</span></a></div>';
+    }).join('')+'</div></div>';
+  }).join('')+'</div>'+
+  '<p class="gpt-suite-help">각 버튼은 ChatGPT의 해당 GPT를 새 창에서 엽니다. 이용하려면 ChatGPT 로그인이 필요할 수 있습니다.</p>'+
+  '</section>';
+}
+
 async function yadamTools(){
  const {items}=await api('/tools');
  const can=!!S.member&&(S.member.role==='admin'||(S.member.state==='approved'&&S.meta.open));
  const notice=!S.member?`<div class="notice tools-notice"><h2>로그인하면 파일을 받을 수 있어요.</h2><p>이 페이지 주소를 공유하면 다른 회원도 같은 파일을 내려받을 수 있습니다.</p><div class="button-row"><button class="primary small" data-tools-login="login">로그인</button><button class="outline small" data-tools-login="join">회원가입</button></div></div>`:!can?`<div class="notice tools-notice"><h2>현재 다운로드 권한을 확인해 주세요.</h2><p>승인 상태와 사이트 이용 상태에 따라 다운로드가 제한될 수 있습니다.</p><div class="button-row"><button class="outline small" data-action="refresh">상태 새로 확인</button><button class="outline small" data-go="account">내 정보</button></div></div>`:'';
- return `${pageTitle('YADAM CREATOR LIBRARY','야담 제작 도구','대본·이미지 프롬프트 제작과 완성본 검증을 한곳에서 시작하세요.')}<section class="section tools-section"><div class="tools-toolbar"><p>ChatGPT·Claude용 · 전체 파일 포함</p><button class="outline small" data-action="share-tools">이 페이지 공유 ↗</button></div>${notice}<div class="tools-grid">${items.map((item,i)=>`<article class="tool-card"><div class="tool-card-top"><span class="tool-step">${esc(item.step)}</span><span class="tool-version">${esc(item.version)}</span></div><h2>${esc(item.title)}</h2><p class="tool-description">${esc(item.description)}</p><ul class="tool-features">${item.features.map(feature=>`<li>${esc(feature)}</li>`).join('')}</ul><p class="tool-file-info">ZIP · ${item.size>=1024**2?(item.size/1024**2).toFixed(1)+' MB':Math.round(item.size/1024)+' KB'} · ${item.fileCount}개 파일<br>등록일 ${esc(item.updated)}</p><button class="primary full tool-download" ${can?`data-tool-download="${esc(item.id)}" data-filename="${esc(item.filename)}"`:!S.member?'data-tools-login="login"':'disabled'}>${can?'전체 파일 다운로드 ↓':!S.member?'로그인하고 다운로드':'승인 후 다운로드'}</button><p class="tool-filename">${esc(item.filename)}</p></article>`).join('')}</div><div class="tools-guide"><div class="eyebrow">처음 사용하신다면</div><h2>이 순서대로 시작하세요.</h2><ol><li><strong>원하는 파일을 내려받고 압축을 풉니다.</strong><p>휴대폰은 ‘내 파일 → 다운로드’에서 ZIP 파일을 눌러 압축을 풀어 주세요.</p></li><li><strong>설명 파일부터 엽니다.</strong><p>대본 GPT 버전은 ‘SKILL.md’, 기존 대본 생성기와 검증기는 ‘00_먼저읽기’, 이미지 프롬프트 생성기는 ‘README_처음읽기.txt’를 여세요.</p></li><li><strong>선택한 도구에 맞게 지침과 자료를 넣습니다.</strong><p>대본 GPT 버전은 ChatGPT용이며, 나머지 MD 파일도 함께 참고 자료로 사용하세요. 기존 Claude용 도구는 각 설명 파일의 설정 방법을 따라 주세요.</p></li></ol><div class="tools-start"><strong>대본 GPT 버전에서 시작하는 말</strong><p>“이야기 구조가 겹치지 않게 5안 제안해줘.”</p><p>완성된 시놉시스가 있다면 “이 시놉시스로 약 35,000자 대본까지 써줘.”</p><strong>기존 대본 생성기에서 시작하는 말</strong><p>“자극 강화형으로 주제 찾아줘.”</p><strong>이미지 프롬프트 생성기에서 시작하는 말</strong><p>“첨부한 대본을 분석하고, 화풍 선택부터 이미지 프롬프트 제작을 진행해줘.”</p><strong>검증기에서 시작하는 말</strong><p>“첨부한 대본과 60초 인트로를 검증하고 문제 있는 부분만 별도 수정본으로 만들어줘. 원본은 보존해줘.”</p></div><p class="tools-history-note">기존 프로젝트를 바꾸실 때는 작성한 대본과 생성 이력을 보관하고, 설명서에 적힌 지침·지원 자료만 교체해 주세요.</p></div></section>`;
+ return `${pageTitle('YADAM CREATOR LIBRARY','야담 제작 도구','대본·이미지 프롬프트 제작과 완성본 검증을 한곳에서 시작하세요.')}<section class="section tools-section"><div class="tools-toolbar"><p>ChatGPT·Claude용 · 전체 파일 포함</p><button class="outline small" data-action="share-tools">이 페이지 공유 ↗</button></div>${notice}${gptCollection()}<div class="gpt-suite-download-label"><div class="eyebrow">DOWNLOAD LIBRARY</div><h2>기존 제작 자료실</h2><p>기존 ZIP 파일과 설명서는 아래에서 그대로 이용할 수 있습니다.</p></div><div class="tools-grid">${items.map((item,i)=>`<article class="tool-card"><div class="tool-card-top"><span class="tool-step">${esc(item.step)}</span><span class="tool-version">${esc(item.version)}</span></div><h2>${esc(item.title)}</h2><p class="tool-description">${esc(item.description)}</p><ul class="tool-features">${item.features.map(feature=>`<li>${esc(feature)}</li>`).join('')}</ul><p class="tool-file-info">ZIP · ${item.size>=1024**2?(item.size/1024**2).toFixed(1)+' MB':Math.round(item.size/1024)+' KB'} · ${item.fileCount}개 파일<br>등록일 ${esc(item.updated)}</p><button class="primary full tool-download" ${can?`data-tool-download="${esc(item.id)}" data-filename="${esc(item.filename)}"`:!S.member?'data-tools-login="login"':'disabled'}>${can?'전체 파일 다운로드 ↓':!S.member?'로그인하고 다운로드':'승인 후 다운로드'}</button><p class="tool-filename">${esc(item.filename)}</p></article>`).join('')}</div><div class="tools-guide"><div class="eyebrow">처음 사용하신다면</div><h2>이 순서대로 시작하세요.</h2><ol><li><strong>원하는 파일을 내려받고 압축을 풉니다.</strong><p>휴대폰은 ‘내 파일 → 다운로드’에서 ZIP 파일을 눌러 압축을 풀어 주세요.</p></li><li><strong>설명 파일부터 엽니다.</strong><p>대본 GPT 버전은 ‘SKILL.md’, 기존 대본 생성기와 검증기는 ‘00_먼저읽기’, 이미지 프롬프트 생성기는 ‘README_처음읽기.txt’를 여세요.</p></li><li><strong>선택한 도구에 맞게 지침과 자료를 넣습니다.</strong><p>대본 GPT 버전은 ChatGPT용이며, 나머지 MD 파일도 함께 참고 자료로 사용하세요. 기존 Claude용 도구는 각 설명 파일의 설정 방법을 따라 주세요.</p></li></ol><div class="tools-start"><strong>대본 GPT 버전에서 시작하는 말</strong><p>“이야기 구조가 겹치지 않게 5안 제안해줘.”</p><p>완성된 시놉시스가 있다면 “이 시놉시스로 약 35,000자 대본까지 써줘.”</p><strong>기존 대본 생성기에서 시작하는 말</strong><p>“자극 강화형으로 주제 찾아줘.”</p><strong>이미지 프롬프트 생성기에서 시작하는 말</strong><p>“첨부한 대본을 분석하고, 화풍 선택부터 이미지 프롬프트 제작을 진행해줘.”</p><strong>검증기에서 시작하는 말</strong><p>“첨부한 대본과 60초 인트로를 검증하고 문제 있는 부분만 별도 수정본으로 만들어줘. 원본은 보존해줘.”</p></div><p class="tools-history-note">기존 프로젝트를 바꾸실 때는 작성한 대본과 생성 이력을 보관하고, 설명서에 적힌 지침·지원 자료만 교체해 주세요.</p></div></section>`;
 }
 async function downloadYadamTool(button){
  const label=button.textContent;button.disabled=true;button.textContent='파일을 준비하고 있어요…';

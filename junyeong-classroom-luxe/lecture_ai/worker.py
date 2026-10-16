@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 from .store import clip_windows, now
@@ -55,8 +56,8 @@ def probe(source):
         raise ValueError('영상 길이를 읽지 못했습니다. Drive의 MP4/WebM 원본을 확인해 주세요.') from None
 
 
-def make_clip(source, path, start, end):
-    # Low memory, serial processing. Only this five-minute derivative is written to /tmp.
+def make_clip(source, path, start, end, cancelled=None):
+    # A single encoder remains active; cancellation also stops speculative preparation.
     cmd=['ffmpeg','-nostdin','-hide_banner','-loglevel','error','-y','-threads','1',
          '-filter_threads','1','-rw_timeout','60000000','-ss',str(start),'-i',source,
          '-t',str(end-start),'-map','0:v:0','-map','0:a:0?',
@@ -64,11 +65,76 @@ def make_clip(source, path, start, end):
          '-crf','25','-maxrate','600k','-bufsize','1200k','-threads','1',
          '-c:a','aac','-b:a','48k','-ac','1','-ar','24000','-fs','50331648',
          '-movflags','+faststart',str(path)]
-    result=subprocess.run(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1800)
-    if result.returncode or not path.exists() or path.stat().st_size<100:
+    if cancelled and cancelled():raise ProviderCancelled()
+    process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    deadline=time.monotonic()+1800
+    try:
+        while True:
+            if cancelled and cancelled():raise ProviderCancelled()
+            if time.monotonic()>=deadline:
+                raise RuntimeError('영상 준비 시간이 초과되었습니다. 이어서 분석해 주세요.')
+            try:
+                code=process.wait(timeout=.5);break
+            except subprocess.TimeoutExpired:pass
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:process.wait(timeout=3)
+            except subprocess.TimeoutExpired:process.kill();process.wait()
+    if code or not path.exists() or path.stat().st_size<100:
         raise RuntimeError('Drive 영상 구간을 불러오지 못했습니다. 연결 상태를 확인한 뒤 이어서 분석해 주세요.')
+    if cancelled and cancelled():raise ProviderCancelled()
     if abs(probe(str(path))-(end-start))>2.5:
         raise RuntimeError('영상 구간이 완전히 준비되지 않았습니다. 이어서 분석을 눌러 주세요.')
+
+
+class ClipPrefetch:
+    """Prepare only one upcoming clip while the current clip waits on the remote AI."""
+    def __init__(self,source,windows,folder,lid,cancelled):
+        self.source=source;self.windows=windows;self.folder=folder;self.lid=lid
+        self.cancelled=cancelled;self.stopping=threading.Event()
+        self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='lecture-clip')
+        self.pending=None;self.paths=set()
+
+    def stopped(self):return self.stopping.is_set() or self.cancelled()
+
+    def prepare(self,index,path):
+        if self.stopped():raise ProviderCancelled()
+        if shutil.disk_usage(self.folder).free<128*1024**2:
+            raise RuntimeError('영상 준비 공간이 부족합니다. 관리자에게 문의해 주세요.')
+        started=time.monotonic()
+        make_clip(self.source,path,*self.windows[index],cancelled=self.stopped)
+        print('LECTURE_PREPARE '+json.dumps(dict(lecture_id=self.lid,part=index+1,
+            seconds=round(time.monotonic()-started,1))),flush=True)
+        return path
+
+    def start(self,index):
+        if self.stopped():raise ProviderCancelled()
+        if self.pending:
+            if self.pending[0]==index:return
+            raise RuntimeError('다음 영상 준비 순서를 확인하지 못했습니다.')
+        path=self.folder/f'{self.lid}-{index}.mp4';self.paths.add(path)
+        self.pending=(index,self.pool.submit(self.prepare,index,path))
+
+    def take(self,index):
+        self.start(index)
+        future=self.pending[1];started=time.monotonic()
+        while True:
+            if self.stopped():raise ProviderCancelled()
+            try:path=future.result(timeout=.5);break
+            except FutureTimeout:
+                if future.done():raise
+        self.pending=None
+        print('LECTURE_PIPELINE '+json.dumps(dict(lecture_id=self.lid,part=index+1,
+            prepare_wait_seconds=round(time.monotonic()-started,1))),flush=True)
+        return path
+
+    def __enter__(self):return self
+
+    def __exit__(self,*args):
+        self.stopping.set()
+        self.pool.shutdown(wait=True,cancel_futures=True)
+        for path in self.paths:path.unlink(missing_ok=True)
 
 
 class DriveSource:
@@ -272,9 +338,11 @@ class Worker:
         if not api.key:raise ProviderError('관리자의 AI 설정에서 Gemini API 키를 등록해 주세요.')
         api.cancelled=lambda:self.stop.is_set() or bool(self.lib.lecture(lid)['pause'])
         api.on_event=lambda event,stage,details:self.provider_event(lid,event,stage,details)
-        self.phase(lid,'AI 응답 확인 중')
-        used=api.check_connection()
-        self.lib.update(lid,model_used=used)
+        self.phase(lid,'분석 모델 확인 중')
+        # Model listing checks credentials and availability without spending a generation request.
+        # The first actual lecture request verifies generation; settings still offers an explicit check.
+        api.validate_models()
+        self.lib.update(lid,model_used=api.model)
         self.phase(lid,'Drive 원본 정보 확인')
         video=self.video(lid);meta=self.metadata(video);version=self.version(meta)
         old=self.lib.lecture(lid)
@@ -300,47 +368,52 @@ class Worker:
             if not math.isfinite(length) or not 0<length<=48*3600:raise ValueError('영상 길이가 지원 범위를 벗어났습니다.')
             windows=clip_windows(length);done=self.lib.parts_done(lid)
             self.lib.update(lid,duration=length,total=len(windows))
-            for i,(start,end) in enumerate(windows):
-                if i in done:continue
-                if self.stop.is_set() or self.lib.lecture(lid)['pause']:
-                    self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
-                self.video(lid)
-                if self.version(self.metadata(video))!=version:
-                    raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-                if shutil.disk_usage(self.lib.root).free<64*1024**2 or shutil.disk_usage(self.temp).free<128*1024**2:
-                    raise RuntimeError('분석 자료를 저장할 공간이 부족합니다. 관리자에게 문의해 주세요.')
-                cache=self.lib.root/'temp'/f'{lid}-{i}.json'
-                clip=self.temp/f'{lid}-{i}.mp4'
-                if cache.exists():segments=json.loads(cache.read_text('utf-8'))
-                else:
-                    remote=None
-                    try:
-                        self.phase(lid,f'{i+1}/{len(windows)}구간 · Drive 영상 준비 중')
-                        make_clip(source,clip,start,end)
-                        api.check_cancelled()
-                        if self.version(self.metadata(video))!=version:
-                            raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-                        remote=api.upload(clip)
-                        raw=api.generate([{'fileData':{'fileUri':remote['uri'],'mimeType':'video/mp4'}},
-                            {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
-                            ANALYSIS_SYSTEM,ANALYSIS_SCHEMA,'analysis')
-                        segments=validate_segments(raw,start,end)
-                        if any(s['timing']=='unknown' for s in segments):
-                            note='일부 설명은 AI 시간값을 확인하지 못해 시간 링크 없이 저장했습니다. 답변 내용과 원본 강의는 확인할 수 있습니다.'
-                            previous=self.lib.lecture(lid)['warning'] or ''
-                            if note not in previous:self.lib.update(lid,warning=(previous+' '+note).strip())
-                        tmp=cache.with_suffix('.tmp');tmp.write_text(json.dumps(segments,ensure_ascii=False),encoding='utf-8');os.replace(tmp,cache)
-                    finally:
-                        clip.unlink(missing_ok=True)
-                        if remote:api.remove(remote['name'])
-                vectors=None
-                try:vectors=api.embed([s['title']+'\n'+s['text']+'\n'+s['screen_text'] for s in segments])
-                except ProviderError:
-                    self.lib.update(lid,warning='일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
-                self.lib.save_part(lid,i,segments,api.embedding_model,vectors)
-                self.lib.configure(provider_retry_at=0)
-                self.phase(lid,f'{i+1}/{len(windows)}구간 저장 완료',model_used=api.effective_model)
-                cache.unlink(missing_ok=True)
+            missing=[i for i in range(len(windows)) if i not in done]
+            with ClipPrefetch(source,windows,self.temp,lid,api.cancelled) as clips:
+                for position,i in enumerate(missing):
+                    start,end=windows[i]
+                    if self.stop.is_set() or self.lib.lecture(lid)['pause']:
+                        self.lib.update(lid,status='paused' if self.lib.lecture(lid)['pause'] else 'queued');return
+                    self.video(lid)
+                    if self.version(self.metadata(video))!=version:
+                        raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+                    if shutil.disk_usage(self.lib.root).free<64*1024**2 or shutil.disk_usage(self.temp).free<128*1024**2:
+                        raise RuntimeError('분석 자료를 저장할 공간이 부족합니다. 관리자에게 문의해 주세요.')
+                    cache=self.lib.root/'temp'/f'{lid}-{i}.json'
+                    clip=self.temp/f'{lid}-{i}.mp4'
+                    if cache.exists():segments=json.loads(cache.read_text('utf-8'))
+                    else:
+                        remote=None
+                        try:
+                            self.phase(lid,f'{i+1}/{len(windows)}구간 · Drive 영상 준비 중')
+                            clip=clips.take(i)
+                            api.check_cancelled()
+                            if self.version(self.metadata(video))!=version:
+                                raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+                            for following in missing[position+1:]:
+                                if not (self.lib.root/'temp'/f'{lid}-{following}.json').exists():
+                                    clips.start(following);break
+                            remote=api.upload(clip)
+                            raw=api.generate([{'fileData':{'fileUri':remote['uri'],'mimeType':'video/mp4'}},
+                                {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
+                                ANALYSIS_SYSTEM,ANALYSIS_SCHEMA,'analysis')
+                            segments=validate_segments(raw,start,end)
+                            if any(s['timing']=='unknown' for s in segments):
+                                note='일부 설명은 AI 시간값을 확인하지 못해 시간 링크 없이 저장했습니다. 답변 내용과 원본 강의는 확인할 수 있습니다.'
+                                previous=self.lib.lecture(lid)['warning'] or ''
+                                if note not in previous:self.lib.update(lid,warning=(previous+' '+note).strip())
+                            tmp=cache.with_suffix('.tmp');tmp.write_text(json.dumps(segments,ensure_ascii=False),encoding='utf-8');os.replace(tmp,cache)
+                        finally:
+                            clip.unlink(missing_ok=True)
+                            if remote:api.remove(remote['name'])
+                    vectors=None
+                    try:vectors=api.embed([s['title']+'\n'+s['text']+'\n'+s['screen_text'] for s in segments])
+                    except ProviderError:
+                        self.lib.update(lid,warning='일부 의미 검색 색인이 없습니다. 키워드 검색으로 답하며, 색인 보완으로 다시 처리할 수 있습니다.')
+                    self.lib.save_part(lid,i,segments,api.embedding_model,vectors)
+                    self.lib.configure(provider_retry_at=0)
+                    self.phase(lid,f'{i+1}/{len(windows)}구간 저장 완료',model_used=api.effective_model)
+                    cache.unlink(missing_ok=True)
         self.video(lid)
         if self.version(self.metadata(video))!=version:
             raise ValueError('Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')

@@ -6,10 +6,11 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 
 TEMP=tempfile.TemporaryDirectory()
 os.environ['CLASSROOM_DATA_DIR']=TEMP.name
@@ -57,6 +58,7 @@ class FakeProvider:
     effective_model=model
     key='test'
     calls=[]
+    def validate_models(self):return {}
     def check_connection(self):return self.model
     def check_cancelled(self):pass
     def embed(self,texts,query=False):return [[1,0] for _ in texts]
@@ -289,6 +291,82 @@ class LectureTests(unittest.TestCase):
                     make_clip(url,target,2,5)
             self.assertAlmostEqual(probe(str(target)),3,delta=.2)
             self.assertTrue(any(ranges))
+
+    def test_prefetch_overlaps_analysis_and_preserves_saved_parts(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        lib.save_part(vid,0,[dict(text='이미 저장된 구간')])
+        video=worker.video(vid)
+        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'601000'}}
+        next_started=threading.Event();release_next=threading.Event()
+        prepared=[];active=0;peak=0;guard=threading.Lock()
+        def prepare(source,path,start,end,cancelled=None):
+            nonlocal active,peak
+            index=int(path.stem.rsplit('-',1)[1])
+            with guard:active+=1;peak=max(peak,active)
+            try:
+                prepared.append(index);path.write_bytes(b'prepared')
+                if index==2:
+                    next_started.set()
+                    if not release_next.wait(2):raise AssertionError('Analysis did not overlap preparation')
+            finally:
+                with guard:active-=1
+        case=self
+        class Analysis(FakeProvider):
+            count=0
+            def upload(self,path):return {'name':'files/mock','uri':'mock'}
+            def remove(self,name):pass
+            def generate(self,*a,**kw):
+                self.count+=1
+                if self.count==1:
+                    case.assertTrue(next_started.wait(2),'Next clip was not prepared during analysis')
+                    release_next.set()
+                return {'segments':[dict(start=0,end=2,title='설명',text='기록',transcript='기록',screen_text='')]}
+        api=Analysis()
+        with patch.object(worker,'provider',return_value=api),patch.object(worker,'metadata',return_value=meta),patch('lecture_ai.worker.DriveSource',return_value=contextlib.nullcontext('loopback')),patch('lecture_ai.worker.make_clip',side_effect=prepare),patch.object(api,'check_connection',side_effect=AssertionError('Extra generation probe')) as check:
+            worker.process(vid)
+        check.assert_not_called()
+        self.assertEqual(prepared,[1,2]);self.assertEqual(peak,1)
+        self.assertEqual(api.count,2);self.assertEqual(lib.parts_done(vid),{0,1,2})
+        self.assertEqual(lib.lecture(vid)['status'],'ready')
+        self.assertFalse(list(worker.temp.glob(vid+'-*.mp4')))
+
+    def test_failure_cancels_prefetch_without_losing_progress(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        lib.save_part(vid,0,[dict(text='유지할 구간')])
+        video=worker.video(vid)
+        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'601000'}}
+        next_started=threading.Event();next_cancelled=threading.Event()
+        def prepare(source,path,start,end,cancelled=None):
+            path.write_bytes(b'prepared')
+            if path.stem.endswith('-2'):
+                next_started.set();deadline=time.monotonic()+2
+                while not cancelled():
+                    if time.monotonic()>deadline:raise AssertionError('Prefetch did not stop')
+                    next_cancelled.wait(.01)
+                next_cancelled.set();raise ProviderCancelled()
+        case=self
+        class Analysis(FakeProvider):
+            def upload(self,path):return {'name':'files/mock','uri':'mock'}
+            def remove(self,name):pass
+            def generate(self,*a,**kw):
+                case.assertTrue(next_started.wait(2))
+                raise ProviderError('temporary',code=503)
+        with patch.object(worker,'provider',return_value=Analysis()),patch.object(worker,'metadata',return_value=meta),patch('lecture_ai.worker.DriveSource',return_value=contextlib.nullcontext('loopback')),patch('lecture_ai.worker.make_clip',side_effect=prepare):
+            with self.assertRaises(ProviderError) as error:worker.process(vid)
+        self.assertEqual(error.exception.code,503)
+        self.assertTrue(next_cancelled.is_set())
+        self.assertEqual(lib.parts_done(vid),{0})
+        self.assertFalse(list(worker.temp.glob(vid+'-*.mp4')))
+
+    def test_cancelling_clip_terminates_encoder(self):
+        process=Mock();process.poll.return_value=None
+        process.wait.side_effect=[subprocess.TimeoutExpired('ffmpeg',.5),0]
+        cancelled=Mock(side_effect=[False,False,True])
+        with patch('lecture_ai.worker.subprocess.Popen',return_value=process),patch('lecture_ai.worker.probe') as check:
+            with self.assertRaises(ProviderCancelled):make_clip('test',Path('/tmp/not-written.mp4'),0,5,cancelled)
+        process.terminate.assert_called_once();check.assert_not_called()
 
 
 class ProviderTests(unittest.TestCase):

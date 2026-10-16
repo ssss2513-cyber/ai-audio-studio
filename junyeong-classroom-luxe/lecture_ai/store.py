@@ -13,6 +13,8 @@ import secrets
 import sqlite3
 
 UTC = dt.timezone.utc
+ANALYSIS_SECONDS = 30*60
+LEGACY_ANALYSIS_SECONDS = 5*60
 
 
 def now():
@@ -48,7 +50,7 @@ def normalize(values):
     return array.array('f', (float(v)/n for v in values)).tobytes()
 
 
-def clip_windows(duration, size=300, overlap=3):
+def clip_windows(duration, size=ANALYSIS_SECONDS, overlap=3):
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError('영상 길이를 확인할 수 없습니다.')
     return [(max(0, i*size-overlap), min(duration, (i+1)*size))
@@ -135,6 +137,8 @@ class Library:
                 if name not in columns:db.execute(f"ALTER TABLE lectures ADD COLUMN {name} TEXT DEFAULT ''")
             for name,kind in (('retry_at','REAL'),('retry_count','INTEGER')):
                 if name not in columns:db.execute(f'ALTER TABLE lectures ADD COLUMN {name} {kind} DEFAULT 0')
+            if 'analysis_windows' not in columns:
+                db.execute("ALTER TABLE lectures ADD COLUMN analysis_windows TEXT DEFAULT ''")
         with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
             os.chmod(self.path, 0o600)
@@ -209,6 +213,51 @@ class Library:
     def parts_done(self, lid):
         with self.connect() as db:
             return {r[0] for r in db.execute('SELECT part FROM parts WHERE lecture_id=?',(lid,))}
+
+    def analysis_plan(self, lid, duration):
+        """Pin clip boundaries so resuming can never reinterpret a saved part number."""
+        if not math.isfinite(duration) or not 0<duration<=48*3600:
+            raise ValueError('영상 길이가 지원 범위를 벗어났습니다.')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM lectures WHERE id=?',(lid,)).fetchone()
+            if not row:raise ValueError('강의를 찾을 수 없습니다.')
+            if row['analysis_windows']:
+                windows=[tuple(w) for w in json.loads(row['analysis_windows'])]
+                if not windows or abs(windows[-1][1]-duration)>0.1:
+                    raise ValueError('저장된 분석 구간과 영상 길이가 다릅니다. 원본을 확인해 주세요.')
+                return windows
+            done={r[0] for r in db.execute('SELECT part FROM parts WHERE lecture_id=?',(lid,))}
+            # Legacy JSON caches already contain absolute timestamps from 5-minute clips.
+            # Keep every old index through the last saved/cached part, including any gaps.
+            cached=set()
+            for path in (self.root/'temp').glob(lid+'-*.json'):
+                index=path.stem.removeprefix(lid+'-')
+                if index.isdigit():cached.add(int(index))
+            keep=max(done|cached,default=-1)+1
+            legacy=clip_windows(duration,size=LEGACY_ANALYSIS_SECONDS)
+            if keep>len(legacy):
+                raise ValueError('기존 분석 구간과 영상 길이가 다릅니다. 원본을 확인해 주세요.')
+            windows=legacy[:keep]
+            cursor=windows[-1][1] if windows else 0
+            while cursor<duration:
+                end=min(duration,cursor+ANALYSIS_SECONDS)
+                windows.append((max(0,cursor-3),end));cursor=end
+            db.execute('UPDATE lectures SET analysis_windows=?,duration=?,total=?,completed=? WHERE id=?',
+                (json.dumps(windows),duration,len(windows),len(done),lid))
+        print('LECTURE_PLAN '+json.dumps(dict(lecture_id=lid,segment_seconds=ANALYSIS_SECONDS,
+            preserved_parts=len(done),preserved_cached_parts=len(cached-done),total=len(windows),
+            remaining=len(windows)-len(done))),flush=True)
+        return windows
+
+    def analysis_progress(self, row):
+        """Mixed 5/30-minute plans report elapsed coverage, not equal-weight part counts."""
+        if not row.get('analysis_windows'):
+            return 100*row.get('completed',0)/row['total'] if row.get('total') else 0
+        windows=json.loads(row['analysis_windows']);done=self.parts_done(row['id'])
+        covered=sum(end-(windows[i-1][1] if i else 0)
+                    for i,(_,end) in enumerate(windows) if i in done)
+        return min(100,100*covered/windows[-1][1]) if windows else 0
 
     def search(self, question, vector=None, model='', lecture_id=None, limit=14, allowed_ids=None):
         terms=tokens(question)[:45]

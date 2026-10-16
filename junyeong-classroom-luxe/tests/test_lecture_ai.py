@@ -212,7 +212,7 @@ class LectureTests(unittest.TestCase):
         v3=seed_video()
         self.assertEqual(self.admin.post('/api/admin/ai/queue-new',json={}).json()['added'],1)
         self.assertEqual(len(lib.list()),3)
-        self.assertEqual(len(clip_windows(6*3600)),72)
+        self.assertEqual(len(clip_windows(6*3600)),12)
 
     def test_private_material_filtered_before_provider(self):
         self.configure();pub=seed_video();private=seed_video('private')
@@ -224,6 +224,59 @@ class LectureTests(unittest.TestCase):
         self.assertEqual({s['lecture_id'] for s in r.json()['sources']},{pub})
         self.assertNotIn('내부 비밀',json.dumps(FakeProvider.calls,ensure_ascii=False))
         self.assertEqual(self.student.post('/api/ai/ask',json={'question':'설정 방법','lecture_id':private}).status_code,403)
+
+    def test_longer_plan_preserves_legacy_evidence_and_resumes_at_saved_boundary(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        for part in range(10):
+            lib.save_part(vid,part,[dict(start=part*300,end=part*300+50,title='기존 기록',text='보존할 설명')])
+        with lib.connect() as c:
+            before=[tuple(r) for r in c.execute('SELECT * FROM chunks WHERE lecture_id=? ORDER BY id',(vid,))]
+        windows=lib.analysis_plan(vid,23400)
+        self.assertEqual(windows[:10],clip_windows(23400,size=300)[:10])
+        self.assertEqual(windows[10],(2997,4800))
+        self.assertEqual(windows[-1][1],23400)
+        self.assertEqual(len(windows),22)
+        self.assertEqual(lib.parts_done(vid),set(range(10)))
+        with lib.connect() as c:
+            after=[tuple(r) for r in c.execute('SELECT * FROM chunks WHERE lecture_id=? ORDER BY id',(vid,))]
+        self.assertEqual(before,after)
+        self.assertEqual(Library(lib.root).analysis_plan(vid,23400),windows)
+        item=next(x for x in self.admin.get('/api/ai/lectures').json()['items'] if x['id']==vid)
+        self.assertAlmostEqual(item['progress'],100*3000/23400)
+        self.assertEqual((item['completed'],item['total']),(10,22))
+        with self.assertRaisesRegex(ValueError,'영상 길이'):lib.analysis_plan(vid,23000)
+
+    def test_plan_keeps_legacy_cached_indices_and_missing_gaps(self):
+        self.configure();vid=seed_video()
+        self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
+        lib.save_part(vid,0,[dict(text='기존 첫 구간')])
+        cache=lib.root/'temp'/f'{vid}-2.json'
+        payload=json.dumps([dict(start=600,end=650,text='캐시 보존')]);cache.write_text(payload)
+        try:
+            windows=lib.analysis_plan(vid,3600)
+            self.assertEqual(windows[:3],clip_windows(3600,size=300)[:3])
+            self.assertEqual(windows[3],(897,2700))
+            self.assertEqual(windows[-1],(2697,3600))
+            self.assertEqual(cache.read_text(),payload)
+            self.assertEqual(lib.parts_done(vid),{0})
+        finally:cache.unlink(missing_ok=True)
+
+    def test_startup_replans_without_clearing_quota_or_user_pause(self):
+        self.configure();vid=seed_video();ready=seed_video()
+        self.admin.post('/api/admin/ai/queue-new',json={})
+        lib.update(vid,status='paused',pause=1,duration=21600,total=72)
+        lib.update(ready,status='ready',duration=21600,total=72)
+        lib.configure(queue_blocked='일일 사용량 소진')
+        try:
+            with patch('lecture_ai.worker.threading.Thread'):
+                worker.thread=None;worker.start()
+            row=lib.lecture(vid)
+            self.assertEqual((row['status'],row['pause'],row['total']),('paused',1,12))
+            self.assertEqual(lib.lecture(ready)['total'],72)
+            self.assertFalse(lib.lecture(ready)['analysis_windows'])
+            self.assertEqual(lib.config()['queue_blocked'],'일일 사용량 소진')
+        finally:worker.thread=None
 
     def test_permission_change_during_answer(self):
         self.configure();vid=seed_video();seed_knowledge(vid)
@@ -246,7 +299,7 @@ class LectureTests(unittest.TestCase):
         self.configure();vid=seed_video()
         self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
         video=worker.video(vid)
-        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'601000'}}
+        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'3601000'}}
         class Analysis(FakeProvider):
             count=0
             fail=True
@@ -297,7 +350,7 @@ class LectureTests(unittest.TestCase):
         self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
         lib.save_part(vid,0,[dict(text='이미 저장된 구간')])
         video=worker.video(vid)
-        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'601000'}}
+        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'3601000'}}
         next_started=threading.Event();release_next=threading.Event()
         prepared=[];active=0;peak=0;guard=threading.Lock()
         def prepare(source,path,start,end,cancelled=None):
@@ -336,7 +389,7 @@ class LectureTests(unittest.TestCase):
         self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})
         lib.save_part(vid,0,[dict(text='유지할 구간')])
         video=worker.video(vid)
-        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'601000'}}
+        meta={'id':video['external_id'],'size':1000,'md5Checksum':'same','videoMediaMetadata':{'durationMillis':'3601000'}}
         next_started=threading.Event();next_cancelled=threading.Event()
         def prepare(source,path,start,end,cancelled=None):
             path.write_bytes(b'prepared')
@@ -370,6 +423,24 @@ class LectureTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_analysis_budget_and_truncated_result_are_handled_without_extra_calls(self):
+        api=Gemini('test');limits=[]
+        def request(url,payload,**kwargs):
+            limits.append(payload['generationConfig']['maxOutputTokens'])
+            return {'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':'{"ok":true}'}]}}]},{}
+        with patch.object(api,'request',side_effect=request):
+            api.generate([], '', {},'analysis')
+            api.generate([], '', {},'answer')
+            api._output_limits[api.model]=32768
+            api.generate([], '', {},'analysis')
+        self.assertEqual(limits,[65536,16384,32768])
+        with patch.object(api,'request',return_value=({'candidates':[{'finishReason':'MAX_TOKENS',
+                'content':{'parts':[{'text':'{"ok":true}'}]}}]},{})) as request:
+            with self.assertRaises(ProviderError) as raised:api.generate([], '', {},'analysis')
+        self.assertEqual(raised.exception.provider_status,'MAX_TOKENS')
+        self.assertFalse(raised.exception.retryable)
+        request.assert_called_once()
+
     def test_invalid_timestamp_keeps_text_without_fabricating_citation(self):
         raw={'segments':[dict(start=0,end=25,text='정상 설명'),dict(start=250,end=600,text='시간 오류 설명'),
                          dict(start=None,end=None,text='시간 없는 설명')]}

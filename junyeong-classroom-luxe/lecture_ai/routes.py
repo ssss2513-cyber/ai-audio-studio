@@ -102,6 +102,7 @@ def install(core,auth_headers):
             item=dict(id=v['id'],title=v['title'],playlist=v['playlist'],duration=v['duration'],
                 state=v['state'],status=r.get('status','new'),completed=r.get('completed',0),
                 total=r.get('total',0),chunks=r.get('chunks',0))
+            item['progress']=lib.analysis_progress(r) if r else 0
             if admin:item.update(error=r.get('error',''),warning=r.get('warning',''),pause=bool(r.get('pause')),
                 phase=r.get('phase',''),phase_at=r.get('phase_at',''),model_used=r.get('model_used',''),retry_at=r.get('retry_at',0))
             items.append(item)

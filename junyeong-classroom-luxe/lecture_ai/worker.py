@@ -14,10 +14,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
-from .store import clip_windows, now
+from .store import now
 from .provider import Gemini, ProviderError, ProviderCancelled, FALLBACK_MODEL, ANALYSIS_SCHEMA, ANALYSIS_SYSTEM
 
 RETRY_DELAYS=(120,300,600,1200,1800,3600)
+CLIP_MAX_BYTES=192*1024**2
+CLIP_FREE_BYTES=2*CLIP_MAX_BYTES+64*1024**2
 
 
 def validate_segments(raw, start, end):
@@ -63,7 +65,7 @@ def make_clip(source, path, start, end, cancelled=None):
          '-t',str(end-start),'-map','0:v:0','-map','0:a:0?',
          '-vf','fps=1,scale=min(1280\\,iw):-2','-c:v','libx264','-preset','veryfast',
          '-crf','25','-maxrate','600k','-bufsize','1200k','-threads','1',
-         '-c:a','aac','-b:a','48k','-ac','1','-ar','24000','-fs','50331648',
+         '-c:a','aac','-b:a','48k','-ac','1','-ar','24000','-fs',str(CLIP_MAX_BYTES),
          '-movflags','+faststart',str(path)]
     if cancelled and cancelled():raise ProviderCancelled()
     process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -100,7 +102,7 @@ class ClipPrefetch:
 
     def prepare(self,index,path):
         if self.stopped():raise ProviderCancelled()
-        if shutil.disk_usage(self.folder).free<128*1024**2:
+        if shutil.disk_usage(self.folder).free<CLIP_FREE_BYTES:
             raise RuntimeError('영상 준비 공간이 부족합니다. 관리자에게 문의해 주세요.')
         started=time.monotonic()
         make_clip(self.source,path,*self.windows[index],cancelled=self.stopped)
@@ -286,6 +288,13 @@ class Worker:
         for p in self.temp.glob('*.mp4'):p.unlink(missing_ok=True)
         with self.lib.connect() as c:
             c.execute("UPDATE lectures SET status=CASE WHEN pause=1 THEN 'paused' ELSE 'queued' END WHERE status='analyzing'")
+            pending=[dict(r) for r in c.execute("SELECT id,duration FROM lectures WHERE kind='video' AND status!='ready' AND duration>0 AND analysis_windows=''")]
+        # Replan even while quota-blocked, so the UI immediately shows the actual remaining work.
+        # This does not clear a quota block, change pause/status, or resubmit stored analysis.
+        for row in pending:
+            try:self.lib.analysis_plan(row['id'],row['duration'])
+            except (ValueError,TypeError):
+                self.lib.update(row['id'],warning='분석 구간 변경 전 원본 길이와 저장 자료 확인이 필요합니다.')
         if not self.lib.config().get('recovery_20261016_v2'):
             # Resume one previously requested job once after this repair; never override a user pause.
             with self.lib.connect() as c:
@@ -366,8 +375,7 @@ class Worker:
         with DriveSource(video['external_id'],self.auth_headers,int(meta.get('size') or 0),None) as source:
             length=float((meta.get('videoMediaMetadata') or {}).get('durationMillis') or 0)/1000 or probe(source)
             if not math.isfinite(length) or not 0<length<=48*3600:raise ValueError('영상 길이가 지원 범위를 벗어났습니다.')
-            windows=clip_windows(length);done=self.lib.parts_done(lid)
-            self.lib.update(lid,duration=length,total=len(windows))
+            windows=self.lib.analysis_plan(lid,length);done=self.lib.parts_done(lid)
             missing=[i for i in range(len(windows)) if i not in done]
             with ClipPrefetch(source,windows,self.temp,lid,api.cancelled) as clips:
                 for position,i in enumerate(missing):
@@ -377,7 +385,7 @@ class Worker:
                     self.video(lid)
                     if self.version(self.metadata(video))!=version:
                         raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
-                    if shutil.disk_usage(self.lib.root).free<64*1024**2 or shutil.disk_usage(self.temp).free<128*1024**2:
+                    if shutil.disk_usage(self.lib.root).free<64*1024**2 or shutil.disk_usage(self.temp).free<CLIP_FREE_BYTES:
                         raise RuntimeError('분석 자료를 저장할 공간이 부족합니다. 관리자에게 문의해 주세요.')
                     cache=self.lib.root/'temp'/f'{lid}-{i}.json'
                     clip=self.temp/f'{lid}-{i}.mp4'
@@ -385,7 +393,7 @@ class Worker:
                     else:
                         remote=None
                         try:
-                            self.phase(lid,f'{i+1}/{len(windows)}구간 · Drive 영상 준비 중')
+                            self.phase(lid,f'{i+1}/{len(windows)}구간 · 약 {max(1,round((end-start)/60))}분 영상 준비 중')
                             clip=clips.take(i)
                             api.check_cancelled()
                             if self.version(self.metadata(video))!=version:

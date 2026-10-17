@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from .provider import ProviderError, ProviderCancelled
 
 MAX_KEYS=10
+MAX_KEY_LENGTH=2048
 
 
 def next_daily_reset():
@@ -68,7 +69,7 @@ class KeyPool:
                 if item.get('remove'):continue
                 key=item.get('api_key','').strip()
                 if key:
-                    if len(key)<8 or len(key)>256 or any(c.isspace() for c in key):
+                    if len(key)<8 or len(key)>MAX_KEY_LENGTH or any(c.isspace() for c in key):
                         raise ValueError('API 키 형식을 확인해 주세요. 공백 없이 입력하세요.')
                     fingerprint=hashlib.sha256(key.encode()).hexdigest()
                     if row.get('fingerprint')!=fingerprint:row['states']={}
@@ -134,6 +135,14 @@ class KeyPool:
     def available(self,row,scope):
         return row.get('enabled',True) and not self.blocked(row.get('states',{}).get('*')) and not self.blocked(row.get('states',{}).get(scope))
 
+    def credential_info(self,row):
+        # Only return length/type, never key characters or a reversible identifier.
+        try:key=self.core.dec(row['secret'])
+        except Exception:return dict(key_length=0,key_format='unknown',possible_truncation=False)
+        kind='authorization' if key.startswith('AQ.') else 'standard' if key.startswith('AIza') else 'other'
+        return dict(key_length=len(key),key_format=kind,
+                    possible_truncation=kind=='authorization' and len(key)==256)
+
     def snapshot(self,scope='generation'):
         with self.lock:
             rows=self.records();result=[]
@@ -147,7 +156,8 @@ class KeyPool:
                     status='disabled' if not row.get('enabled',True) else 'shared' if blocked and state.get('origin')=='project' else state.get('reason','ready') if blocked else 'ready',
                     reason=state.get('reason',''),origin=state.get('origin','legacy' if blocked else ''),
                     checked_at=state.get('checked_at',0),code=state.get('code'),quota=state.get('quota',[]),
-                    retry_at=state.get('until',0) if blocked else 0,error=state.get('error','') if blocked else ''))
+                    retry_at=state.get('until',0) if blocked else 0,error=state.get('error','') if blocked else '',
+                    **self.credential_info(row)))
             return result
 
     def report(self,event):
@@ -155,7 +165,7 @@ class KeyPool:
         details=[]
         for i,(key,row) in enumerate(zip(keys,rows)):
             group=groups.setdefault(self.group(row),len(groups)+1)
-            details.append({k:key[k] for k in ('id','status','origin','reason','retry_at','code','quota')})
+            details.append({k:key[k] for k in ('id','status','origin','reason','retry_at','code','quota','key_length','key_format','possible_truncation')})
             details[-1].update(slot=i+1,group=group,shared=bool(row.get('share_project_quota')))
         print('LECTURE_KEYS '+json.dumps(dict(event=event,configured=len(keys),
             available=sum(k['status']=='ready' for k in keys),parallel_limit=self.capacity(),keys=details)),flush=True)

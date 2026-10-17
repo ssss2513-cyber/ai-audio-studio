@@ -114,6 +114,44 @@ class LectureTests(unittest.TestCase):
         row=worker.keys.acquire('embedding',None,set());worker.keys.release(row['id'])
         self.assertEqual(worker.keys.capacity(),1)
 
+    def test_long_authorization_keys_saved_intact_and_used_without_secret_leaks(self):
+        values=['AQ.'+str(i)+'x'*(2048-4) for i in range(10)]
+        with patch('lecture_ai.provider.Gemini.request',side_effect=AssertionError('Saving must not call AI')):
+            response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(api_key=value) for value in values]})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual([core.dec(row['secret']) for row in worker.keys.records()],values)
+        self.assertTrue(all(k['key_length']==2048 and k['key_format']=='authorization' for k in response.json()['keys']))
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out):worker.keys.report('diagnostic')
+        for value in values:
+            self.assertNotIn(value,response.text)
+            self.assertNotIn(value,out.getvalue())
+        observed=[]
+        def factory(key):
+            observed.append(key)
+            return FakeProvider()
+        with patch.object(worker.keys,'factory',side_effect=factory):worker.keys.call(lambda api:True)
+        self.assertIn(observed[0],values)
+        saved=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(id=k['id'],api_key='') for k in response.json()['keys']]})
+        self.assertEqual(saved.status_code,200)
+        self.assertEqual([core.dec(row['secret']) for row in worker.keys.records()],values)
+
+    def test_previous_length_limit_warns_without_destroying_key_or_quota_state(self):
+        original='AQ.'+'x'*253
+        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(api_key=original)]})
+        identity=response.json()['keys'][0]['id']
+        worker.keys.failed(identity,'generation',ProviderError('인증 실패',code=401))
+        key=worker.keys.snapshot()[0]
+        self.assertTrue(key['possible_truncation'])
+        self.assertEqual(key['status'],'auth')
+        self.assertEqual(core.dec(worker.keys.records()[0]['secret']),original)
+        replacement='AQ.'+'y'*600
+        response=self.admin.post('/api/admin/ai/settings',json={'keys':[dict(id=identity,api_key=replacement)]})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['keys'][0]['status'],'ready')
+        self.assertFalse(response.json()['keys'][0]['possible_truncation'])
+        self.assertEqual(core.dec(worker.keys.records()[0]['secret']),replacement)
+
     def test_same_display_name_does_not_exhaust_other_nine_keys(self):
         keys=self.pool_keys(10,project='Default Gemini Project')
         worker.keys.failed(keys[0]['id'],'generation',ProviderError('일일 한도',code=429,quota=[{'quotaId':'GenerateRequestsPerDay','quotaValue':'20'}]))

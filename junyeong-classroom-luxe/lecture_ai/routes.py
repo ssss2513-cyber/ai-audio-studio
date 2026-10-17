@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from .store import Library, now
 from .worker import Worker
 from .provider import Gemini, ProviderError, FALLBACK_MODEL, ANSWER_SYSTEM, ANSWER_SCHEMA
+from .key_pool import MAX_KEY_LENGTH
 
 
 class ApiKeySpec(BaseModel):
@@ -16,13 +17,13 @@ class ApiKeySpec(BaseModel):
     label: str=Field(default='',max_length=40)
     project: str=Field(default='',max_length=100)
     share_project_quota: bool=False
-    api_key: str=Field(default='',max_length=256)
+    api_key: str=Field(default='',max_length=MAX_KEY_LENGTH)
     enabled: bool=True
     remove: bool=False
 
 
 class Settings(BaseModel):
-    api_key: str=Field(default='',max_length=256)
+    api_key: str=Field(default='',max_length=MAX_KEY_LENGTH)
     keys: list[ApiKeySpec]|None=Field(default=None,max_length=20)
     parallelism: int=Field(default=10,ge=1,le=10)
     model: str=Field(default='gemini-3.8-flash',max_length=100)

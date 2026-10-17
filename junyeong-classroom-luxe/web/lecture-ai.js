@@ -3,8 +3,9 @@ const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null};
 const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',retrying:'자동 재개 대기',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
 const laKeyState=cfg=>`서버에 저장된 API 키 ${cfg.keys?.length||0} / 10개`;
 const laKeySlots=keys=>Array.from({length:10},(_,index)=>(keys||[])[index]||{});
+const LA_MAX_KEY_LENGTH=2048;
 const laTime=n=>{n=Math.max(0,Math.floor(Number(n)||0));return [Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':');};
-const laResumeTime=n=>new Date(Number(n)*1000).toLocaleTimeString('ko-KR',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+const laResumeTime=n=>new Date(Number(n)*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 const laQueueStatus=d=>d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:Number(d.queue_retry_at)>Date.now()/1000?`API 키 사용을 잠시 기다립니다. 한국 시간 ${laResumeTime(d.queue_retry_at)}부터 자동으로 이어서 분석합니다. 저장된 구간은 유지됩니다.`:'';
 
 const laKeySummary=d=>`사용 가능한 키 ${d.keys?.filter(k=>k.status==='ready').length||0}개 / 등록 ${d.keys?.length||0}개 · 최대 ${d.parallelism||1}개 구간 동시 처리`;
@@ -13,7 +14,9 @@ function laKeyCard(key={},index=0){
  return `<fieldset class="la-key-card" data-la-key data-slot="${index+1}" data-id="${esc(key.id||'')}">
  <legend>키 ${index+1}</legend>
  <div class="la-key-top"><span class="pill ${key.saved?'approved':'pending'}">${key.saved?'✓ 저장됨':'입력 대기'}</span>${key.saved?`<span>${key.busy?'분석에 사용 중':esc(laKeyLabels[key.status]||key.status)}</span>`:''}<label class="la-key-toggle"><input type="checkbox" data-key-field="enabled" ${key.enabled!==false?'checked':''}> 사용</label></div>
- <label class="field"><span>Gemini API 키 ${index+1}</span><input data-key-field="api_key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" maxlength="256" placeholder="${key.saved?'✓ 저장됨 · 교체할 때만 새 키 입력':'여기에 API 키를 붙여넣으세요'}"></label>
+ <label class="field"><span>Gemini API 키 ${index+1}</span><input data-key-field="api_key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" placeholder="${key.saved?'✓ 저장됨 · 교체할 때만 새 키 입력':'여기에 API 키를 붙여넣으세요'}"></label>
+ <p class="form-note" data-key-length>${key.saved&&key.key_length?`저장된 키 길이 ${Number(key.key_length)}자`:'Google AI Studio의 복사 버튼으로 전체 키를 붙여넣으세요.'}</p>
+ ${key.possible_truncation&&key.status==='auth'?'<p class="la-error">저장된 인증 키가 256자입니다. 이전 입력 제한으로 잘렸을 수 있습니다. Google AI Studio에서 전체 키를 다시 복사해 이 칸에 붙여넣고 저장해 주세요.</p>':''}
  ${key.origin==='project'?'<p class="form-note">확인된 같은 프로젝트의 한도 응답에 따른 대기입니다.</p>':key.quota_recheck_pending?'<p class="form-note">다음 분석에서 이 키의 응답을 개별 확인합니다.</p>':key.origin==='provider'?'<p class="form-note">이 키의 실제 Google 응답으로 확인한 상태입니다.</p>':''}
  ${key.retry_at?`<p class="form-note">한국 시간 ${laResumeTime(key.retry_at)} 이후 다시 사용합니다.</p>`:''}${key.error?`<p class="la-error">${esc(key.error)}</p>`:''}
  <details class="la-key-details"><summary>키 이름 · 프로젝트 설정 (선택)</summary><label class="field"><span>키 이름</span><input data-key-field="label" maxlength="40" value="${esc(key.label||'키 '+(index+1))}"></label><label class="field"><span>Google 프로젝트 ID</span><input data-key-field="project" maxlength="100" value="${esc(key.project||'')}" placeholder="표시 이름이 아닌 프로젝트 ID"></label><label class="la-key-toggle"><input type="checkbox" data-key-field="share_project_quota" ${key.share_project_quota?'checked':''}> 이 프로젝트 ID가 같은 키의 한도 대기를 함께 관리</label></details>
@@ -22,6 +25,7 @@ function laKeyCard(key={},index=0){
 function laUpdateKeyDraft(){
  const form=$('#la-settings'),draft=$('#la-key-draft');if(!form||!draft)return;
  const rows=Array.from(form.querySelectorAll('[data-la-key]')).filter(row=>row.dataset.remove!=='true');
+ rows.forEach(row=>{const input=row.querySelector('[data-key-field="api_key"]'),note=row.querySelector('[data-key-length]'),length=input.value.trim().length;if(note){if(!note.dataset.savedText)note.dataset.savedText=note.textContent;note.textContent=length?`입력한 키 ${length}자${length>LA_MAX_KEY_LENGTH?' · 너무 긴 값입니다. API 키만 복사해 주세요.':''}`:note.dataset.savedText;}});
  const filled=rows.filter(row=>row.querySelector('[data-key-field="api_key"]').value.trim()).length;
  const total=rows.filter(row=>row.dataset.id||row.querySelector('[data-key-field="api_key"]').value.trim()).length;
  draft.textContent=`새로 입력한 키 ${filled}개 · 저장 후 총 ${total} / 10개`;
@@ -95,6 +99,7 @@ document.addEventListener('submit',async e=>{
   const status=$('#la-setting-status');status.textContent='API 키와 병렬 설정을 저장하고 있습니다…';
   try{
    const keys=Array.from(form.querySelectorAll('[data-la-key]')).map(row=>({id:row.dataset.id||'',label:row.querySelector('[data-key-field="label"]').value,project:row.querySelector('[data-key-field="project"]').value,share_project_quota:row.querySelector('[data-key-field="share_project_quota"]').checked,api_key:row.querySelector('[data-key-field="api_key"]').value,enabled:row.querySelector('[data-key-field="enabled"]').checked,remove:row.dataset.remove==='true'}));
+   if(keys.some(key=>!key.remove&&key.api_key.trim().length>LA_MAX_KEY_LENGTH))throw new Error(`API 키는 ${LA_MAX_KEY_LENGTH}자까지 저장할 수 있습니다. 입력값을 자르지 않았으니 API 키만 복사했는지 확인해 주세요.`);
    const data={keys,parallelism:Number(form.elements.parallelism.value),model:form.elements.model.value,embedding_model:form.elements.embedding_model.value,fallback_model:form.elements.fallback_model.value};
    const cfg=await api('/admin/ai/settings','POST',data);
    form.querySelectorAll('[data-key-field="api_key"]').forEach(input=>input.value='');

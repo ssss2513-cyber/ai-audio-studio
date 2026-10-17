@@ -1,7 +1,8 @@
 'use strict';
 const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null};
 const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',retrying:'자동 재개 대기',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
-const laKeyState=cfg=>cfg.keys?.length?`✓ API 키 ${cfg.keys.length}개 저장됨 · 보안을 위해 값은 표시하지 않습니다. 빈칸으로 저장하면 기존 키가 유지됩니다.`:'Gemini API 키를 최대 10개까지 등록할 수 있습니다.';
+const laKeyState=cfg=>`서버에 저장된 API 키 ${cfg.keys?.length||0} / 10개`;
+const laKeySlots=keys=>Array.from({length:10},(_,index)=>(keys||[])[index]||{});
 const laTime=n=>{n=Math.max(0,Math.floor(Number(n)||0));return [Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':');};
 const laResumeTime=n=>new Date(Number(n)*1000).toLocaleTimeString('ko-KR',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 const laQueueStatus=d=>d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:Number(d.queue_retry_at)>Date.now()/1000?`API 키 사용을 잠시 기다립니다. 한국 시간 ${laResumeTime(d.queue_retry_at)}부터 자동으로 이어서 분석합니다. 저장된 구간은 유지됩니다.`:'';
@@ -9,12 +10,35 @@ const laQueueStatus=d=>d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:
 const laKeySummary=d=>`사용 가능한 키 ${d.keys?.filter(k=>k.status==='ready').length||0}개 / 등록 ${d.keys?.length||0}개 · 최대 ${d.parallelism||1}개 구간 동시 처리`;
 const laKeyLabels={ready:'사용 준비',daily:'일일 한도 소진',rate:'분당 한도 대기',quota_zero:'허용량 없음',auth:'키·권한 확인 필요',temporary:'연결 대기',disabled:'사용 안 함',shared:'공유 프로젝트 한도 대기'};
 function laKeyCard(key={},index=0){
- return `<fieldset class="la-key-card" data-la-key data-id="${esc(key.id||'')}"><legend>${esc(key.label||'키 '+(index+1))}</legend><div class="la-key-top"><span class="pill ${key.saved?'approved':'pending'}">${key.saved?'✓ 저장됨':'새 키'}</span>${key.saved?`<span>${key.busy?'분석에 사용 중':esc(laKeyLabels[key.status]||key.status)}</span>`:''}<label class="la-key-toggle"><input type="checkbox" data-key-field="enabled" ${key.enabled!==false?'checked':''}> 사용</label></div><label class="field"><span>키 이름</span><input data-key-field="label" maxlength="40" value="${esc(key.label||'키 '+(index+1))}"></label><label class="field"><span>Gemini API 키</span><input data-key-field="api_key" type="password" autocomplete="new-password" maxlength="256" placeholder="${key.saved?'저장됨 · 변경할 때만 입력':'API 키 입력'}"></label><label class="field"><span>Google 프로젝트 ID (선택)</span><input data-key-field="project" maxlength="100" value="${esc(key.project||'')}" placeholder="표시 이름이 아닌 프로젝트 ID"></label><label class="la-key-toggle"><input type="checkbox" data-key-field="share_project_quota" ${key.share_project_quota?'checked':''}> 이 프로젝트 ID가 같은 키의 한도 대기를 함께 관리</label>${key.origin==='project'?'<p class="form-note">같은 프로젝트로 확인한 다른 키의 한도 응답에 따른 대기입니다. 이 키에서 직접 소진 오류를 받은 것은 아닙니다.</p>':key.quota_recheck_pending?'<p class="form-note">이전 프로젝트 이름으로 공유된 한도 기록을 해제했습니다. 다음 분석에서 이 키의 응답을 개별 확인합니다.</p>':key.origin==='provider'?'<p class="form-note">이 키의 실제 Google 응답으로 확인한 상태입니다.</p>':''}${key.retry_at?`<p class="form-note">한국 시간 ${laResumeTime(key.retry_at)} 이후 다시 사용합니다.</p>`:''}${key.error?`<p class="la-error">${esc(key.error)}</p>`:''}<div class="button-row"><button type="button" class="text-btn" data-la-remove-key>이 키 삭제</button>${key.saved&&key.status!=='ready'&&key.status!=='disabled'?`<button type="button" class="outline small" data-la-resume-key="${esc(key.id)}">한도·권한 변경 후 사용 재개</button>`:''}</div></fieldset>`;
+ return `<fieldset class="la-key-card" data-la-key data-slot="${index+1}" data-id="${esc(key.id||'')}">
+ <legend>키 ${index+1}</legend>
+ <div class="la-key-top"><span class="pill ${key.saved?'approved':'pending'}">${key.saved?'✓ 저장됨':'입력 대기'}</span>${key.saved?`<span>${key.busy?'분석에 사용 중':esc(laKeyLabels[key.status]||key.status)}</span>`:''}<label class="la-key-toggle"><input type="checkbox" data-key-field="enabled" ${key.enabled!==false?'checked':''}> 사용</label></div>
+ <label class="field"><span>Gemini API 키 ${index+1}</span><input data-key-field="api_key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" maxlength="256" placeholder="${key.saved?'✓ 저장됨 · 교체할 때만 새 키 입력':'여기에 API 키를 붙여넣으세요'}"></label>
+ ${key.origin==='project'?'<p class="form-note">확인된 같은 프로젝트의 한도 응답에 따른 대기입니다.</p>':key.quota_recheck_pending?'<p class="form-note">다음 분석에서 이 키의 응답을 개별 확인합니다.</p>':key.origin==='provider'?'<p class="form-note">이 키의 실제 Google 응답으로 확인한 상태입니다.</p>':''}
+ ${key.retry_at?`<p class="form-note">한국 시간 ${laResumeTime(key.retry_at)} 이후 다시 사용합니다.</p>`:''}${key.error?`<p class="la-error">${esc(key.error)}</p>`:''}
+ <details class="la-key-details"><summary>키 이름 · 프로젝트 설정 (선택)</summary><label class="field"><span>키 이름</span><input data-key-field="label" maxlength="40" value="${esc(key.label||'키 '+(index+1))}"></label><label class="field"><span>Google 프로젝트 ID</span><input data-key-field="project" maxlength="100" value="${esc(key.project||'')}" placeholder="표시 이름이 아닌 프로젝트 ID"></label><label class="la-key-toggle"><input type="checkbox" data-key-field="share_project_quota" ${key.share_project_quota?'checked':''}> 이 프로젝트 ID가 같은 키의 한도 대기를 함께 관리</label></details>
+ <div class="button-row"><button type="button" class="text-btn" data-la-remove-key>${key.saved?'저장된 키 삭제':'입력 지우기'}</button>${key.saved&&key.status!=='ready'&&key.status!=='disabled'?`<button type="button" class="outline small" data-la-resume-key="${esc(key.id)}">한도·권한 변경 후 사용 재개</button>`:''}</div></fieldset>`;
+}
+function laUpdateKeyDraft(){
+ const form=$('#la-settings'),draft=$('#la-key-draft');if(!form||!draft)return;
+ const rows=Array.from(form.querySelectorAll('[data-la-key]')).filter(row=>row.dataset.remove!=='true');
+ const filled=rows.filter(row=>row.querySelector('[data-key-field="api_key"]').value.trim()).length;
+ const total=rows.filter(row=>row.dataset.id||row.querySelector('[data-key-field="api_key"]').value.trim()).length;
+ draft.textContent=`새로 입력한 키 ${filled}개 · 저장 후 총 ${total} / 10개`;
 }
 function laSettings(cfg){
- const keys=cfg.keys?.length?cfg.keys:[{}];
- return `<form id="la-settings" class="panel la-settings"><h2>AI 키 · 병렬 분석</h2><p id="la-key-state">${laKeyState(cfg)}</p><p class="form-note">키는 서버에 암호화해 저장합니다. 한도가 소진되거나 사용할 수 없는 키는 건너뛰고, 사용 가능한 다음 키로 미완료 구간을 처리합니다.</p><div id="la-key-list">${keys.map(laKeyCard).join('')}</div><button type="button" class="outline" data-la-add-key>＋ API 키 추가 (최대 10개)</button><p class="form-note">같은 구글 프로젝트에서 만든 키는 한도를 공유합니다. 프로젝트 표시 이름은 서로 같을 수 있습니다. 실제 프로젝트 ID를 확인하고 체크한 경우에만 한도 대기를 함께 관리하며, 기본은 키별 개별 확인입니다.</p><label class="field"><span>최대 동시 분석 구간</span><select name="parallelism">${Array.from({length:10},(_,i)=>`<option value="${i+1}" ${Number(cfg.parallelism||10)===i+1?'selected':''}>${i+1}개</option>`).join('')}</select></label><p class="form-note">사용 가능한 키·프로젝트 수에 맞춰 최대 10개 구간을 동시에 분석합니다. 모든 키가 한도 대기 상태이면 기록을 보존하고 대기합니다.</p><label class="field"><span>영상 분석·답변 모델</span><input name="model" value="${esc(cfg.model)}" list="la-models" required maxlength="100"></label><datalist id="la-models"></datalist><label class="field"><span>서버 오류 시 대체 모델 (비우면 사용 안 함)</span><input name="fallback_model" value="${esc(cfg.fallback_model||'')}" list="la-models" maxlength="100"></label><p class="form-note">500·503 등 서버 오류에만 대체 모델을 사용합니다. 한도 소진 시에는 사용 가능한 다음 키를 선택합니다.</p><label class="field"><span>검색 모델</span><input name="embedding_model" value="${esc(cfg.embedding_model)}" list="la-embedding-models" required maxlength="100"></label><datalist id="la-embedding-models"></datalist><div class="button-row"><button class="primary" type="submit">키 및 병렬 설정 저장</button><button class="outline" type="button" data-la-action="models">사용 가능한 모델 확인</button></div><p id="la-setting-status" role="status">${esc(cfg.connection?.message||'')}</p><p class="form-note">저장만으로 시험용 AI 분석을 요청하지 않습니다. 실제 사용 가능 여부는 강의 처리 중 확인됩니다.</p><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="subtle-link">Google AI Studio에서 API 키 확인 ↗</a></form>`;
+ const keys=laKeySlots(cfg.keys);
+ return `<form id="la-settings" class="panel la-settings"><h2>API 키 10개 등록</h2><p class="form-note">아래 키 1~10 입력칸에 각각 다른 Gemini API 키를 붙여넣고 <b>입력한 키 저장</b>을 누르세요. 원하는 개수만 입력해도 됩니다.</p>
+ <div class="la-key-savebar"><div><strong id="la-key-state">${laKeyState(cfg)}</strong><small id="la-key-draft">새로 입력한 키 0개 · 저장 후 총 ${cfg.keys?.length||0} / 10개</small></div><button class="primary" type="submit">입력한 키 저장</button><p id="la-setting-status" role="status">${esc(cfg.connection?.message||'')}</p></div>
+ <p class="form-note">‘✓ 저장됨’이 있는 칸은 비워 두어도 기존 키가 유지됩니다. 저장된 키 값은 보안을 위해 표시하지 않습니다. 새 입력칸을 비워 두면 그 칸은 등록되지 않습니다.</p>
+ <div id="la-key-list">${keys.map(laKeyCard).join('')}</div>
+ <p class="form-note">키는 서버에 암호화해 저장하며 한도가 소진된 키는 건너뛰고 다음 키를 사용합니다. 같은 Google 프로젝트에서 만든 키는 한도를 공유합니다. 프로젝트 설정은 선택 사항이며 기본은 키별 개별 확인입니다.</p>
+ <h3>병렬 분석 설정</h3><label class="field"><span>최대 동시 분석 구간</span><select name="parallelism">${Array.from({length:10},(_,i)=>`<option value="${i+1}" ${Number(cfg.parallelism||10)===i+1?'selected':''}>${i+1}개</option>`).join('')}</select></label><p class="form-note">사용 가능한 키 수에 맞춰 최대 10개 구간을 동시에 분석합니다. 모든 키가 한도 대기 상태이면 완료한 분석을 보존하고 기다립니다.</p>
+ <details class="la-model-settings"><summary>AI 모델 설정</summary><label class="field"><span>영상 분석·답변 모델</span><input name="model" value="${esc(cfg.model)}" list="la-models" required maxlength="100"></label><datalist id="la-models"></datalist><label class="field"><span>서버 오류 시 대체 모델 (비우면 사용 안 함)</span><input name="fallback_model" value="${esc(cfg.fallback_model||'')}" list="la-models" maxlength="100"></label><p class="form-note">500·503 등 서버 오류에만 대체 모델을 사용합니다. 한도 소진 시에는 사용 가능한 다음 키를 선택합니다.</p><label class="field"><span>검색 모델</span><input name="embedding_model" value="${esc(cfg.embedding_model)}" list="la-embedding-models" required maxlength="100"></label><datalist id="la-embedding-models"></datalist><button class="outline" type="button" data-la-action="models">사용 가능한 모델 확인</button></details>
+ <div class="button-row"><button class="primary" type="submit">입력한 키 저장</button></div><p class="form-note">저장만으로 시험용 AI 분석을 요청하지 않습니다. 실제 사용 가능 여부는 강의 처리 중 확인됩니다.</p><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="subtle-link">Google AI Studio에서 API 키 확인 ↗</a></form>`;
 }
+
+document.addEventListener('input',e=>{if(e.target.closest('#la-settings [data-la-key]'))laUpdateKeyDraft();});
 
 async function lectureAssistantPage(){
  clearTimeout(LA.poll);
@@ -63,20 +87,25 @@ document.addEventListener('submit',async e=>{
  const form=e.target;
  if(!['la-settings','la-question'].includes(form.id))return;
  e.preventDefault();
- const button=form.querySelector('[type="submit"]');button.disabled=true;
+ const button=e.submitter||form.querySelector('[type="submit"]');
  if(form.id==='la-settings'){
+  if(form.dataset.saving==='true')return;
+  form.dataset.saving='true';
+  const controls=Array.from(form.querySelectorAll('input,select,button')).map(el=>({el,disabled:el.disabled}));controls.forEach(({el})=>el.disabled=true);
   const status=$('#la-setting-status');status.textContent='API 키와 병렬 설정을 저장하고 있습니다…';
   try{
    const keys=Array.from(form.querySelectorAll('[data-la-key]')).map(row=>({id:row.dataset.id||'',label:row.querySelector('[data-key-field="label"]').value,project:row.querySelector('[data-key-field="project"]').value,share_project_quota:row.querySelector('[data-key-field="share_project_quota"]').checked,api_key:row.querySelector('[data-key-field="api_key"]').value,enabled:row.querySelector('[data-key-field="enabled"]').checked,remove:row.dataset.remove==='true'}));
    const data={keys,parallelism:Number(form.elements.parallelism.value),model:form.elements.model.value,embedding_model:form.elements.embedding_model.value,fallback_model:form.elements.fallback_model.value};
    const cfg=await api('/admin/ai/settings','POST',data);
    form.querySelectorAll('[data-key-field="api_key"]').forEach(input=>input.value='');
-   $('#la-key-list').innerHTML=(cfg.keys.length?cfg.keys:[{}]).map(laKeyCard).join('');
-   $('#la-key-state').textContent=laKeyState(cfg);status.textContent=cfg.connection?.message||'저장 완료';toast('키 및 병렬 설정을 저장했습니다.');
-  }catch(err){status.textContent=err.message;}finally{button.disabled=false;}
+   form.querySelector('#la-key-list').innerHTML=laKeySlots(cfg.keys).map(laKeyCard).join('');
+   laUpdateKeyDraft();
+   form.querySelector('#la-key-state').textContent=laKeyState(cfg);status.textContent=`저장 완료 · API 키 ${cfg.keys.length} / 10개가 서버에 저장됐습니다.`;toast(`API 키 ${cfg.keys.length}개 저장 완료`);
+  }catch(err){status.textContent='저장하지 못했습니다. '+err.message;}finally{form.dataset.saving='false';controls.forEach(({el,disabled})=>el.disabled=disabled);}
   return;
  }
  if(LA.busy)return;
+ button.disabled=true;
  const question=form.elements.question.value.trim();if(question.length<2){button.disabled=false;return;}
  const owner=LA.owner;
  const previous=LA.messages.filter(x=>x.role==='user').slice(-2).map(x=>x.text);
@@ -95,16 +124,20 @@ document.addEventListener('submit',async e=>{
 });
 
 document.addEventListener('click',async e=>{
- const add=e.target.closest('[data-la-add-key]'),remove=e.target.closest('[data-la-remove-key]'),resume=e.target.closest('[data-la-resume-key]');
- if(add){
-  e.preventDefault();const list=$('#la-key-list'),rows=Array.from(list.querySelectorAll('[data-la-key]')).filter(row=>row.dataset.remove!=='true');
-  if(rows.length>=10){toast('API 키는 최대 10개까지 등록할 수 있습니다.');return;}
-  list.insertAdjacentHTML('beforeend',laKeyCard({},rows.length));return;
- }
+ const remove=e.target.closest('[data-la-remove-key]'),resume=e.target.closest('[data-la-resume-key]');
  if(remove){
-  e.preventDefault();const row=remove.closest('[data-la-key]');
-  if(!row.dataset.id)row.remove();else{row.dataset.remove='true';row.hidden=true;}
-  $('#la-setting-status').textContent='저장 버튼을 누르면 선택한 키가 삭제됩니다.';return;
+  e.preventDefault();const row=remove.closest('[data-la-key]'),form=$('#la-settings');
+  if(form?.dataset.saving==='true')return;
+  const slot=Number(row.dataset.slot)-1;
+  if(row.dataset.id){
+   row.dataset.remove='true';row.hidden=true;row.querySelector('[data-key-field="api_key"]').value='';
+   row.insertAdjacentHTML('afterend',laKeyCard({},slot));
+   $('#la-setting-status').textContent='입력한 키 저장을 누르면 선택한 기존 키가 삭제됩니다. 같은 칸에 새 키를 등록할 수 있습니다.';
+  }else{
+   row.outerHTML=laKeyCard({},slot);
+   $('#la-setting-status').textContent='아직 저장하지 않은 입력을 지웠습니다.';
+  }
+  laUpdateKeyDraft();return;
  }
  if(resume){
   e.preventDefault();resume.disabled=true;

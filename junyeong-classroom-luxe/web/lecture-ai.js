@@ -1,5 +1,5 @@
 'use strict';
-const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null,scope:'',chatId:0};
+const LA={tab:'manage',items:[],messages:[],owner:null,busy:false,poll:null,scope:'',chatId:0,open:false,draft:'',data:null,loadedAt:0,loading:null,loadError:'',unread:false,returnFocus:null};
 const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',retrying:'자동 재개 대기',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
 const laKeyState=cfg=>`서버에 저장된 API 키 ${cfg.keys?.length||0} / 10개`;
 const laKeySlots=keys=>Array.from({length:10},(_,index)=>(keys||[])[index]||{});
@@ -16,7 +16,81 @@ function laConversationHistory(){
   source_ids:m.role==='assistant'?m.sources.map(s=>s.id).filter(Number.isInteger).slice(0,20):[]
  }));
 }
-function laNewChat(scope=LA.scope){LA.messages=[];LA.scope=scope;LA.chatId+=1;}
+function laNewChat(scope=LA.scope){LA.messages=[];LA.scope=scope;LA.draft='';LA.unread=false;LA.chatId+=1;}
+const laChatIcon='<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-4 3V11.5A7.5 7.5 0 0 1 9.5 4H13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m18 2 1.1 3.9L23 7l-3.9 1.1L18 12l-1.1-3.9L13 7l3.9-1.1L18 2Z" fill="currentColor"/><path d="M7 11h5M7 14h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+
+function laPlaceWidget(){
+ const root=$('#la-widget'),modal=$('#modal');if(!root)return;
+ const inModal=!!modal?.open,parent=inModal?modal:document.body;
+ if(root.parentElement!==parent)parent.appendChild(root);
+ root.classList.toggle('la-in-modal',inModal);
+}
+function laUpdateViewport(){
+ const root=$('#la-widget'),viewport=window.visualViewport;if(!root||!viewport)return;
+ const gap=Math.max(0,window.innerHeight-viewport.height-viewport.offsetTop);
+ root.style.setProperty('--la-view-height',viewport.height+'px');
+ root.style.setProperty('--la-keyboard-gap',gap+'px');
+ root.classList.toggle('la-keyboard-open',gap>120);
+}
+function laUpdateLauncher(){
+ const launcher=$('#la-launcher'),panel=$('#la-chat-panel');if(!launcher||!panel)return;
+ launcher.setAttribute('aria-expanded',String(LA.open));
+ launcher.setAttribute('aria-label',LA.open?'강의 비서 질문창 닫기':LA.unread?'강의 비서 답변 도착 · 질문창 열기':'강의 비서 질문창 열기');
+ launcher.classList.toggle('has-answer',LA.unread&&!LA.open);panel.hidden=!LA.open;
+}
+function laSyncWidget(){
+ if(!$('#la-widget')){
+  const root=document.createElement('div');root.id='la-widget';
+  root.innerHTML=`<button id="la-launcher" type="button" data-la-toggle aria-haspopup="dialog" aria-controls="la-chat-panel" aria-expanded="false">${laChatIcon}<span>강의 비서</span><i aria-hidden="true"></i></button><section id="la-chat-panel" role="dialog" aria-modal="false" aria-labelledby="la-chat-title" hidden><header class="la-popup-header"><div class="la-popup-mark">${laChatIcon}</div><div><h2 id="la-chat-title">강의 비서</h2><p>배운 내용이 궁금할 때, 편하게 물어보세요.</p></div><button class="la-icon-button" type="button" data-la-close aria-label="질문창 닫기"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 6 12 12M18 6 6 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></header><div id="la-popup-content"></div></section>`;
+  document.body.appendChild(root);
+ }
+ const owner=S.member?.id||null;
+ if(LA.owner!==owner){
+  LA.owner=owner;laNewChat('');LA.busy=false;LA.open=false;LA.items=[];LA.data=null;LA.configured=false;LA.loadedAt=0;LA.loading=null;LA.loadError='';LA.tab='manage';
+  $('#la-popup-content').innerHTML='';
+ }
+ laPlaceWidget();laUpdateViewport();laUpdateLauncher();
+}
+async function laLoadData(){
+ if(LA.loading)return LA.loading;
+ const owner=LA.owner;LA.loadError='';
+ const pending=api('/ai/lectures').then(d=>{
+  if(LA.owner!==owner||S.member?.id!==owner)return null;
+  LA.data=d;LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;LA.loadedAt=Date.now();
+  if(LA.scope&&!LA.items.some(v=>v.id===LA.scope&&v.status==='ready')){laNewChat('');LA.busy=false;}
+  return d;
+ }).finally(()=>{if(LA.loading===pending)LA.loading=null;});
+ LA.loading=pending;return pending;
+}
+function laRenderChat(){
+ const content=$('#la-popup-content');if(!content)return;
+ const active=document.activeElement?.id==='la-input',d=LA.data;
+ if(!S.member){content.innerHTML='<div class="la-popup-welcome"><span>✦</span><h3>나의 강의에 대해 물어보세요</h3><p>로그인하면 미리 분석해 둔 강의 내용을 바탕으로 궁금한 점을 설명해 드려요.</p><button class="primary" type="button" data-la-login>로그인하고 질문하기</button></div>';return;}
+ if(!d){content.innerHTML=LA.loadError?`<div class="la-popup-welcome" role="alert"><h3>잠시 연결을 확인해 주세요</h3><p>${esc(LA.loadError)}</p><button class="outline" type="button" data-la-reload>다시 연결</button></div>`:'<div class="la-popup-welcome" role="status"><span>✦</span><p>저장된 강의 자료를 불러오고 있어요…</p></div>';return;}
+ content.innerHTML=`<div class="la-popup-tools"><span><i></i> 분석된 강의 ${d.ready}개</span><div>${d.admin?'<button type="button" class="text-btn" data-la-manage>분석 관리</button>':''}<button type="button" class="text-btn" data-la-new-chat ${LA.busy?'disabled':''}>새 대화</button></div></div><details class="la-scope-picker" ${LA.scope?'open':''}><summary>답변 범위: ${esc(LA.scope?LA.items.find(v=>v.id===LA.scope)?.title||'선택한 강의':'저장된 모든 강의')}</summary><label class="field la-scope"><span>원하는 강의만 선택할 수도 있어요</span><select id="la-scope" ${LA.busy?'disabled':''}><option value="">저장된 모든 강의</option>${LA.items.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}" ${LA.scope===x.id?'selected':''}>${esc(x.title)}</option>`).join('')}</select></label></details>${!d.configured?'<p class="la-popup-notice">운영자가 AI 연결을 준비하고 있습니다.</p>':!d.ready?'<p class="la-popup-notice">강의 분석이 완료되면 여기에서 질문할 수 있어요.</p>':''}<div id="la-messages" class="la-messages" role="log" aria-live="polite" aria-label="강의 비서 대화">${laMessages()}</div><p id="la-chat-status" class="la-note" role="status">${LA.busy?'저장된 강의 내용을 찾아 답변을 작성하고 있습니다…':''}</p><form id="la-question" class="la-compose"><label class="la-input-label" for="la-input">강의에서 궁금한 내용을 물어보세요</label><textarea id="la-input" name="question" rows="2" minlength="2" maxlength="1600" placeholder="모르는 용어나 막힌 단계를 적어 주세요…" required ${!d.ready||!d.configured?'disabled':''}>${esc(LA.draft)}</textarea><div><small>저장된 강의 자료를 바탕으로 답해요.</small><button class="primary" type="submit" ${LA.busy||!d.ready||!d.configured?'disabled':''}>${LA.busy?'답변 작성 중…':'질문 보내기 ↗'}</button></div></form>`;
+ if(active&&LA.open)$('#la-input')?.focus({preventScroll:true});
+ laScrollMessages();
+}
+function laScrollMessages(){const box=$('#la-messages');if(box)box.scrollTop=box.scrollHeight;}
+async function laOpenChat(force=false){
+ laSyncWidget();LA.returnFocus=document.activeElement;LA.open=true;LA.unread=false;laUpdateLauncher();
+ const owner=LA.owner;
+ if(!$('#la-popup-content').children.length||force)laRenderChat();
+ $('#la-chat-panel [data-la-close]')?.focus({preventScroll:true});
+ if(!S.member)return;
+ if(force||!LA.data||Date.now()-LA.loadedAt>30000){
+  try{await laLoadData();}catch(error){if(LA.owner===owner)LA.loadError=error.message;}
+  if(LA.owner!==owner||S.member?.id!==owner)return;
+  laRenderChat();
+ }
+ // Do not summon the phone keyboard just by opening the panel.
+ if(LA.open)laScrollMessages();
+ if(LA.open&&matchMedia('(min-width: 761px)').matches)$('#la-input')?.focus({preventScroll:true});
+}
+function laCloseChat(focus=true){
+ LA.open=false;laUpdateLauncher();
+ if(focus){const target=LA.returnFocus?.isConnected&&!$('#la-chat-panel')?.contains(LA.returnFocus)?LA.returnFocus:$('#la-launcher');target?.focus({preventScroll:true});}
+}
 function laKeyCard(key={},index=0){
  return `<fieldset class="la-key-card" data-la-key data-slot="${index+1}" data-id="${esc(key.id||'')}">
  <legend>키 ${index+1}</legend>
@@ -49,16 +123,14 @@ function laSettings(cfg){
  <div class="button-row"><button class="primary" type="submit">입력한 키 저장</button></div><p class="form-note">저장만으로 시험용 AI 분석을 요청하지 않습니다. 실제 사용 가능 여부는 강의 처리 중 확인됩니다.</p><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="subtle-link">Google AI Studio에서 API 키 확인 ↗</a></form>`;
 }
 
-document.addEventListener('input',e=>{if(e.target.closest('#la-settings [data-la-key]'))laUpdateKeyDraft();});
+document.addEventListener('input',e=>{if(e.target.closest('#la-settings [data-la-key]'))laUpdateKeyDraft();if(e.target.id==='la-input')LA.draft=e.target.value;});
 
-async function lectureAssistantPage(){
+async function lectureAdminPage(){
  clearTimeout(LA.poll);
- if(!S.member)return `<section class="section">${pageTitle('LECTURE ASSISTANT','강의 비서','로그인하면 내가 볼 수 있는 강의에서 답을 찾을 수 있어요.')}<button class="primary" data-go="login">로그인하기</button></section>`;
- if(LA.owner!==S.member.id){LA.owner=S.member.id;laNewChat('');LA.tab='chat';}
- const d=await api('/ai/lectures');LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;
- if(LA.scope&&!LA.items.some(v=>v.id===LA.scope&&v.status==='ready'))laNewChat('');
- if(!d.admin)LA.tab='chat';
- const tabs=d.admin?`<div class="la-tabs" role="group" aria-label="강의 비서 메뉴">${[['chat','질문하기'],['manage','강의 분석'],['settings','AI 설정']].map(([k,t])=>`<button class="${LA.tab===k?'primary':'outline'} small" data-la-tab="${k}">${t}</button>`).join('')}</div>`:'';
+ if(!S.member||S.member.role!=='admin')return authForm('login',true);
+ const d=await laLoadData();if(!d)return '';
+ if(!['manage','settings'].includes(LA.tab))LA.tab='manage';
+ const tabs=`<div class="la-tabs" role="group" aria-label="강의 분석 관리">${[['manage','강의 분석'],['settings','AI 설정']].map(([k,t])=>`<button class="${LA.tab===k?'primary':'outline'} small" data-la-tab="${k}">${t}</button>`).join('')}<button class="text-btn" type="button" data-la-open>강의 비서 열기 ↗</button></div>`;
  let html='';
  if(LA.tab==='manage'){
   html=`<div class="la-help"><b>늘 하던 대로 Drive에 올려 주세요.</b><p>① 영상 불러오기 → ② 새 강의 분석 → ③ 질문 가능 표시 확인. 원본은 Drive에 두고 분석 내용만 누적합니다. 새 분석은 30분 단위로 처리하며 6시간 강의는 약 12개 구간입니다. 기존에 저장된 구간은 유지하고 남은 부분부터 적용합니다.</p><p class="form-note"><span id="la-key-summary">${laKeySummary(d)}</span>. AI가 분석하는 동안 다음 구간을 미리 준비합니다. 재시도와 검색 자료 생성은 별도 요청이며, 요청 횟수 감소가 같은 비율의 요금 감소를 뜻하지는 않습니다.</p><p>영상의 음성과 화면을 Google Gemini로 분석합니다. 사용량에 따라 API 요금이 발생할 수 있습니다.</p></div><div class="button-row"><button class="outline" data-la-action="sync">Drive 영상 불러오기</button><button class="primary" data-la-action="queue" ${d.configured?'':'disabled'}>새 강의 모두 분석</button><button class="text-btn" data-la-action="refresh">새로고침</button></div>${!d.configured?'<div class="notice">먼저 AI 설정에서 Gemini API 키를 등록해 주세요.</div>':''}<div id="la-queue-status" class="notice" ${laQueueStatus(d)?'':'hidden'}>${esc(laQueueStatus(d))}</div><div id="la-lecture-list" class="la-lecture-list">${laRows()}</div>`;
@@ -66,10 +138,9 @@ async function lectureAssistantPage(){
  }else if(LA.tab==='settings'){
   const cfg=await api('/admin/ai/settings');
   html=laSettings(cfg);
- }else{
-  html=`<div class="la-knowledge panel"><div><span class="la-count">${d.ready}개 강의 · 저장된 설명 ${Number(d.knowledge_chunks||0).toLocaleString('ko-KR')}개</span><h2>강의에서 배운 내용으로 답해드려요</h2><p>모르는 부분을 물어보시면 미리 분석해 저장한 강의 내용에서 답을 찾아 쉽게 설명해 드립니다.<br>답변을 받은 뒤 “그걸 더 쉽게 설명해줘”, “다음 단계는?”처럼 이어서 질문해도 됩니다.</p></div><button type="button" class="outline small" data-la-new-chat ${LA.busy?'disabled':''}>새 대화</button></div>${!d.configured?'<div class="notice">운영자가 AI 연결을 준비하고 있습니다.</div>':''}${!d.ready?'<div class="notice">아직 저장이 완료된 강의 자료가 없습니다. 강의 분석을 마치면 여기에서 바로 질문할 수 있습니다.</div>':''}<details class="la-scope-picker" ${LA.scope?'open':''}><summary>답변 범위: ${esc(LA.scope?LA.items.find(v=>v.id===LA.scope)?.title||'선택한 강의':'저장된 모든 강의')}</summary><label class="field la-scope"><span>특정 강의만 물어보고 싶을 때 선택하세요</span><select id="la-scope" ${LA.busy?'disabled':''}><option value="">저장된 모든 강의</option>${LA.items.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}" ${LA.scope===x.id?'selected':''}>${esc(x.title)}</option>`).join('')}</select></label></details><div id="la-messages" class="la-messages" aria-live="polite">${laMessages()}</div><p id="la-chat-status" class="la-note" role="status">${LA.busy?'저장된 강의 내용을 찾아 답변을 작성하고 있습니다…':''}</p><form id="la-question" class="la-compose"><label for="la-input">강의에서 이해가 안 된 부분을 물어보세요</label><textarea id="la-input" name="question" rows="3" minlength="2" maxlength="1600" placeholder="예: 강의에서 알려준 설정 방법을 처음부터 순서대로 설명해줘." required ${!d.ready||!d.configured?'disabled':''}></textarea><div><small>질문할 때는 저장된 분석 자료를 사용합니다. 강의에서 확인되지 않는 내용은 구분해 안내합니다.</small><button class="primary" type="submit" ${LA.busy||!d.ready||!d.configured?'disabled':''}>${LA.busy?'답변 작성 중…':'질문 보내기 ↗'}</button></div></form>`;
+
  }
- return `<section class="section la-page">${pageTitle('MAISON LUMIEL · LEARNING COMPANION','강의 비서','배운 내용을 다시 찾고, 다음 배움으로 이어가세요.')}${tabs}${html}</section>`;
+ return `<section class="section la-page">${pageTitle('MAISON LUMIEL · KNOWLEDGE LIBRARY','강의 분석 관리','분석한 강의는 우측 하단 강의 비서에서 바로 물어볼 수 있습니다.')}${tabs}${html}</section>`;
 }
 
 function laRows(){
@@ -87,11 +158,11 @@ function laMessages(){
  return LA.messages.map((m,index)=>m.role==='user'?`<article class="la-message la-user"><small>나의 질문</small><p>${esc(m.text)}</p></article>`:`<article class="la-message la-answer"><small>강의 비서${m.supported?' · 저장된 강의 자료 기반':''}</small>${m.paragraphs.map(p=>`<p>${esc(p.text)}</p>`).join('')}${m.sources?.length?`<details class="la-sources"><summary>답변 근거 · 강의와 해당 장면 확인 (${m.sources.length}개)</summary><div>${m.sources.map((s,si)=>`<button type="button" class="la-source" data-la-source="${index}:${si}"><span>${esc(s.title)}</span><strong>${s.start==null?'원본 강의 열기':laTime(s.start)+' – '+laTime(s.end)}</strong><small>${esc(s.topic)}</small><span class="la-excerpt">${esc(s.excerpt)}</span></button>`).join('')}</div></details>`:''}${m.followups?.length?`<div class="la-followups"><small>이어서 물어보기</small><div class="button-row">${m.followups.map(q=>`<button class="outline small" data-la-question="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`:''}</article>`).join('');
 }
 
-document.addEventListener('change',async e=>{if(e.target.id==='la-scope'){if(LA.busy){e.target.value=LA.scope;return;}laNewChat(e.target.value);await render();}});
+document.addEventListener('change',async e=>{if(e.target.id==='la-scope'){if(LA.busy){e.target.value=LA.scope;return;}laNewChat(e.target.value);laRenderChat();}});
 
 async function laPoll(){
  clearTimeout(LA.poll);
- if(location.hash!=='#assistant'||LA.tab!=='manage')return;
+ if(location.hash!=='#lecture-admin'||LA.tab!=='manage')return;
  try{const d=await api('/ai/lectures');LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;const summary=$('#la-key-summary');if(summary)summary.textContent=laKeySummary(d);const list=$('#la-lecture-list');if(list)list.innerHTML=laRows();const notice=$('#la-queue-status');if(notice){const status=laQueueStatus(d);notice.hidden=!status;notice.textContent=status;}}
  catch(e){const notice=$('#la-queue-status');if(notice){notice.hidden=false;notice.textContent='진행 상태를 불러오지 못했습니다. 잠시 후 자동으로 다시 확인합니다.';}}
  LA.poll=setTimeout(laPoll,8000);
@@ -112,6 +183,7 @@ document.addEventListener('submit',async e=>{
    if(keys.some(key=>!key.remove&&key.api_key.trim().length>LA_MAX_KEY_LENGTH))throw new Error(`API 키는 ${LA_MAX_KEY_LENGTH}자까지 저장할 수 있습니다. 입력값을 자르지 않았으니 API 키만 복사했는지 확인해 주세요.`);
    const data={keys,parallelism:Number(form.elements.parallelism.value),model:form.elements.model.value,embedding_model:form.elements.embedding_model.value,fallback_model:form.elements.fallback_model.value};
    const cfg=await api('/admin/ai/settings','POST',data);
+   LA.loadedAt=0;
    form.querySelectorAll('[data-key-field="api_key"]').forEach(input=>input.value='');
    form.querySelector('#la-key-list').innerHTML=laKeySlots(cfg.keys).map(laKeyCard).join('');
    laUpdateKeyDraft();
@@ -124,18 +196,19 @@ document.addEventListener('submit',async e=>{
  const question=form.elements.question.value.trim();if(question.length<2){button.disabled=false;return;}
  const owner=LA.owner,chatId=LA.chatId,history=laConversationHistory();
  const scope=LA.scope;
- LA.messages.push({role:'user',text:question});LA.busy=true;form.elements.question.value='';
- $('#la-messages').innerHTML=laMessages();button.textContent='답변 작성 중…';
+ LA.messages.push({role:'user',text:question});LA.busy=true;LA.draft='';form.elements.question.value='';
+ $('#la-messages').innerHTML=laMessages();laScrollMessages();button.textContent='답변 작성 중…';
  const status=$('#la-chat-status');if(status)status.textContent='저장된 강의 내용을 찾아 답변을 작성하고 있습니다…';
  const scopeControl=$('#la-scope'),newChat=$('[data-la-new-chat]');if(scopeControl)scopeControl.disabled=true;if(newChat)newChat.disabled=true;
  try{
   const answer=await api('/ai/ask','POST',{question,lecture_id:scope,history});
-  if(LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId)LA.messages.push({role:'assistant',...answer});
+  if(LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId){LA.messages.push({role:'assistant',...answer});LA.unread=!LA.open;}
  }catch(err){if(LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId)LA.messages.push({role:'assistant',paragraphs:[{text:err.message}],sources:[]});}
  finally{
-  LA.busy=false;
+  if(LA.owner!==owner||S.member?.id!==owner||LA.chatId!==chatId)return;
+  LA.busy=false;laUpdateLauncher();
   const currentMessages=$('#la-messages');
-  if(currentMessages&&LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId){currentMessages.innerHTML=laMessages();currentMessages.lastElementChild?.scrollIntoView({behavior:'smooth',block:'start'});}
+  if(currentMessages&&LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId){currentMessages.innerHTML=laMessages();laScrollMessages();}
   // Navigation can replace the form while an answer is pending.
   const currentButton=$('#la-question')?.querySelector('[type="submit"]');
   if(currentButton){currentButton.disabled=!LA.configured||!LA.items.some(v=>v.status==='ready');currentButton.textContent='질문 보내기 ↗';}
@@ -145,7 +218,13 @@ document.addEventListener('submit',async e=>{
 });
 
 document.addEventListener('click',async e=>{
- if(e.target.closest('[data-la-new-chat]')){e.preventDefault();if(!LA.busy){laNewChat();await render();$('#la-input')?.focus();}return;}
+ if(e.target.closest('[data-la-toggle]')){e.preventDefault();if(LA.open)laCloseChat();else await laOpenChat();return;}
+ if(e.target.closest('[data-la-open]')){e.preventDefault();await laOpenChat();return;}
+ if(e.target.closest('[data-la-close]')){e.preventDefault();laCloseChat();return;}
+ if(e.target.closest('[data-la-reload]')){e.preventDefault();await laOpenChat(true);return;}
+ if(e.target.closest('[data-la-login]')){e.preventDefault();laCloseChat(false);go('login');return;}
+ if(e.target.closest('[data-la-manage]')){e.preventDefault();laCloseChat(false);go('lecture-admin');return;}
+ if(e.target.closest('[data-la-new-chat]')){e.preventDefault();if(!LA.busy){laNewChat();laRenderChat();$('#la-input')?.focus();}return;}
  const remove=e.target.closest('[data-la-remove-key]'),resume=e.target.closest('[data-la-resume-key]');
  if(remove){
   e.preventDefault();const row=remove.closest('[data-la-key]'),form=$('#la-settings');
@@ -170,11 +249,12 @@ document.addEventListener('click',async e=>{
  if(!b)return;e.preventDefault();
  try{
   if(b.dataset.laTab){LA.tab=b.dataset.laTab;await render();return;}
-  if(b.dataset.laQuestion){const input=$('#la-input');if(input){input.value=b.dataset.laQuestion;input.focus();}return;}
+  if(b.dataset.laQuestion){const input=$('#la-input');if(input){input.value=b.dataset.laQuestion;LA.draft=input.value;input.focus();}return;}
   if(b.dataset.laSource){
    const [i,j]=b.dataset.laSource.split(':').map(Number),s=LA.messages[i]?.sources[j];if(!s)return;
    const existing=S.videos.find(x=>x.id===s.lecture_id);if(!existing)S.videos.push({id:s.lecture_id,title:s.title,seconds:s.start||0});
    const video=S.videos.find(x=>x.id===s.lecture_id),before=video.seconds;video.seconds=s.start||0;
+   laCloseChat(false);
    try{await play(s.lecture_id);}finally{video.seconds=before;}
    const player=$('#player');if(player){const seek=()=>{player.currentTime=Math.max(0,s.start||0);};if(player.readyState>=1)seek();else player.addEventListener('loadedmetadata',seek,{once:true});}
    return;
@@ -193,3 +273,13 @@ document.addEventListener('click',async e=>{
   }else await render();
  }catch(err){toast(err.message);}finally{if(b.isConnected)b.disabled=false;}
 });
+
+// The widget lives outside the routed page and joins the player's dialog when it opens.
+document.addEventListener('keydown',e=>{
+ if(LA.open&&e.key==='Escape'){e.preventDefault();e.stopPropagation();laCloseChat();}
+ if(e.target.id==='la-input'&&e.key==='Enter'&&(e.ctrlKey||e.metaKey)&&!e.isComposing){e.preventDefault();if(!LA.busy)$('#la-question')?.requestSubmit();}
+},true);
+$('#modal')?.addEventListener('close',laPlaceWidget);
+window.visualViewport?.addEventListener('resize',laUpdateViewport);
+window.visualViewport?.addEventListener('scroll',laUpdateViewport);
+laSyncWidget();

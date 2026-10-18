@@ -108,6 +108,30 @@ DRIVE_FOLDER_ID=os.getenv('GOOGLE_DRIVE_FOLDER_ID','').strip()
 _drive_credentials=None
 _drive_lock=threading.RLock()
 _drive_log=logging.getLogger("maison.video.storage")
+_DRIVE_QUOTA_HOLD = {}
+_DRIVE_QUOTA_MUTEX = threading.Lock()
+_DRIVE_QUOTA_HOLD_SECONDS = 15 * 60
+
+def _mark_drive_quota(file_id):
+ # Small in-process cooldown to avoid storming the Drive API on 403 quota errors.
+ with _DRIVE_QUOTA_MUTEX:
+  now=time.time()
+  for stale,until in list(_DRIVE_QUOTA_HOLD.items()):
+   if until<=now:_DRIVE_QUOTA_HOLD.pop(stale,None)
+  _DRIVE_QUOTA_HOLD[file_id]=now+_DRIVE_QUOTA_HOLD_SECONDS
+  if len(_DRIVE_QUOTA_HOLD)>500:
+   earliest=min(_DRIVE_QUOTA_HOLD,key=_DRIVE_QUOTA_HOLD.get)
+   _DRIVE_QUOTA_HOLD.pop(earliest,None)
+
+def _drive_check_access(v):
+ file_id=v['external_id']
+ if not file_id:return
+ with _DRIVE_QUOTA_MUTEX:
+  until=_DRIVE_QUOTA_HOLD.get(file_id,0)
+ if until>time.time():
+  core.fail(503,'Google Drive 영상 다운로드 한도 초과로 재생이 일시 중단되었습니다. 원본 파일 보관에는 문제가 없으며, 운영자가 전용 영상 저장소 연결을 확인하고 있습니다.')
+
+
 
 def _drive_creds():
  global _drive_credentials
@@ -194,6 +218,7 @@ def _drive_stream(req: Request,v):
  import requests
  file_id=v['external_id']
  if not file_id: core.fail(404,'Google Drive 파일 ID가 없습니다.')
+ _drive_check_access(v)
  size=int(v['size'] or 0)
  raw_range=req.headers.get('range','')
  try: window=capped_range(raw_range,size)
@@ -244,7 +269,8 @@ def _drive_stream(req: Request,v):
   _drive_log.warning('Drive video upstream rejected status=%s reason=%s attempt=%s ranged=%s',
                      status,reason,attempt+1,bool(window))
   if status==403 and reason in ('downloadQuotaExceeded','dailyLimitExceeded','quotaExceeded'):
-   core.fail(503,'Google Drive 영상 사용량 한도에 도달했습니다. 운영자에게 문의해 주세요.')
+   _mark_drive_quota(file_id)
+   core.fail(503,'Google Drive 영상 다운로드 한도 초과로 재생이 일시 중단되었습니다. 운영자가 전용 영상 저장소 연결을 확인하고 있습니다.')
   if status in (401,403,404) and not should_retry(status,reason):
    core.fail(502,'Google Drive 파일 접근 권한 또는 다운로드 허용 여부를 확인해 주세요.')
   if attempt<2 and should_retry(status,reason):
@@ -274,6 +300,7 @@ def _drive_stream(req: Request,v):
                                media_type=v['mime'],headers=out_headers)
 
 core.EXTERNAL_STREAMER=_drive_stream
+core.EXTERNAL_ACCESS_CHECKER=_drive_check_access
 
 
 

@@ -322,9 +322,10 @@ def install(core, drive_streamer):
             core.fail(404,"R2 영상 정보가 올바르지 않습니다.")
         try:
             s3,bucket=client()
-            signed=s3.generate_presigned_url("get_object",Params={
-                "Bucket":bucket,"Key":key,
-            },ExpiresIn=120,HttpMethod="GET")
+            method="HEAD" if req.method=="HEAD" else "GET"
+            signed=s3.generate_presigned_url(
+                "head_object" if method=="HEAD" else "get_object",
+                Params={"Bucket":bucket,"Key":key}, ExpiresIn=120,HttpMethod=method)
         except Exception as exc:storage_error(exc)
         # The original /api/videos/{id}/stream remains the video element's URL.
         # Every new Range request gets a fresh signed R2 redirect and re-checks

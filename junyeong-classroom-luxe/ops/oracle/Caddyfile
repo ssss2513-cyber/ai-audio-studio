@@ -1,0 +1,8 @@
+{$SITE_DOMAIN} {
+  encode gzip zstd
+  reverse_proxy app:8000
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options "nosniff"
+  }
+}

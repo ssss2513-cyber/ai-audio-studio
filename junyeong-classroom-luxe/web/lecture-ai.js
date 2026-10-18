@@ -1,5 +1,5 @@
 'use strict';
-const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null};
+const LA={tab:'chat',items:[],messages:[],owner:null,busy:false,poll:null,scope:'',chatId:0};
 const laLabels={new:'아직 분석 전',queued:'순서 대기',analyzing:'분석 중',retrying:'자동 재개 대기',ready:'질문 가능',paused:'일시정지',error:'확인 필요'};
 const laKeyState=cfg=>`서버에 저장된 API 키 ${cfg.keys?.length||0} / 10개`;
 const laKeySlots=keys=>Array.from({length:10},(_,index)=>(keys||[])[index]||{});
@@ -10,6 +10,13 @@ const laQueueStatus=d=>d.queue_blocked?'자동 분석 대기: '+d.queue_blocked:
 
 const laKeySummary=d=>`사용 가능한 키 ${d.keys?.filter(k=>k.status==='ready').length||0}개 / 등록 ${d.keys?.length||0}개 · 최대 ${d.parallelism||1}개 구간 동시 처리`;
 const laKeyLabels={ready:'사용 준비',daily:'일일 한도 소진',rate:'분당 한도 대기',quota_zero:'허용량 없음',auth:'키·권한 확인 필요',temporary:'연결 대기',disabled:'사용 안 함',shared:'공유 프로젝트 한도 대기'};
+function laConversationHistory(){
+ return LA.messages.filter(m=>m.role==='user'||(m.role==='assistant'&&m.supported&&m.sources?.length)).slice(-6).map(m=>({
+  role:m.role,text:(m.role==='user'?m.text:m.paragraphs.map(p=>p.text).join('\n\n')).slice(0,1200),
+  source_ids:m.role==='assistant'?m.sources.map(s=>s.id).filter(Number.isInteger).slice(0,20):[]
+ }));
+}
+function laNewChat(scope=LA.scope){LA.messages=[];LA.scope=scope;LA.chatId+=1;}
 function laKeyCard(key={},index=0){
  return `<fieldset class="la-key-card" data-la-key data-slot="${index+1}" data-id="${esc(key.id||'')}">
  <legend>키 ${index+1}</legend>
@@ -47,8 +54,9 @@ document.addEventListener('input',e=>{if(e.target.closest('#la-settings [data-la
 async function lectureAssistantPage(){
  clearTimeout(LA.poll);
  if(!S.member)return `<section class="section">${pageTitle('LECTURE ASSISTANT','강의 비서','로그인하면 내가 볼 수 있는 강의에서 답을 찾을 수 있어요.')}<button class="primary" data-go="login">로그인하기</button></section>`;
- if(LA.owner!==S.member.id){LA.owner=S.member.id;LA.messages=[];LA.tab='chat';}
+ if(LA.owner!==S.member.id){LA.owner=S.member.id;laNewChat('');LA.tab='chat';}
  const d=await api('/ai/lectures');LA.items=d.items;LA.configured=d.configured;LA.queueBlocked=d.queue_blocked;
+ if(LA.scope&&!LA.items.some(v=>v.id===LA.scope&&v.status==='ready'))laNewChat('');
  if(!d.admin)LA.tab='chat';
  const tabs=d.admin?`<div class="la-tabs" role="group" aria-label="강의 비서 메뉴">${[['chat','질문하기'],['manage','강의 분석'],['settings','AI 설정']].map(([k,t])=>`<button class="${LA.tab===k?'primary':'outline'} small" data-la-tab="${k}">${t}</button>`).join('')}</div>`:'';
  let html='';
@@ -59,7 +67,7 @@ async function lectureAssistantPage(){
   const cfg=await api('/admin/ai/settings');
   html=laSettings(cfg);
  }else{
-  html=`<div class="la-intro"><span class="la-count">${d.ready}개 강의에서 답변 준비</span><p>강의에서 헷갈렸던 부분을 편하게 물어보세요.<br>답변 아래의 시간을 누르면 해당 설명을 다시 볼 수 있어요.</p></div>${!d.configured?'<div class="notice">운영자가 AI 연결을 준비하고 있습니다.</div>':''}${!d.ready?'<div class="notice">아직 분석이 완료된 강의가 없습니다. 분석이 끝나면 이곳에서 질문할 수 있습니다.</div>':''}<label class="field la-scope"><span>어떤 강의에서 찾아볼까요?</span><select id="la-scope"><option value="">분석된 모든 강의</option>${LA.items.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}">${esc(x.title)}</option>`).join('')}</select></label><div id="la-messages" class="la-messages" aria-live="polite">${laMessages()}</div><form id="la-question" class="la-compose"><label for="la-input">궁금한 내용을 적어 주세요</label><textarea id="la-input" name="question" rows="3" minlength="2" maxlength="1600" placeholder="예: 강의에서 설명한 설정 순서를 다시 알려주세요." required ${!d.ready||!d.configured?'disabled':''}></textarea><div><small>답변은 강의 기록을 근거로 작성합니다. 시간대는 근사치일 수 있어요.</small><button class="primary" type="submit" ${LA.busy||!d.ready||!d.configured?'disabled':''}>${LA.busy?'답변을 찾는 중…':'질문하기 ↗'}</button></div></form>`;
+  html=`<div class="la-knowledge panel"><div><span class="la-count">${d.ready}개 강의 · 저장된 설명 ${Number(d.knowledge_chunks||0).toLocaleString('ko-KR')}개</span><h2>강의에서 배운 내용으로 답해드려요</h2><p>모르는 부분을 물어보시면 미리 분석해 저장한 강의 내용에서 답을 찾아 쉽게 설명해 드립니다.<br>답변을 받은 뒤 “그걸 더 쉽게 설명해줘”, “다음 단계는?”처럼 이어서 질문해도 됩니다.</p></div><button type="button" class="outline small" data-la-new-chat ${LA.busy?'disabled':''}>새 대화</button></div>${!d.configured?'<div class="notice">운영자가 AI 연결을 준비하고 있습니다.</div>':''}${!d.ready?'<div class="notice">아직 저장이 완료된 강의 자료가 없습니다. 강의 분석을 마치면 여기에서 바로 질문할 수 있습니다.</div>':''}<details class="la-scope-picker" ${LA.scope?'open':''}><summary>답변 범위: ${esc(LA.scope?LA.items.find(v=>v.id===LA.scope)?.title||'선택한 강의':'저장된 모든 강의')}</summary><label class="field la-scope"><span>특정 강의만 물어보고 싶을 때 선택하세요</span><select id="la-scope" ${LA.busy?'disabled':''}><option value="">저장된 모든 강의</option>${LA.items.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}" ${LA.scope===x.id?'selected':''}>${esc(x.title)}</option>`).join('')}</select></label></details><div id="la-messages" class="la-messages" aria-live="polite">${laMessages()}</div><p id="la-chat-status" class="la-note" role="status">${LA.busy?'저장된 강의 내용을 찾아 답변을 작성하고 있습니다…':''}</p><form id="la-question" class="la-compose"><label for="la-input">강의에서 이해가 안 된 부분을 물어보세요</label><textarea id="la-input" name="question" rows="3" minlength="2" maxlength="1600" placeholder="예: 강의에서 알려준 설정 방법을 처음부터 순서대로 설명해줘." required ${!d.ready||!d.configured?'disabled':''}></textarea><div><small>질문할 때는 저장된 분석 자료를 사용합니다. 강의에서 확인되지 않는 내용은 구분해 안내합니다.</small><button class="primary" type="submit" ${LA.busy||!d.ready||!d.configured?'disabled':''}>${LA.busy?'답변 작성 중…':'질문 보내기 ↗'}</button></div></form>`;
  }
  return `<section class="section la-page">${pageTitle('MAISON LUMIEL · LEARNING COMPANION','강의 비서','배운 내용을 다시 찾고, 다음 배움으로 이어가세요.')}${tabs}${html}</section>`;
 }
@@ -75,9 +83,11 @@ function laRows(){
 }
 
 function laMessages(){
- if(!LA.messages.length)return '<div class="la-empty"><span aria-hidden="true">✦</span><h2>어떤 부분이 궁금하신가요?</h2><p>설정 방법, 작업 순서, 강의 속 예시를 물어보세요.</p></div>';
- return LA.messages.map((m,index)=>m.role==='user'?`<article class="la-message la-user"><small>나의 질문</small><p>${esc(m.text)}</p></article>`:`<article class="la-message la-answer"><small>강의 비서</small>${m.paragraphs.map(p=>`<p>${esc(p.text)}</p>`).join('')}${m.sources?.length?`<div class="la-sources"><b>답변 근거 · 눌러서 다시 보기</b>${m.sources.map((s,si)=>`<button type="button" class="la-source" data-la-source="${index}:${si}"><span>${esc(s.title)}</span><strong>${s.start==null?'시간 정보 없음':laTime(s.start)+' – '+laTime(s.end)}</strong><small>${esc(s.topic)}</small><span class="la-excerpt">${esc(s.excerpt)}</span></button>`).join('')}</div>`:''}${m.followups?.length?`<div class="button-row">${m.followups.map(q=>`<button class="outline small" data-la-question="${esc(q)}">${esc(q)}</button>`).join('')}</div>`:''}</article>`).join('');
+ if(!LA.messages.length)return '<div class="la-empty"><span aria-hidden="true">✦</span><h2>강의에서 막힌 부분이 있으신가요?</h2><p>기억나는 용어나 하려는 작업을 편하게 적어 주세요.<br>저장된 강의 내용을 바탕으로 방법과 이유를 설명해 드립니다.</p></div>';
+ return LA.messages.map((m,index)=>m.role==='user'?`<article class="la-message la-user"><small>나의 질문</small><p>${esc(m.text)}</p></article>`:`<article class="la-message la-answer"><small>강의 비서${m.supported?' · 저장된 강의 자료 기반':''}</small>${m.paragraphs.map(p=>`<p>${esc(p.text)}</p>`).join('')}${m.sources?.length?`<details class="la-sources"><summary>답변 근거 · 강의와 해당 장면 확인 (${m.sources.length}개)</summary><div>${m.sources.map((s,si)=>`<button type="button" class="la-source" data-la-source="${index}:${si}"><span>${esc(s.title)}</span><strong>${s.start==null?'원본 강의 열기':laTime(s.start)+' – '+laTime(s.end)}</strong><small>${esc(s.topic)}</small><span class="la-excerpt">${esc(s.excerpt)}</span></button>`).join('')}</div></details>`:''}${m.followups?.length?`<div class="la-followups"><small>이어서 물어보기</small><div class="button-row">${m.followups.map(q=>`<button class="outline small" data-la-question="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`:''}</article>`).join('');
 }
+
+document.addEventListener('change',async e=>{if(e.target.id==='la-scope'){if(LA.busy){e.target.value=LA.scope;return;}laNewChat(e.target.value);await render();}});
 
 async function laPoll(){
  clearTimeout(LA.poll);
@@ -112,23 +122,30 @@ document.addEventListener('submit',async e=>{
  if(LA.busy)return;
  button.disabled=true;
  const question=form.elements.question.value.trim();if(question.length<2){button.disabled=false;return;}
- const owner=LA.owner;
- const previous=LA.messages.filter(x=>x.role==='user').slice(-2).map(x=>x.text);
- const scope=$('#la-scope').value;
+ const owner=LA.owner,chatId=LA.chatId,history=laConversationHistory();
+ const scope=LA.scope;
  LA.messages.push({role:'user',text:question});LA.busy=true;form.elements.question.value='';
- $('#la-messages').innerHTML=laMessages();button.textContent='강의에서 답을 찾는 중…';
+ $('#la-messages').innerHTML=laMessages();button.textContent='답변 작성 중…';
+ const status=$('#la-chat-status');if(status)status.textContent='저장된 강의 내용을 찾아 답변을 작성하고 있습니다…';
+ const scopeControl=$('#la-scope'),newChat=$('[data-la-new-chat]');if(scopeControl)scopeControl.disabled=true;if(newChat)newChat.disabled=true;
  try{
-  const answer=await api('/ai/ask','POST',{question,lecture_id:scope,previous_questions:previous});
-  if(LA.owner===owner&&S.member?.id===owner)LA.messages.push({role:'assistant',...answer});
- }catch(err){if(LA.owner===owner&&S.member?.id===owner)LA.messages.push({role:'assistant',paragraphs:[{text:err.message}],sources:[]});}
+  const answer=await api('/ai/ask','POST',{question,lecture_id:scope,history});
+  if(LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId)LA.messages.push({role:'assistant',...answer});
+ }catch(err){if(LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId)LA.messages.push({role:'assistant',paragraphs:[{text:err.message}],sources:[]});}
  finally{
   LA.busy=false;
-  if($('#la-messages')&&LA.owner===owner){$('#la-messages').innerHTML=laMessages();$('#la-messages').lastElementChild?.scrollIntoView({behavior:'smooth',block:'start'});}
-  if(button.isConnected){button.disabled=false;button.textContent='질문하기 ↗';}
+  const currentMessages=$('#la-messages');
+  if(currentMessages&&LA.owner===owner&&S.member?.id===owner&&LA.chatId===chatId){currentMessages.innerHTML=laMessages();currentMessages.lastElementChild?.scrollIntoView({behavior:'smooth',block:'start'});}
+  // Navigation can replace the form while an answer is pending.
+  const currentButton=$('#la-question')?.querySelector('[type="submit"]');
+  if(currentButton){currentButton.disabled=!LA.configured||!LA.items.some(v=>v.status==='ready');currentButton.textContent='질문 보내기 ↗';}
+  const currentStatus=$('#la-chat-status'),currentScope=$('#la-scope'),currentNewChat=$('[data-la-new-chat]');
+  if(currentStatus)currentStatus.textContent='';if(currentScope)currentScope.disabled=false;if(currentNewChat)currentNewChat.disabled=false;
  }
 });
 
 document.addEventListener('click',async e=>{
+ if(e.target.closest('[data-la-new-chat]')){e.preventDefault();if(!LA.busy){laNewChat();await render();$('#la-input')?.focus();}return;}
  const remove=e.target.closest('[data-la-remove-key]'),resume=e.target.closest('[data-la-resume-key]');
  if(remove){
   e.preventDefault();const row=remove.closest('[data-la-key]'),form=$('#la-settings');

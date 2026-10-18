@@ -259,6 +259,31 @@ class Library:
                     for i,(_,end) in enumerate(windows) if i in done)
         return min(100,100*covered/windows[-1][1]) if windows else 0
 
+    def context_chunks(self, chunk_ids, allowed_ids, lecture_id=None, adjacent=False):
+        """Fetch verified saved evidence; neighbors recover steps split across records."""
+        ids=list(dict.fromkeys(cid for cid in chunk_ids if type(cid) is int and cid>0))[:60]
+        if not ids or not allowed_ids:return []
+        filters="l.status='ready' AND l.id IN ("+','.join('?' for _ in allowed_ids)+')'
+        args=list(allowed_ids)
+        if lecture_id:filters+=' AND l.id=?';args.append(lecture_id)
+        select='''SELECT c.id,c.lecture_id,c.part,c.ordinal,c.start,c.end,c.title,c.text,
+          c.transcript,c.screen_text,c.timing,l.title AS lecture_title,l.lecture_date,l.created_at,l.media
+          FROM chunks c JOIN lectures l ON l.id=c.lecture_id WHERE '''+filters
+        with self.connect() as db:
+            by_id={r['id']:dict(r) for r in db.execute(select+' AND c.id IN ('+','.join('?' for _ in ids)+')',[*args,*ids])}
+            result=[by_id[cid] for cid in ids if cid in by_id];seen=set(by_id)
+            if adjacent:
+                # Retrieve adjacent explanations in chronological order, including part boundaries.
+                for anchor in result[:6]:
+                    for operator,direction in (('<','DESC'),('>','ASC')):
+                        rows=db.execute(select+f''' AND c.lecture_id=? AND
+                          (c.part {operator} ? OR (c.part=? AND c.ordinal {operator} ?))
+                          ORDER BY c.part {direction},c.ordinal {direction} LIMIT 1''',
+                          [*args,anchor['lecture_id'],anchor['part'],anchor['part'],anchor['ordinal']])
+                        for row in rows:
+                            if row['id'] not in seen:result.append(dict(row));seen.add(row['id'])
+            return result
+
     def search(self, question, vector=None, model='', lecture_id=None, limit=14, allowed_ids=None):
         terms=tokens(question)[:45]
         filters="l.status='ready'"

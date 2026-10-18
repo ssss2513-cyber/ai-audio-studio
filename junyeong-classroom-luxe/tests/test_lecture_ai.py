@@ -429,6 +429,101 @@ class LectureTests(unittest.TestCase):
         self.assertNotIn('내부 비밀',json.dumps(FakeProvider.calls,ensure_ascii=False))
         self.assertEqual(self.student.post('/api/ai/ask',json={'question':'설정 방법','lecture_id':private}).status_code,403)
 
+    def test_answer_reuses_saved_knowledge_without_opening_or_analyzing_video(self):
+        self.configure();vid=seed_video();seed_knowledge(vid)
+        with patch.object(worker,'provider',return_value=FakeProvider()), \
+             patch.object(worker,'process',side_effect=AssertionError('Do not reanalyze')), \
+             patch.object(worker,'metadata',side_effect=AssertionError('Do not open Drive')):
+            response=self.student.post('/api/ai/ask',json={'question':'화면 설정 방법'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertTrue(response.json()['supported'])
+        self.assertEqual(response.json()['basis']['kind'],'stored_lecture_analysis')
+        self.assertIn('해상도',FakeProvider.calls[-1]['EVIDENCE'][0]['text'])
+        self.assertNotIn('fileData',json.dumps(FakeProvider.calls))
+
+    def test_followup_keeps_answer_and_saved_neighbors_when_embedding_is_unavailable(self):
+        self.configure();vid=seed_video();seed_knowledge(vid)
+        anchor=lib.search('화면 설정',allowed_ids=[vid])[0]['id']
+        lib.save_part(vid,1,[dict(start=40,end=60,title='마무리',text='적용 버튼을 눌러 변경을 저장합니다.',
+                               transcript='',screen_text='',timing='estimated')])
+        history=[dict(role='user',text='화면 크기를 어디에서 바꾸나요?'),
+                 dict(role='assistant',text='환경설정에서 해상도를 선택하세요.',source_ids=[anchor])]
+        api=FakeProvider()
+        with patch.object(worker,'provider',return_value=api), \
+             patch.object(api,'embed',side_effect=ProviderError('검색 연결 대기',code=503)), \
+             patch.object(lib,'search',return_value=[]):
+            response=self.student.post('/api/ai/ask',json={'question':'그 다음 단계는?','history':history})
+        self.assertEqual(response.status_code,200,response.text)
+        payload=FakeProvider.calls[-1]
+        self.assertTrue(payload['followup'])
+        self.assertEqual(payload['CONVERSATION'][1]['text'],history[1]['text'])
+        self.assertEqual(payload['EVIDENCE'][0]['id'],anchor)
+        self.assertTrue(any('적용 버튼' in e['text'] for e in payload['EVIDENCE']))
+        self.assertTrue(response.json()['supported'])
+
+    def test_new_topic_search_does_not_mix_previous_questions(self):
+        self.configure();old=seed_video();new=seed_video()
+        seed_knowledge(old,'해상도를 조절합니다.');seed_knowledge(new,'배송지를 입력하는 곳은 주소 관리입니다.')
+        api=FakeProvider()
+        with patch.object(worker,'provider',return_value=api), \
+             patch.object(api,'embed',side_effect=ProviderError('검색 연결 대기',code=503)), \
+             patch.object(lib,'search',wraps=lib.search) as search:
+            response=self.student.post('/api/ai/ask',json={'question':'배송지는 어디인가요?',
+                'previous_questions':['해상도 '*100,'화면 설정 설명']})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(search.call_args.args[0],'배송지는 어디인가요?')
+        self.assertFalse(FakeProvider.calls[-1]['followup'])
+        self.assertEqual({s['lecture_id'] for s in response.json()['sources']},{new})
+
+    def test_private_or_out_of_scope_history_never_reaches_answer_provider(self):
+        self.configure();public=seed_video();private=seed_video('private');other=seed_video()
+        seed_knowledge(public);seed_knowledge(private,'비공개 내용');seed_knowledge(other,'다른 강의 내용')
+        private_id=lib.search('비공개',allowed_ids=[private])[0]['id']
+        other_id=lib.search('다른',allowed_ids=[other])[0]['id']
+        history=[dict(role='user',text='화면 설정 방법'),
+                 dict(role='assistant',text='절대 전달하면 안 되는 비공개 답변',source_ids=[private_id]),
+                 dict(role='assistant',text='선택하지 않은 강의 답변',source_ids=[other_id])]
+        with patch.object(worker,'provider',return_value=FakeProvider()):
+            response=self.student.post('/api/ai/ask',json={'question':'그걸 쉽게 설명해줘','history':history,'lecture_id':public})
+        self.assertEqual(response.status_code,200,response.text)
+        sent=json.dumps(FakeProvider.calls,ensure_ascii=False)
+        self.assertNotIn('절대 전달하면',sent);self.assertNotIn('선택하지 않은',sent)
+        self.assertEqual({s['lecture_id'] for s in response.json()['sources']},{public})
+
+    def test_history_permission_is_rechecked_after_answer_generation(self):
+        self.configure();old=seed_video();new=seed_video()
+        seed_knowledge(old,'해상도 설정');seed_knowledge(new,'배송지 주소 설정')
+        cid=lib.search('해상도',allowed_ids=[old])[0]['id']
+        class Changing(FakeProvider):
+            def generate(self,*a,**kw):
+                out=super().generate(*a,**kw)
+                with core.db() as c:c.execute("UPDATE videos SET state='private' WHERE id=?",(old,))
+                return out
+        api=Changing()
+        with patch.object(worker,'provider',return_value=api), \
+             patch.object(api,'embed',side_effect=ProviderError('검색 대기',code=503)):
+            response=self.student.post('/api/ai/ask',json={'question':'배송지 주소?',
+                'history':[dict(role='assistant',text='이전 화면 설명',source_ids=[cid])]})
+        self.assertEqual(response.status_code,403)
+
+    def test_unclear_question_returns_clarification_without_invented_answer(self):
+        self.configure();vid=seed_video();seed_knowledge(vid);api=FakeProvider()
+        with patch.object(worker,'provider',return_value=api),patch.object(api,'generate',return_value={
+                'supported':False,'paragraphs':[],'clarification':'화면 크기와 글자 크기 중 어떤 설정을 말씀하시나요?','followups':[]}):
+            response=self.student.post('/api/ai/ask',json={'question':'설정이 뭐예요?'})
+        self.assertFalse(response.json()['supported'])
+        self.assertIn('어떤 설정',response.json()['paragraphs'][0]['text'])
+        self.assertEqual(response.json()['sources'],[])
+
+    def test_knowledge_count_excludes_private_and_unfinished_lectures(self):
+        self.configure();public=seed_video();private=seed_video('private');pending=seed_video()
+        for vid in (public,private,pending):seed_knowledge(vid)
+        lib.update(pending,status='paused')
+        response=self.student.get('/api/ai/lectures')
+        self.assertEqual(response.json()['ready'],1)
+        self.assertEqual(response.json()['knowledge_chunks'],1)
+        self.assertEqual(lib.context_chunks([r['id'] for r in lib.search('설정',allowed_ids=[private])],[public]),[])
+
     def test_longer_plan_preserves_legacy_evidence_and_resumes_at_saved_boundary(self):
         self.configure();vid=seed_video()
         self.admin.post('/api/admin/ai/lectures/'+vid,json={'action':'start'})

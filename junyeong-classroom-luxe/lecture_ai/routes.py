@@ -4,12 +4,14 @@ import datetime as dt
 import json
 import os
 import threading
+from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel, Field
 from .store import Library, now
 from .worker import Worker
 from .provider import Gemini, ProviderError, FALLBACK_MODEL, ANSWER_SYSTEM, ANSWER_SCHEMA
 from .key_pool import MAX_KEY_LENGTH
+from .qa import conversation_context, merge_evidence
 
 
 class ApiKeySpec(BaseModel):
@@ -35,10 +37,17 @@ class Action(BaseModel):
     action: str=Field(default='start',pattern='^(start|pause|rebuild|reindex)$')
 
 
+class ConversationTurn(BaseModel):
+    role: Literal['user','assistant']
+    text: str=Field(max_length=1200)
+    source_ids: list[int]=Field(default_factory=list,max_length=20)
+
+
 class Question(BaseModel):
     question: str=Field(min_length=2,max_length=1600)
     lecture_id: str=Field(default='',max_length=64)
     previous_questions: list[str]=Field(default_factory=list,max_length=3)
+    history: list[ConversationTurn]=Field(default_factory=list,max_length=6)
 
 
 def install(core,auth_headers):
@@ -123,6 +132,7 @@ def install(core,auth_headers):
                 with worker.lock:item['active_parts']=sum(lid==v['id'] for lid,_ in worker.inflight)
             items.append(item)
         return dict(items=items,configured=configured(),admin=admin,ready=sum(x['status']=='ready' for x in items),
+                    knowledge_chunks=sum(x['chunks'] for x in items if x['status']=='ready'),
                     queue_blocked=lib.config().get('queue_blocked','') if admin else '',
                     queue_retry_at=lib.config().get('provider_retry_at',0) if admin else 0,
                     keys=worker.keys.snapshot() if admin else [],parallelism=worker.keys.capacity() if admin else 0)
@@ -214,24 +224,36 @@ def install(core,auth_headers):
         if not ask_slots.acquire(False):core.fail(429,'다른 질문에 답하고 있습니다. 잠시 후 다시 질문해 주세요.')
         try:
             vector=None;embedding_model=lib.config().get('embedding_model','gemini-embedding-2')
-            previous=[q[:500] for q in body.previous_questions]
-            query='\n'.join(previous[-2:]+[body.question])
+            history,query,previous_sources,followup=conversation_context(
+                [turn.model_dump() for turn in body.history],body.previous_questions,body.question,
+                lib,list(videos),body.lecture_id or None)
             try:vector,embedding_model=worker.keys.call(lambda api:(api.embed([query],query=True)[0],api.embedding_model),scope='embedding')
             except ProviderError:pass
-            hits=lib.search(query,vector,embedding_model,body.lecture_id or None,limit=16,allowed_ids=list(videos))
+            hits=lib.search(query,vector,embedding_model,body.lecture_id or None,limit=14,allowed_ids=list(videos))
+            hits=merge_evidence(previous_sources,hits,limit=18)
+            neighbors=lib.context_chunks([r['id'] for r in hits[:6]],list(videos),body.lecture_id or None,adjacent=True)
+            hits=merge_evidence(hits,neighbors,limit=30)
+            basis=dict(kind='stored_lecture_analysis',evidence_count=len(hits),
+                       lecture_count=len({r['lecture_id'] for r in hits}),followup=followup)
+            print('LECTURE_QA '+json.dumps(dict(event='retrieval',**basis,
+                history_turns=len(history),search_mode='hybrid' if vector else 'keyword')),flush=True)
             if not hits:
-                return dict(supported=False,paragraphs=[dict(text='분석이 완료된 강의에서 관련 내용을 찾지 못했습니다. 강의 제목이나 사용한 용어를 함께 적어 주세요.',sources=[])],sources=[],followups=[])
+                return dict(supported=False,paragraphs=[dict(text='저장된 강의 자료에서 이 질문에 답할 근거를 찾지 못했습니다. 어떤 작업을 하시려는지, 또는 강의에서 나온 용어를 알려주시면 다시 찾아드리겠습니다.',sources=[])],sources=[],followups=[],basis=basis)
             # Check access immediately before sending evidence, and again before returning it.
             _,current=allowed(req)
             hits=[r for r in hits if r['lecture_id'] in current]
             if not hits:core.fail(403,'강의 공개 상태가 변경되었습니다. 다시 질문해 주세요.')
+            history,_,_,_=conversation_context(history,[],body.question,lib,list(current),body.lecture_id or None)
+            context_ids=[cid for turn in history for cid in turn.get('source_ids',[])]
+            context_lectures={r['lecture_id'] for r in lib.context_chunks(context_ids,list(current),body.lecture_id or None)}
             evidence=[dict(id=r['id'],lecture=current[r['lecture_id']]['title'],registered_date=r['lecture_date'],
                 topic=r['title'],text=r['text'][:5000],transcript=r['transcript'][:3500],screen_text=r['screen_text'][:2000]) for r in hits]
-            payload=dict(question=body.question,previous_questions=previous,EVIDENCE=evidence)
+            payload=dict(question=body.question,CONVERSATION=history,followup=followup,EVIDENCE=evidence)
             answer=worker.keys.call(lambda api:api.generate([{'text':json.dumps(payload,ensure_ascii=False)}],
                 ANSWER_SYSTEM+'\nregistered_date는 강의 등록일이며 실제 촬영일로 단정하지 마세요.',ANSWER_SCHEMA))
             _,current=allowed(req)
-            if any(r['lecture_id'] not in current for r in hits):core.fail(403,'강의 공개 상태가 변경되었습니다. 다시 질문해 주세요.')
+            if any(r['lecture_id'] not in current for r in hits) or not context_lectures.issubset(current):
+                core.fail(403,'강의 공개 상태가 변경되었습니다. 다시 질문해 주세요.')
             valid={r['id']:r for r in hits};paragraphs=[];used=set()
             if answer.get('supported') is True:
                 for part in answer.get('paragraphs',[])[:8]:
@@ -240,10 +262,15 @@ def install(core,auth_headers):
                     text=str(part.get('text','')).strip()[:5000]
                     if text:paragraphs.append(dict(text=text,sources=sorted(set(ids))));used.update(ids)
             if not paragraphs:
-                return dict(supported=False,paragraphs=[dict(text='현재 강의 기록만으로는 정확하게 답하기 어렵습니다. 질문을 더 구체적으로 적거나 다른 강의를 선택해 주세요.',sources=[])],sources=[],followups=[])
+                clarification=str(answer.get('clarification','')).strip()[:300] if answer.get('supported') is False else ''
+                text='현재 저장된 강의 자료만으로는 정확하게 답하기 어렵습니다.'
+                text+='\n\n'+clarification if clarification else ' 어떤 작업이나 단계에서 막히셨는지 조금 더 알려주세요.'
+                print('LECTURE_QA '+json.dumps(dict(event='answer',supported=False,source_count=0)),flush=True)
+                return dict(supported=False,paragraphs=[dict(text=text,sources=[])],sources=[],followups=[],basis=basis)
             sources=[dict(id=r['id'],lecture_id=r['lecture_id'],title=current[r['lecture_id']]['title'],
                 topic=r['title'],start=r['start'],end=r['end'],timing=r['timing'],excerpt=r['text'][:450]) for r in hits if r['id'] in used]
-            return dict(supported=True,paragraphs=paragraphs,sources=sources,
+            print('LECTURE_QA '+json.dumps(dict(event='answer',supported=True,source_count=len(sources),paragraphs=len(paragraphs))),flush=True)
+            return dict(supported=True,paragraphs=paragraphs,sources=sources,basis=basis,
                 followups=[str(q)[:160] for q in answer.get('followups',[])[:2]])
         except ProviderError as e:core.fail(502,str(e))
         finally:ask_slots.release()

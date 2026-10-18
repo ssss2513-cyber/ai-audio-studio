@@ -3,8 +3,8 @@ name: maison-lumiel-oci
 services:
   app:
     build:
-      context: ../junyeong-classroom-luxe
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: oracle-maison-lumiel/Dockerfile
     image: maison-lumiel-oci:local
     user: "10001:10001"
     env_file:
@@ -14,6 +14,8 @@ services:
       PUBLIC_ORIGIN: https://${SITE_HOST}
       PORT: "8000"
       PYTHONUNBUFFERED: "1"
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/.cache
     volumes:
       - /srv/maison-lumiel/data:/data
       - ./import_drive_video.py:/opt/tools/import_drive_video.py:ro

@@ -108,7 +108,9 @@ def install(core, drive_streamer):
             aws_access_key_id=c["key_id"],
             aws_secret_access_key=c["secret"],
             config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
-                          retries={"mode": "standard", "max_attempts": 3}),
+                          retries={"mode": "standard", "max_attempts": 3},
+                          request_checksum_calculation="when_required",
+                          response_checksum_validation="when_required"),
         ), c["bucket"]
 
     def storage_error(exc):
@@ -238,18 +240,31 @@ def install(core, drive_streamer):
         if row["state"]!="uploading":core.fail(409,"업로드를 마칠 수 없는 상태입니다.")
         try:
             s3,bucket=client()
-            parts=list_parts(s3,bucket,row)
-            count=part_count(row["size"])
-            if len(parts)!=count or [p["PartNumber"] for p in parts]!=list(range(1,count+1)):
-                core.fail(409,"아직 전송되지 않은 영상 조각이 있습니다.")
-            for part in parts:
-                if int(part["Size"])!=expected_part_bytes(row["size"],int(part["PartNumber"])):
-                    core.fail(409,"일부 영상 조각의 용량이 일치하지 않습니다.")
-            # Complete only server-enumerated ETags, never accept client-submitted ETags.
-            s3.complete_multipart_upload(
-                Bucket=bucket,Key=row["key"],UploadId=row["upload_id"],
-                MultipartUpload={"Parts":[{"ETag":p["ETag"],"PartNumber":p["PartNumber"]} for p in parts]},
-            )
+            try:
+                parts=list_parts(s3,bucket,row)
+            except Exception:
+                # A previous finish may have completed in R2 just before the
+                # site's response was lost. Only accept that state after HEAD
+                # confirms the exact object size; never fabricate completion.
+                try:
+                    current=s3.head_object(Bucket=bucket,Key=row["key"])
+                    if int(current.get("ContentLength", -1))!=row["size"]:
+                        raise ValueError("R2 object mismatch")
+                    parts=None
+                except Exception:
+                    raise
+            if parts is not None:
+                count=part_count(row["size"])
+                if len(parts)!=count or [p["PartNumber"] for p in parts]!=list(range(1,count+1)):
+                    core.fail(409,"아직 전송되지 않은 영상 조각이 있습니다.")
+                for part in parts:
+                    if int(part["Size"])!=expected_part_bytes(row["size"],int(part["PartNumber"])):
+                        core.fail(409,"일부 영상 조각의 용량이 일치하지 않습니다.")
+                # Complete using only provider-enumerated ETags.
+                s3.complete_multipart_upload(
+                    Bucket=bucket,Key=row["key"],UploadId=row["upload_id"],
+                    MultipartUpload={"Parts":[{"ETag":p["ETag"],"PartNumber":p["PartNumber"]} for p in parts]},
+                )
             head=s3.head_object(Bucket=bucket,Key=row["key"])
             if int(head.get("ContentLength", -1))!=row["size"]:
                 core.fail(502,"저장소 영상 크기 확인에 실패했습니다. 운영자에게 문의해 주세요.")

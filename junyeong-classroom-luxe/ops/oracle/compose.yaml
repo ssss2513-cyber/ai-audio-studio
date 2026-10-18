@@ -1,0 +1,38 @@
+# Oracle ARM Always Free: deploy only after an attached persistent block disk exists.
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: "https://${SITE_DOMAIN}"
+      CLASSROOM_DATA_DIR: /data
+      ADMIN_OWNER_EMAIL: "${ADMIN_OWNER_EMAIL:-ssss2513@gmail.com}"
+      REQUIRE_PHONE_VERIFICATION: "false"
+      PYTHONUNBUFFERED: "1"
+      PORT: "8000"
+    volumes:
+      - "${DATA_HOST_DIR}:/data"
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 60s
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      app: {condition: service_healthy}
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_DOMAIN: "${SITE_DOMAIN}"
+    volumes:
+      - "./Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "caddy_data:/data"
+      - "caddy_config:/config"
+volumes:
+  caddy_data:
+  caddy_config:

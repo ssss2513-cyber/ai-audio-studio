@@ -296,10 +296,15 @@ async function play(id){
   recoveryAttempts=0;clearTimeout(videoStallTimer);videoStallTimer=null;
   clearTimeout(videoRecoveryTimer);videoRecoveryTimer=null;showStatus();
  });
- el.addEventListener('error',()=>{
+ el.addEventListener('error',async()=>{
   if(playerId!==id)return;
   if(el.error?.code===3){showStatus('영상 파일 형식 또는 인코딩 문제가 있습니다. H.264/AAC MP4를 권장합니다.',true);return;}
-  reconnect();
+  try{
+   await api('/videos/'+id+'/access','GET',undefined,{signal:AbortSignal.timeout(9000)});
+  }catch(e){
+   if(driveQuota(e)){showDriveQuota(e.message);return;}
+  }
+  if(playerId===id)reconnect();
  });
  const scheduleStall=()=>{
   if(playerId!==id||el.paused||videoStallTimer)return;
@@ -311,6 +316,15 @@ async function play(id){
  };
  el.addEventListener('waiting',scheduleStall);
  el.addEventListener('stalled',scheduleStall);
+ const driveQuota=(e)=>e?.status===503&&String(e.message||'').includes('Google Drive 영상 다운로드 한도');
+ const showDriveQuota=(message)=>{
+  if(playerId!==id)return;
+  stopPlayer();
+  openModal('<div class="eyebrow">VIDEO STORAGE NOTICE</div><h2>영상 전송 한도에 도달했습니다.</h2><p>'
+    +esc(message||'Google Drive의 다운로드 제한으로 재생이 일시 중단되었습니다. 영상 파일이 삭제된 것은 아닙니다.')
+    +'</p><p class="form-note">반복 재시도는 제한을 해결하지 못합니다. 운영자의 영상 저장소 변경 안내를 기다려 주세요.</p>'
+    +'<div class="button-row"><button class="primary" data-action="close">확인</button></div>');
+ };
  const check=async()=>{
   if(busy||playerId!==id)return;
   busy=true;
@@ -319,7 +333,9 @@ async function play(id){
    if(playerId===id)networkMisses=0;
   }catch(e){
    if(playerId!==id)return;
-   if([401,403,404].includes(e.status)){
+   if(driveQuota(e)){
+    showDriveQuota(e.message);
+   }else if([401,403,404].includes(e.status)){
     stopPlayer();
     openModal(`<h2>시청 권한을 다시 확인해 주세요.</h2><p>${esc(e.message)}</p><button class="primary" data-action="close">확인</button>`);
    }else{

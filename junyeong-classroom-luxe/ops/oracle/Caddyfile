@@ -1,0 +1,15 @@
+# Public domain points to the Oracle VM. Automatic HTTPS needs ports 80/443
+# open in both the Oracle VCN security rules and the host firewall.
+{$DOMAIN} {
+  encode zstd gzip
+  reverse_proxy web:8000
+  header {
+    -Server
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+  }
+  log {
+    output stdout
+    format console
+  }
+}

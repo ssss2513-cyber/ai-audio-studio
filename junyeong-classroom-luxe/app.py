@@ -41,6 +41,7 @@ LOCKS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 LOCK_GUARD = threading.Lock()
 EXTERNAL_STREAMER = None
 EXTERNAL_ACCESS_CHECKER = None
+R2_DELETE_VIDEO = None
 # Manual member approval must never be bypassed by the retired TEMP_OPEN_ACCESS flag.
 # Phone/SMS verification is an independent, opt-in feature; ordinary members
 # can instead supply a phone number without proving ownership.
@@ -219,7 +220,7 @@ async def security(req: Request, call_next):
     response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://images.unsplash.com https://i.ytimg.com blob: data:; media-src 'self' blob:; frame-src https://www.youtube.com https://www.youtube-nocookie.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://images.unsplash.com https://i.ytimg.com blob: data:; media-src 'self' blob: https://*.r2.cloudflarestorage.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     if req.url.path.startswith('/api/'): response.headers['Cache-Control']='private, no-store, max-age=0'
     if SECURE: response.headers['Strict-Transport-Security']='max-age=31536000'
     return response
@@ -811,6 +812,8 @@ def edit_video(ident: str,body: VideoChange,req: Request):
         # Removing a Drive-backed video only removes it from this site; the original Drive file stays untouched.
         if v['source']=='local':
             (DATA/'media'/ident).unlink(missing_ok=True)
+        elif v['source']=='r2' and R2_DELETE_VIDEO is not None:
+            R2_DELETE_VIDEO(v)
         (DATA/'posters'/(ident+'.jpg')).unlink(missing_ok=True)
         with db() as c:
             c.execute('DELETE FROM videos WHERE id=?',(ident,))

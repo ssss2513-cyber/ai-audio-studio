@@ -300,6 +300,12 @@ def _drive_stream(req: Request,v):
                                media_type=v['mime'],headers=out_headers)
 
 core.EXTERNAL_STREAMER=_drive_stream
+# Cloudflare R2 support is optional and does nothing until its four
+# environment values are configured by the operator. Existing Drive videos,
+# encryption keys, SQLite data and sessions are preserved unchanged.
+from r2_storage import install as install_r2_storage
+install_r2_storage(core, _drive_stream)
+
 core.EXTERNAL_ACCESS_CHECKER=_drive_check_access
 
 

@@ -1,0 +1,37 @@
+name: OCI Always Free deployment package checks
+on:
+  push:
+    branches: [maison-lumiel-oci-free]
+    paths:
+      - "junyeong-classroom-luxe/oci/**"
+      - "junyeong-classroom-luxe/brand_build.py"
+      - ".github/workflows/maison-oci-check.yml"
+  workflow_dispatch:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate non-destructive deployment scripts
+        working-directory: junyeong-classroom-luxe/oci
+        run: |
+          bash -n deploy.sh
+          bash -n prepare-ubuntu.sh
+          test -s Caddyfile
+          test -s .env.example
+          test -f compose.yml
+      - name: Validate Docker Compose configuration without publishing
+        working-directory: junyeong-classroom-luxe/oci
+        run: |
+          cp .env.example .env
+          docker compose --env-file .env -f compose.yml config --quiet
+          rm -f .env
+      - name: Verify Python package compile and brand preparation
+        working-directory: junyeong-classroom-luxe
+        run: |
+          python -m py_compile app.py cloud_app.py brand_build.py
+          python brand_build.py
+          test -f web/index.html

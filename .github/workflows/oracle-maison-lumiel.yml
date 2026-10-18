@@ -17,8 +17,8 @@ jobs:
           bash -n oracle-maison-lumiel/install-docker.sh
           bash -n oracle-maison-lumiel/prepare-data-disk.sh
           bash -n oracle-maison-lumiel/launch.sh
-      - name: Check video importer syntax
-        run: python3 -m py_compile oracle-maison-lumiel/import_drive_video.py
+      - name: Check video importer and OCI UI build patch syntax
+        run: python3 -m py_compile oracle-maison-lumiel/import_drive_video.py oracle-maison-lumiel/patch_oci_interface.py
       - name: Check Compose plan without printing secrets
         working-directory: oracle-maison-lumiel
         run: |
@@ -26,4 +26,12 @@ jobs:
           sed -i 's/replace-with-your-domain.example/oci-ci-test.invalid/' .env
           cp runtime.env.example runtime.env
           docker compose --env-file .env -f compose.yaml config --quiet
+          rm -f .env runtime.env
+      - name: Build the OCI-specific app image
+        working-directory: oracle-maison-lumiel
+        run: |
+          cp .env.example .env
+          sed -i 's/replace-with-your-domain.example/oci-ci-test.invalid/' .env
+          cp runtime.env.example runtime.env
+          docker compose --env-file .env -f compose.yaml build app
           rm -f .env runtime.env

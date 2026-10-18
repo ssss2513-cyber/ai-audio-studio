@@ -52,8 +52,6 @@ def install(core, drive_streamer):
     from fastapi import Request
     from fastapi.responses import RedirectResponse
     from pydantic import BaseModel, Field
-    from botocore.config import Config
-    import boto3
 
     app = core.app
     with core.db() as db:
@@ -100,6 +98,9 @@ def install(core, drive_streamer):
         }
 
     def client():
+        # Defer optional SDK imports until R2 is actually configured and used.
+        import boto3
+        from botocore.config import Config
         c = cfg()
         return boto3.client(
             "s3", endpoint_url=f"https://{c['account']}.r2.cloudflarestorage.com",

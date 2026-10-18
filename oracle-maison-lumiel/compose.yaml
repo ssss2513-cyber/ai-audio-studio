@@ -16,6 +16,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - /srv/maison-lumiel/data:/data
+      - ./import_drive_video.py:/opt/tools/import_drive_video.py:ro
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped

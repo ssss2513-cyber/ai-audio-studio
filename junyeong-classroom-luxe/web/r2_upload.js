@@ -129,6 +129,7 @@
      info.textContent='파일 조각을 검증하고 저장 중입니다. 잠시 기다려 주세요.';
      await api('/admin/r2/uploads/'+encodeURIComponent(upload.id)+'/finish','POST',{});
      toast('R2 업로드 완료 · 기존 강의 연결 상태를 확인해 주세요.');
+     busy=false;uploadRunning=false;
      closeModal();S.tab='videos';await render();
    }finally{
      busy=false;uploadRunning=false;controller=null;submit.disabled=false;

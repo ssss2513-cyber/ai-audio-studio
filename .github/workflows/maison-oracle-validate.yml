@@ -1,0 +1,29 @@
+name: Validate Oracle Always Free deployment package
+on:
+  push:
+    branches: [oracle-always-free-setup]
+    paths:
+      - "junyeong-classroom-luxe/ops/oracle/**"
+      - ".github/workflows/maison-oracle-validate.yml"
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: |
+          bash -n junyeong-classroom-luxe/ops/oracle/bootstrap.sh
+          bash -n junyeong-classroom-luxe/ops/oracle/check.sh
+      - name: Check Compose structure with fake configuration values
+        run: |
+          DOMAIN=example.invalid \
+          ADMIN_OWNER_EMAIL=owner@example.invalid \
+          LUMIEL_SETUP_HASH=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          DATA_ROOT=/tmp/maison-oracle-test \
+          docker compose -f junyeong-classroom-luxe/ops/oracle/compose.yaml config --quiet
+      - name: Ensure app data is mounted privately rather than committed to Git
+        run: |
+          grep -F 'CLASSROOM_DATA_DIR: /data' junyeong-classroom-luxe/ops/oracle/compose.yaml
+          grep -F 'mountpoint -q' junyeong-classroom-luxe/ops/oracle/bootstrap.sh
+          grep -F 'version' junyeong-classroom-luxe/ops/oracle/README_KO.md || true

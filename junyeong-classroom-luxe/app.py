@@ -40,6 +40,7 @@ DUMMY = PH.hash(secrets.token_urlsafe(24))
 LOCKS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 LOCK_GUARD = threading.Lock()
 EXTERNAL_STREAMER = None
+EXTERNAL_ACCESS_CHECKER = None
 # Manual member approval must never be bypassed by the retired TEMP_OPEN_ACCESS flag.
 # Phone/SMS verification is an independent, opt-in feature; ordinary members
 # can instead supply a phone number without proving ownership.
@@ -839,7 +840,10 @@ def poster(ident: str,req: Request):
     return FileResponse(p,media_type='image/jpeg')
 @app.get('/api/videos/{ident}/access')
 def access(ident: str,req: Request):
-    watch(req,ident); return {'ok':True}
+    m,v=watch(req,ident)
+    if EXTERNAL_ACCESS_CHECKER is not None and v['source']=='drive':
+        EXTERNAL_ACCESS_CHECKER(v)
+    return {'ok':True}
 class Position(BaseModel):
     seconds: float=Field(ge=0,le=86400,allow_inf_nan=False)
 @app.post('/api/videos/{ident}/progress')

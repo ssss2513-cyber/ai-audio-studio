@@ -1,0 +1,10 @@
+.env
+runtime.env
+*.pem
+*.key
+*.db
+*.sqlite*
+*.tar*
+*.zip
+data/
+backups/

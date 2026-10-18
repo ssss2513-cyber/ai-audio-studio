@@ -1,5 +1,6 @@
 """Cloud entry: durable private data, one-time administrator setup, owner recovery."""
-import os, hashlib, secrets, time, json
+import os, hashlib, secrets, time, json, threading, logging
+from drive_streaming import capped_range, known_reason, should_retry, content_range_start
 import app as core
 from yadam_trends import install as install_yadam_trends
 from fastapi import Request
@@ -105,6 +106,8 @@ if os.getenv('S3_BUCKET'):
 # ---- Private Google Drive video library ---------------------------------
 DRIVE_FOLDER_ID=os.getenv('GOOGLE_DRIVE_FOLDER_ID','').strip()
 _drive_credentials=None
+_drive_lock=threading.RLock()
+_drive_log=logging.getLogger("maison.video.storage")
 
 def _drive_creds():
  global _drive_credentials
@@ -113,17 +116,27 @@ def _drive_creds():
  try:
   from google.oauth2 import service_account
   from google.auth.transport.requests import Request as GoogleAuthRequest
-  if _drive_credentials is None:
-   _drive_credentials=service_account.Credentials.from_service_account_info(json.loads(raw),scopes=['https://www.googleapis.com/auth/drive.readonly'])
-  if not _drive_credentials.valid:
-   _drive_credentials.refresh(GoogleAuthRequest())
-  return _drive_credentials
- except Exception:
-  core.fail(503,'Google Drive 인증 정보를 확인해 주세요.')
+  # One cached credentials object must never be concurrently refreshed. A token can
+  # otherwise momentarily be None even while other worker threads are serving video.
+  with _drive_lock:
+   if _drive_credentials is None:
+    _drive_credentials=service_account.Credentials.from_service_account_info(
+     json.loads(raw),scopes=['https://www.googleapis.com/auth/drive.readonly'])
+   if not _drive_credentials.valid or not _drive_credentials.token:
+    _drive_credentials.refresh(GoogleAuthRequest())
+   if not _drive_credentials.token:
+    raise RuntimeError('Drive access token not available after refresh')
+   return _drive_credentials
+ except Exception as exc:
+  _drive_log.warning('Drive service token unavailable: %s',type(exc).__name__)
+  core.fail(503,'Google Drive 인증 연결이 일시적으로 지연되고 있습니다. 잠시 후 다시 시도해 주세요.')
 
 def _drive_auth_headers():
  creds=_drive_creds()
- return {'Authorization':'Bearer '+creds.token}
+ token=creds.token
+ if not isinstance(token,str) or not token:
+  core.fail(503,'Google Drive 인증 연결을 다시 확인해 주세요.')
+ return {'Authorization':'Bearer '+token}
 
 @app.get('/api/admin/drive/status')
 def drive_status(req: Request):
@@ -172,32 +185,93 @@ def drive_sync(req: Request):
  return {'ok':True,'added':added,'updated':updated,'found':len(files)}
 
 def _drive_stream(req: Request,v):
+ """Serve bounded, verifiable Drive byte ranges to authorized video viewers.
+
+ A 2 GiB browser request such as Range: bytes=0- is shortened to 4 MiB. This
+ avoids leaving large Drive streams open and lets players safely resume. We do
+ not make video objects public or put OAuth tokens in the browser.
+ """
  import requests
  file_id=v['external_id']
  if not file_id: core.fail(404,'Google Drive 파일 ID가 없습니다.')
- headers=_drive_auth_headers()
- if req.headers.get('range'): headers['Range']=req.headers['range']
- upstream=requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}',params={'alt':'media'},headers=headers,stream=True,timeout=60)
- if upstream.status_code not in (200,206):
-  upstream.close()
-  core.fail(502,'Google Drive에서 영상을 불러오지 못했습니다.')
- out_headers={'Accept-Ranges':'bytes','Cache-Control':'private, no-store','Content-Disposition':'inline','X-Accel-Buffering':'no'}
- for k in ('Content-Length','Content-Range'):
-  if upstream.headers.get(k): out_headers[k]=upstream.headers[k]
+ size=int(v['size'] or 0)
+ raw_range=req.headers.get('range','')
+ try: window=capped_range(raw_range,size)
+ except ValueError:
+  return core.Response(status_code=416,headers={'Content-Range':f'bytes */{size}','Accept-Ranges':'bytes'})
+
  if req.method=='HEAD':
+  # Video element metadata probes should not start a multi-gigabyte Drive download.
+  headers={'Accept-Ranges':'bytes','Cache-Control':'private, no-store','Content-Disposition':'inline',
+           'Content-Length':str((window[1]-window[0]+1) if window else size)}
+  if window: headers['Content-Range']=f'bytes {window[0]}-{window[1]}/{size}'
+  return core.Response(status_code=206 if window else 200,media_type=v['mime'],headers=headers)
+
+ headers=_drive_auth_headers()
+ if window:headers['Range']=f'bytes={window[0]}-{window[1]}'
+ upstream=None
+ for attempt in range(3):
+  try:
+   upstream=requests.get(f'https://www.googleapis.com/drive/v3/files/{file_id}',
+     params={'alt':'media'},headers=headers,stream=True,timeout=(9,45))
+  except requests.RequestException as exc:
+   _drive_log.warning('Drive video network failure attempt=%d type=%s',
+                      attempt+1,type(exc).__name__)
+   if attempt<2:
+    time.sleep(0.5*2**attempt)
+    continue
+   core.fail(502,'영상 저장소 연결이 잠시 지연되고 있습니다. 잠시 후 다시 시도해 주세요.')
+  if upstream.status_code in (200,206):
+   if window and upstream.status_code==206:
+    got=content_range_start(upstream.headers.get('Content-Range',''))
+    if got!=window[0]:
+     _drive_log.warning('Drive video range mismatch requested_start=%s received_start=%s',
+                        window[0],got)
+     upstream.close()
+     core.fail(502,'영상 범위 정보를 다시 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.')
+   if window and upstream.status_code==200 and window[0]>0:
+    # Some proxies ignore Range, in which case a nonzero seek would show wrong bytes.
+    _drive_log.warning('Drive ignored nonzero video range, seek_start=%s',window[0])
+    upstream.close()
+    core.fail(502,'영상의 탐색 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.')
+   break
+  try:
+   reason=known_reason(upstream.json())
+  except (ValueError,requests.RequestException):
+   reason='unknown'
+  status=upstream.status_code
   upstream.close()
-  return core.Response(status_code=upstream.status_code,media_type=v['mime'],headers=out_headers)
+  _drive_log.warning('Drive video upstream rejected status=%s reason=%s attempt=%s ranged=%s',
+                     status,reason,attempt+1,bool(window))
+  if status==403 and reason in ('downloadQuotaExceeded','dailyLimitExceeded','quotaExceeded'):
+   core.fail(503,'Google Drive 영상 사용량 한도에 도달했습니다. 운영자에게 문의해 주세요.')
+  if status in (401,403,404) and not should_retry(status,reason):
+   core.fail(502,'Google Drive 파일 접근 권한 또는 다운로드 허용 여부를 확인해 주세요.')
+  if attempt<2 and should_retry(status,reason):
+   time.sleep(0.5*2**attempt)
+   continue
+  core.fail(502,'Google Drive 영상 요청이 거절되었습니다. 잠시 후 다시 시도해 주세요.')
+
+ out_headers={'Accept-Ranges':'bytes','Cache-Control':'private, no-store',
+              'Content-Disposition':'inline','X-Accel-Buffering':'no'}
+ for k in ('Content-Length','Content-Range'):
+  if upstream.headers.get(k):out_headers[k]=upstream.headers[k]
+ # If a proxy ignores Range: bytes=0-4095, HTTP 200 with the entire
+ # representation is valid. Forward its actual full-length headers unchanged.
  def chunks():
   try:
-   for block in upstream.iter_content(256*1024):
-    if not block: continue
-    # Every block re-checks the member state; restriction/removal stops the stream.
-    try: core.watch(req,v['id'])
-    except core.HTTPException: return
-    yield block
+   try:
+    for block in upstream.iter_content(128*1024):
+     if not block:continue
+     try:core.watch(req,v['id'])
+     except core.HTTPException:return
+     yield block
+   except requests.RequestException as exc:
+    _drive_log.warning('Drive video stream interrupted: %s',type(exc).__name__)
   finally:
    upstream.close()
- return core.StreamingResponse(chunks(),status_code=upstream.status_code,media_type=v['mime'],headers=out_headers)
+ return core.StreamingResponse(chunks(),status_code=upstream.status_code,
+                               media_type=v['mime'],headers=out_headers)
 
 core.EXTERNAL_STREAMER=_drive_stream
 

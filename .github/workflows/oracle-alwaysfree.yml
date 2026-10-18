@@ -1,0 +1,31 @@
+name: Oracle Always Free deployment package checks
+on:
+  push:
+    branches: [oracle-alwaysfree-video]
+    paths:
+      - "junyeong-classroom-luxe/oci/**"
+      - "junyeong-classroom-luxe/tests/test_oci_import.py"
+      - ".github/workflows/oracle-alwaysfree.yml"
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check setup scripts and import utility
+        working-directory: junyeong-classroom-luxe
+        run: |
+          for script in oci/*.sh; do bash -n "$script"; done
+          python -m py_compile oci/import_video.py
+      - name: Verify migration on synthetic private data
+        working-directory: junyeong-classroom-luxe
+        run: python -m unittest discover -s tests -p test_oci_import.py -v
+      - name: Validate compose file with fake nonsecret environment
+        working-directory: junyeong-classroom-luxe
+        run: |
+          printf 'DOMAIN=example.com\nDATA_MOUNT=/tmp/test-oracle-volume\nPUBLIC_ORIGIN=https://example.com\nCLASSROOM_DATA_DIR=/data\nADMIN_OWNER_EMAIL=test@example.com\nLUMIEL_SETUP_HASH=not-a-real-hash\n' > .env.oracle
+          docker compose --env-file .env.oracle -f oci/compose.yaml config --quiet
+          rm .env.oracle

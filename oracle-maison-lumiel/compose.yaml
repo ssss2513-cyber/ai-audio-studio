@@ -1,0 +1,67 @@
+name: maison-lumiel-oci
+
+services:
+  app:
+    build:
+      context: ../junyeong-classroom-luxe
+      dockerfile: Dockerfile
+    image: maison-lumiel-oci:local
+    user: "10001:10001"
+    env_file:
+      - ./runtime.env
+    environment:
+      CLASSROOM_DATA_DIR: /data
+      PUBLIC_ORIGIN: https://${SITE_HOST}
+      PORT: "8000"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - /srv/maison-lumiel/data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=8)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    networks: [private]
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_HOST: ${SITE_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [private]
+
+networks:
+  private:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

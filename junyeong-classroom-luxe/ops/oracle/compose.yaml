@@ -1,0 +1,49 @@
+name: maison-lumiel-oracle
+
+# An isolated Oracle Always Free deployment, not the existing Railway service.
+# The private block volume must already be mounted at /mnt/maison-volume.
+services:
+  web:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: maison-lumiel:oracle
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      CLASSROOM_DATA_DIR: /data
+      PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN}
+      ADMIN_OWNER_EMAIL: ${ADMIN_OWNER_EMAIL:?set ADMIN_OWNER_EMAIL}
+      LUMIEL_SETUP_HASH: ${LUMIEL_SETUP_HASH:?set LUMIEL_SETUP_HASH}
+      LUMIEL_STORAGE_MODE: local
+      REQUIRE_PHONE_VERIFICATION: "false"
+      GOOGLE_DRIVE_FOLDER_ID: ""
+      GOOGLE_SERVICE_ACCOUNT_JSON: ""
+    volumes:
+      - ${DATA_ROOT:?mount a block volume}:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5).read()"]
+      interval: 30s
+      timeout: 8s
+      retries: 4
+      start_period: 120s
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DATA_ROOT:?set DATA_ROOT}/caddy:/data
+      - ${DATA_ROOT:?set DATA_ROOT}/caddy-config:/config

@@ -1,0 +1,29 @@
+name: Oracle Maison Lumiel deployment template checks
+on:
+  push:
+    branches: [maison-lumiel]
+    paths:
+      - "oracle-maison-lumiel/**"
+      - ".github/workflows/oracle-maison-lumiel.yml"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Oracle setup shell syntax
+        run: |
+          bash -n oracle-maison-lumiel/install-docker.sh
+          bash -n oracle-maison-lumiel/prepare-data-disk.sh
+          bash -n oracle-maison-lumiel/launch.sh
+      - name: Check video importer syntax
+        run: python3 -m py_compile oracle-maison-lumiel/import_drive_video.py
+      - name: Check Compose plan without printing secrets
+        working-directory: oracle-maison-lumiel
+        run: |
+          cp .env.example .env
+          sed -i 's/replace-with-your-domain.example/oci-ci-test.invalid/' .env
+          cp runtime.env.example runtime.env
+          docker compose --env-file .env -f compose.yaml config --quiet
+          rm -f .env runtime.env

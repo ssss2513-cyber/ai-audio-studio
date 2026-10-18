@@ -19,18 +19,22 @@ jobs:
           node-version: "22"
       - name: Check server Python code
         working-directory: junyeong-classroom-luxe
-        run: python -m py_compile app.py cloud_app.py yadam_trends.py brand_build.py drive_streaming.py
+        run: python -m py_compile app.py cloud_app.py yadam_trends.py brand_build.py drive_streaming.py r2_storage.py
       - name: Check live browser JavaScript
         working-directory: junyeong-classroom-luxe
         run: |
           node --check web/app.js
           node --check web/lumiel.js
+          node --check web/r2_upload.js
       - name: Check manual-approval rules
         working-directory: junyeong-classroom-luxe
         run: python -m unittest discover -s tests -p 'test_manual_approval.py' -v
       - name: Test Drive video byte ranges and error categorization
         working-directory: junyeong-classroom-luxe
         run: python -m unittest discover -s tests -p 'test_drive_streaming.py' -v
+      - name: Test optional R2 free-tier storage controls
+        working-directory: junyeong-classroom-luxe
+        run: python -m unittest discover -s tests -p 'test_r2_storage.py' -v
       - name: Confirm brand build retains new feature
         working-directory: junyeong-classroom-luxe
         run: |

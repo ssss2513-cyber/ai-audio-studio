@@ -35,8 +35,11 @@ def main():
     if not re.fullmatch("[a-f0-9]{32}", args.id):
         parser.error("Video ID must be a 32-character lowercase hexadecimal ID")
     staged = (DATA / "staging").resolve()
-    source = Path(args.file).resolve(strict=True)
-    if staged not in source.parents or not source.is_file() or source.is_symlink():
+    original = Path(args.file)
+    if original.is_symlink():
+        parser.error("Symbolic links are not accepted as source videos")
+    source = original.resolve(strict=True)
+    if staged not in source.parents or not source.is_file():
         parser.error("Source must be a regular file inside /data/staging")
     with db() as c:
         row = c.execute("SELECT * FROM videos WHERE id=?", (args.id,)).fetchone()
@@ -68,6 +71,8 @@ def main():
         parser.error("Not enough free OCI block disk space to copy this file")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(args.id + "." + uuid.uuid4().hex + ".import")
+    moved = False
+    saved = False
     try:
         with source.open("rb") as src, temporary.open("xb") as dst:
             shutil.copyfileobj(src, dst, length=4 * 1024 * 1024)
@@ -76,6 +81,7 @@ def main():
         if temporary.stat().st_size != size:
             parser.error("Incomplete file copy")
         os.replace(temporary, destination)
+        moved = True
         with db() as c:
             c.execute("BEGIN IMMEDIATE")
             current = c.execute("SELECT source,size FROM videos WHERE id=?", (args.id,)).fetchone()
@@ -84,9 +90,12 @@ def main():
             c.execute("UPDATE videos SET source='local', revision=revision+1 WHERE id=?", (args.id,))
             c.execute("INSERT INTO audits(actor,subject,action,reason,created) VALUES(?,?,?,?,strftime('%s','now'))",
                       ("local-operator", args.id, "oci_video_import", "Original private Drive ID retained for rollback"))
+        saved = True
         print("SUCCESS: local video is now served from OCI disk. The Drive original and staged copy were not deleted.")
     finally:
         temporary.unlink(missing_ok=True)
+        if moved and not saved:
+            destination.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -145,15 +145,19 @@ function lumielIntroSection(){
    <div class="lumiel-film-copy">
     <span class="luxe-kicker">OUR STORY · THE INTRODUCTION FILM</span>
     <h2 id="lumiel-film-title">메종 루미엘을<br><em>영상으로 만나보세요.</em></h2>
-    <p>프라이빗 클래스의 새로운 시작, 약 28초의 작은 초대장.<br>재생 버튼을 누르면 목소리와 음악이 함께 나옵니다.</p>
+    <p>프라이빗 클래스의 새로운 시작, 당신을 위한 작은 초대장.<br>소리 켜기를 누르면 목소리와 음악이 함께 나옵니다.</p>
    </div>
-   <span class="lumiel-film-length" aria-label="소개 영상 약 28초">00:28 &nbsp; · &nbsp; MAISON LUMIEL</span>
+   <span class="lumiel-film-length">MAISON LUMIEL</span>
   </div>
   <div class="lumiel-film-frame">
-   <video id="lumiel-intro-video" controls playsinline preload="metadata" poster="/api/public/brand-poster.jpg" aria-label="메종 루미엘 홈페이지 소개 영상">
+   <video id="lumiel-intro-video" autoplay muted playsinline controls preload="auto" poster="/api/public/brand-poster.jpg" aria-label="메종 루미엘 홈페이지 소개 영상">
     <source src="/api/public/brand-intro.mp4" type="video/mp4">
     브라우저에서 영상을 재생할 수 없습니다.
    </video>
+  </div>
+  <div class="lumiel-film-controls">
+   <button type="button" id="lumiel-intro-sound" aria-controls="lumiel-intro-video" aria-pressed="false">소리 켜기</button>
+   <button type="button" id="lumiel-intro-play" aria-controls="lumiel-intro-video" hidden>영상 재생</button>
   </div>
   <div class="lumiel-film-bottom">
    <span>✦ &nbsp; 2026 · MAISON LUMIEL ORIGINAL FILM</span>
@@ -162,6 +166,39 @@ function lumielIntroSection(){
  </section>`;
 }
 
+function lumielInitIntroVideo(){
+ const video=document.getElementById('lumiel-intro-video');
+ if(!video||video.dataset.initialized)return;
+ video.dataset.initialized='1';
+ video.defaultMuted=true;
+ video.muted=true;
+ video.autoplay=true;
+ video.playsInline=true;
+ const sound=document.getElementById('lumiel-intro-sound');
+ const play=document.getElementById('lumiel-intro-play');
+ const updateControls=()=>{
+  const audible=!video.muted&&video.volume>0;
+  sound.textContent=audible?'소리 끄기':'소리 켜기';
+  sound.setAttribute('aria-pressed',String(audible));
+  play.hidden=!video.paused;
+  play.textContent=video.ended?'다시 재생':'영상 재생';
+ };
+ const start=async()=>{
+  try{await video.play();}
+  catch{if(video.isConnected)updateControls();}
+ };
+ sound.addEventListener('click',()=>{
+  const enable=video.muted||video.volume===0;
+  video.muted=!enable;
+  if(enable&&video.volume===0)video.volume=1;
+  if(enable&&video.paused)start();
+  updateControls();
+ });
+ play.addEventListener('click',start);
+ ['play','pause','ended','volumechange'].forEach(name=>video.addEventListener(name,updateControls));
+ updateControls();
+ start();
+}
 
 function lumielYadamSection(){
  return '<section class="luxe-yadam-trends" id="yadam-trends" aria-labelledby="yadam-trends-title">'+
@@ -394,6 +431,7 @@ async function lumielOrderSave(button){
  finally{if(button.isConnected)button.disabled=false;}
 }
 function lumielEnhancePage(){
+ lumielInitIntroVideo();
  const yadam=document.getElementById('lumiel-yadam-list');
  if(yadam&&!yadam.dataset.loaded){yadam.dataset.loaded='1';lumielLoadYadam(yadam);}
  if(S.member?.role==='admin'&&S.tab==='videos'){
@@ -416,6 +454,7 @@ function lumielEnhancePage(){
 const lumielPageObserver=new MutationObserver(lumielEnhancePage);
 const lumielMain=document.getElementById('main');
 if(lumielMain)lumielPageObserver.observe(lumielMain,{childList:true});
+lumielInitIntroVideo();
 document.addEventListener('click',async function(event){
  const btn=event.target.closest('[data-lumiel-order-open],[data-lumiel-move-up],[data-lumiel-move-down],#lumiel-order-save,[data-lumiel-clear-key],[data-lumiel-paste-key],[data-lumiel-toggle-key]');
  if(!btn)return;
@@ -477,7 +516,7 @@ document.addEventListener('submit',async function(event){
  finally{if(button.isConnected)button.disabled=false;}
 },true);
 
-// Keep the original 28-second Maison Lumiel welcome film above the new single rotating yadam recommendation.
+// Keep the Maison Lumiel welcome film above the single rotating yadam recommendation.
 // No lecture lists or other site tabs are added to the public home screen.
 home = function maisonLumielHomeWithIntroduction() {
  return '<div class="luxe-home-page restored-intro-home">' +

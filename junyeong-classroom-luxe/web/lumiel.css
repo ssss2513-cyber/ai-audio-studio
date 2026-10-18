@@ -363,6 +363,11 @@ dialog::backdrop{background:#030102b8!important;backdrop-filter:blur(7px)}
 .lumiel-film-frame{max-width:1180px;margin:0 auto;border:1px solid #e0cec6;border-radius:24px;padding:12px;background:#fffdfb;box-shadow:0 25px 80px rgba(65,25,34,.13),0 3px 10px rgba(67,35,45,.08);position:relative;z-index:1}
 .lumiel-film-frame video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#ebd7dc;border-radius:15px;object-fit:cover}
 .lumiel-film-frame:focus-within{outline:2px solid #ab7286;outline-offset:3px}
+.lumiel-film-controls{max-width:1180px;margin:16px auto 0;display:flex;flex-wrap:wrap;gap:10px;position:relative;z-index:1}
+.lumiel-film-controls button{min-height:44px;padding:10px 20px;border:1px solid #946557;border-radius:999px;background:#2e1820;color:#f5d7b6;font:inherit;font-size:14px;cursor:pointer}
+.lumiel-film-controls button:hover{background:#40242e}
+.lumiel-film-controls button:focus-visible{outline:2px solid #e5bd85;outline-offset:3px}
+.lumiel-film-controls [hidden]{display:none}
 .lumiel-film-bottom{max-width:1180px;margin:18px auto 0;display:flex;justify-content:space-between;align-items:center;gap:20px;color:#906b77;font-size:12px;letter-spacing:.07em}
 .lumiel-film-bottom a{color:#6d3e52;text-decoration:underline;text-underline-offset:4px}
 @media(max-width:680px){.lumiel-film{padding:52px 18px 56px}.lumiel-film-top{align-items:start;flex-direction:column;gap:16px;margin-bottom:23px}.lumiel-film h2{font-size:32px}.lumiel-film-copy p{font-size:15px;line-height:1.75}.lumiel-film-frame{padding:6px;border-radius:16px}.lumiel-film-frame video{border-radius:10px}.lumiel-film-bottom{align-items:flex-start;flex-direction:column;gap:8px}}

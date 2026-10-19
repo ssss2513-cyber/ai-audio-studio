@@ -56,7 +56,7 @@ def probe(source):
         if proc.returncode or not math.isfinite(n) or not 0<n<=48*3600: raise ValueError()
         return n
     except (ValueError,KeyError,TypeError):
-        raise ValueError('영상 길이를 읽지 못했습니다. Drive의 MP4/WebM 원본을 확인해 주세요.') from None
+        raise ValueError('영상 길이를 읽지 못했습니다. MP4/WebM 원본을 확인해 주세요.') from None
 
 
 def make_clip(source, path, start, end, cancelled=None):
@@ -85,7 +85,7 @@ def make_clip(source, path, start, end, cancelled=None):
             try:process.wait(timeout=3)
             except subprocess.TimeoutExpired:process.kill();process.wait()
     if code or not path.exists() or path.stat().st_size<100:
-        raise RuntimeError('Drive 영상 구간을 불러오지 못했습니다. 연결 상태를 확인한 뒤 이어서 분석해 주세요.')
+        raise RuntimeError('영상 구간을 불러오지 못했습니다. 연결 상태를 확인한 뒤 이어서 분석해 주세요.')
     if cancelled and cancelled():raise ProviderCancelled()
     if abs(probe(str(path))-(end-start))>2.5:
         raise RuntimeError('영상 구간이 완전히 준비되지 않았습니다. 이어서 분석을 눌러 주세요.')
@@ -142,8 +142,9 @@ class ClipPrefetch:
 
 class DriveSource:
     """Loopback-only authenticated Range proxy; Google credentials never enter ffmpeg argv."""
-    def __init__(self, file_id, auth_headers, size, version_check):
+    def __init__(self, file_id, auth_headers, size, version_check, source_url=None):
         self.file_id=file_id
+        self.source_url=source_url
         self.auth_headers=auth_headers
         self.size=size
         self.version_check=version_check
@@ -162,14 +163,14 @@ class DriveSource:
                     self.send_error(404);return
                 upstream=None
                 try:
-                    headers=outer.auth_headers()
+                    headers={} if outer.source_url else outer.auth_headers()
                     value=self.headers.get('Range','')
                     if value:
                         if not re.fullmatch(r'bytes=\d+-\d*',value):
                             self.send_error(416);return
                         headers['Range']=value
-                    upstream=requests.get('https://www.googleapis.com/drive/v3/files/'+outer.file_id,
-                        params={'alt':'media'},headers=headers,stream=True,timeout=(15,60))
+                    upstream=requests.get(outer.source_url() if outer.source_url else 'https://www.googleapis.com/drive/v3/files/'+outer.file_id,
+                        params={} if outer.source_url else {'alt':'media'},headers=headers,stream=True,timeout=(15,60))
                     if upstream.status_code not in (200,206):
                         self.send_error(502);return
                     # Refuse ignored nonzero seeks; silently decoding the wrong interval corrupts citations.
@@ -261,6 +262,7 @@ class Worker:
                 (now(),kind,data.get('promptTokenCount',0),data.get('candidatesTokenCount',0)))
 
     def metadata(self, video):
+        if video['source']=='railway':return self.core.OBJECT_MEDIA_METADATA(video)
         if not re.fullmatch(r'[A-Za-z0-9_-]{8,200}',video['external_id']):
             raise ValueError('Drive 파일 연결 정보가 올바르지 않습니다.')
         try:
@@ -278,8 +280,8 @@ class Worker:
 
     def video(self,lid):
         with self.core.db() as c:v=c.execute('SELECT * FROM videos WHERE id=?',(lid,)).fetchone()
-        if not v or v['state'] in ('trash','purging') or v['source']!='drive':
-            raise ValueError('분석할 Drive 강의가 없거나 휴지통으로 이동했습니다.')
+        if not v or v['state'] in ('trash','purging') or v['source'] not in ('drive','railway'):
+            raise ValueError('분석할 강의가 없거나 휴지통으로 이동했습니다.')
         return dict(v)
 
     @staticmethod
@@ -396,7 +398,7 @@ class Worker:
                         if cancelled():raise ProviderCancelled()
                         self.video(lid)
                         if self.version(self.metadata(video))!=version:
-                            raise ValueError('분석 중 Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+                            raise ValueError('분석 중 영상 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
                         remote=api.upload(clip)
                         raw=api.generate([{'fileData':{'fileUri':remote['uri'],'mimeType':'video/mp4'}},
                             {'text':f'이 클립은 {end-start:.2f}초입니다. 시작부터 끝까지 상세하게 기록하세요.'}],
@@ -434,13 +436,13 @@ class Worker:
         # Avoid encoding a large clip when every credential is already known to be unavailable.
         available=self.keys.acquire('embedding' if old['kind']=='reindex' else 'generation',cancelled,set())
         self.keys.release(available['id'])
-        self.phase(lid,'Drive 원본 정보 확인')
+        self.phase(lid,'영상 원본 정보 확인')
         video=self.video(lid);meta=self.metadata(video);version=self.version(meta)
         if old['sha256'] and old['sha256']!=version:
-            raise ValueError('Drive 원본이 변경되었습니다. 이 강의의 다시 분석을 눌러 주세요.')
-        if old['media'] and old['media']!=video['external_id']:
+            raise ValueError('영상 원본이 변경되었습니다. 이 강의의 다시 분석을 눌러 주세요.')
+        if old['media'] and old['media']!=self.core.MEDIA_IDENTITY(video):
             raise ValueError('연결된 원본이 변경되었습니다. 이 강의의 다시 분석을 눌러 주세요.')
-        self.lib.update(lid,sha256=version,media=video['external_id'])
+        self.lib.update(lid,sha256=version,media=self.core.MEDIA_IDENTITY(video))
         if old['kind']=='reindex':
             from .store import normalize
             model=self.lib.config().get('embedding_model','gemini-embedding-2')
@@ -452,7 +454,8 @@ class Worker:
                 with self.lib.connect() as c:
                     c.executemany('UPDATE chunks SET embedding=?,embedding_model=? WHERE id=?',[(normalize(v),used_model,r['id']) for r,v in zip(group,vecs)])
             self.lib.update(lid,status='ready',kind='video',warning='',error='');return
-        with DriveSource(video['external_id'],self.auth_headers,int(meta.get('size') or 0),None) as source:
+        with DriveSource(video['external_id'],self.auth_headers,int(meta.get('size') or 0),None,
+                source_url=(lambda:self.core.OBJECT_MEDIA_URL(video)) if video['source']=='railway' else None) as source:
             length=float((meta.get('videoMediaMetadata') or {}).get('durationMillis') or 0)/1000 or probe(source)
             windows=self.lib.analysis_plan(lid,length);done=self.lib.parts_done(lid)
             missing=[i for i in range(len(windows)) if i not in done]
@@ -499,7 +502,8 @@ class Worker:
                     raise next((e for e in errors if not isinstance(e,PoolUnavailable)),errors[0])
         self.video(lid)
         if self.version(self.metadata(video))!=version:
-            raise ValueError('Drive 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
+            raise ValueError('영상 원본이 변경되었습니다. 다시 분석을 눌러 주세요.')
         if len(self.lib.parts_done(lid))!=len(windows):
             raise RuntimeError('일부 구간이 남아 있습니다. 저장된 다음 구간부터 이어서 분석해 주세요.')
         self.lib.update(lid,status='ready',error='',pause=0,phase='분석 완료',phase_at=now())
+

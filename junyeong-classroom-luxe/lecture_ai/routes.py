@@ -84,7 +84,7 @@ def install(core,auth_headers):
 
     def queue(video,action):
         lid=video['id']
-        if video['source']!='drive':core.fail(422,'기존 Google Drive 강의만 선택해 주세요.')
+        if video['source'] not in ('drive','railway'):core.fail(422,'등록된 MP4 또는 WebM 강의를 선택해 주세요.')
         with worker.lock:
             with lib.connect() as c:
                 old=c.execute('SELECT * FROM lectures WHERE id=?',(lid,)).fetchone()
@@ -106,7 +106,7 @@ def install(core,auth_headers):
                 if not old:
                     c.execute('''INSERT INTO lectures(id,title,lecture_date,created_at,filename,bytes,media,status,kind)
                         VALUES(?,?,?,?,?,?,?,'queued','video')''',
-                        (lid,video['title'],registered,now(),video['title'],video['size'],video['external_id']))
+                        (lid,video['title'],registered,now(),video['title'],video['size'],core.MEDIA_IDENTITY(video)))
                 else:
                     c.execute("UPDATE lectures SET status='queued',pause=0,error='',phase='순서 대기',retry_at=0,retry_count=0,title=?,kind=? WHERE id=?",(video['title'],'reindex' if action=='reindex' or old['kind']=='reindex' else 'video',lid))
         lib.configure(queue_blocked='')
@@ -120,7 +120,7 @@ def install(core,auth_headers):
         admin=member['role']=='admin'
         items=[]
         for v in videos.values():
-            if v['source']!='drive':continue
+            if v['source'] not in ('drive','railway'):continue
             r=rows.get(v['id'],{})
             item=dict(id=v['id'],title=v['title'],playlist=v['playlist'],duration=v['duration'],
                 state=v['state'],status=r.get('status','new'),completed=r.get('completed',0),
@@ -207,7 +207,7 @@ def install(core,auth_headers):
     def queue_new(req: Request):
         member=core.require(req,admin=True,write=True)
         if not configured():core.fail(409,'AI 설정에서 Gemini API 키를 먼저 등록해 주세요.')
-        with core.db() as c:videos=[dict(r) for r in c.execute("SELECT * FROM videos WHERE source='drive' AND state NOT IN ('trash','purging')")]
+        with core.db() as c:videos=[dict(r) for r in c.execute("SELECT * FROM videos WHERE source IN ('drive','railway') AND state NOT IN ('trash','purging')")]
         known={r['id'] for r in lib.list()}
         added=0
         for video in videos:
@@ -276,3 +276,4 @@ def install(core,auth_headers):
         finally:ask_slots.release()
 
     return worker
+

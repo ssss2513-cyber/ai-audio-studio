@@ -96,7 +96,7 @@ def recover_admin(body: Recover, req: Request):
 @app.get('/api/health')
 def health():
  with core.db() as c: c.execute('SELECT 1').fetchone()
- return {'ok':True,'brand':'Maison Lumiel','version':'2.2.0','lectureAssistant':True,'storage':'google-drive' if os.getenv('GOOGLE_DRIVE_FOLDER_ID') else ('private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk')}
+ return {'ok':True,'brand':'Maison Lumiel','version':'2.3.0','lectureAssistant':True,'storage':'railway-bucket' if os.getenv('VIDEO_S3_BUCKET') else 'google-drive' if os.getenv('GOOGLE_DRIVE_FOLDER_ID') else ('private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk')}
 
 if os.getenv('S3_BUCKET'):
  import cloud_storage
@@ -192,6 +192,9 @@ def drive_sync(req: Request):
    mime=f.get('mimeType','')
    if mime not in ('video/mp4','video/webm'): continue
    drive_id=f['id']; name=f.get('name') or 'Drive 영상'
+   # Previously migrated originals remain in Drive as backups, not new lessons.
+   migrated=c.execute("SELECT 1 FROM railway_backup_sources WHERE old_source='drive' AND old_key=?",(drive_id,)).fetchone()
+   if migrated:continue
    size=int(f.get('size') or 0)
    duration_ms=((f.get('videoMediaMetadata') or {}).get('durationMillis') or '0')
    try: duration=float(duration_ms)/1000
@@ -308,6 +311,13 @@ install_r2_storage(core, _drive_stream)
 
 core.EXTERNAL_ACCESS_CHECKER=_drive_check_access
 
+from railway_s3 import origin as railway_storage_origin
+from railway_storage import install as install_railway_storage
+from video_migration import install as install_video_migration
+core.OBJECT_STORAGE_ORIGIN=railway_storage_origin()
+install_railway_storage(core, core.EXTERNAL_STREAMER)
+install_video_migration(core, _drive_auth_headers)
+
 
 
 # Public homepage soundtrack. Route must be outside the /assets StaticFiles mount.
@@ -319,6 +329,8 @@ def background_music(req: Request):
 
 # Owner-supplied 27.7-second welcome film. Public only; private lessons remain access-controlled.
 def _public_brand_media(req: Request, file_id: str, mime: str, maxage: int):
+ migrated=core.PUBLIC_OBJECT_MEDIA(req,file_id)
+ if migrated is not None:return migrated
  import requests
  headers=_drive_auth_headers()
  range_value=req.headers.get('range','')
@@ -357,3 +369,4 @@ def brand_intro_poster(req: Request):
 # Drive-backed cumulative lecture assistant, using the existing member sessions.
 from lecture_ai.routes import install as install_lecture_ai
 install_lecture_ai(core, _drive_auth_headers)
+

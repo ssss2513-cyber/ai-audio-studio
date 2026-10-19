@@ -1,10 +1,12 @@
 """Versioned yadam downloads; package bytes use the existing member access checks."""
 from pathlib import Path
 import base64
+import os
 import tempfile
 
 from fastapi import Request
 from fastapi.responses import FileResponse
+from shared_tool_release import RELEASES, ensure_release
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
@@ -47,15 +49,16 @@ PACKAGES = (
     },
     {
         'id': 'yadam-image-prompts',
-        'asset': 'yadam-image-prompts-v2.7.2-r1.zip',
-        'filename': '야담_이미지제작_2.7.2_프로그램수정본_r1.zip',
+        'asset': 'yadam-image-prompts-v2.7.4.zip',
+        'filename': '야담_이미지제작_2.7.4.zip',
         'title': '이미지 프롬프트 생성기',
         'step': '02 · 이미지 구성하기',
-        'version': '2.7.2 수정본 r1',
-        'updated': '2026-10-14',
-        'description': '완성한 대본을 분석하고, 화풍과 인물을 유지한 장면별 이미지 프롬프트를 만드는 Claude 프로젝트용 도구입니다.',
-        'features': ['화풍 선택·캐릭터 참조·장면별 영어 프롬프트', '대본 목록 앞 30자 표시·원문 전체 보존', '지침·코드·참고 이미지·설치 복구 파일 포함'],
-        'fileCount': 64,
+        'version': '2.7.4',
+        'updated': '2026-10-20',
+        'description': '대본 원문 앞 30자와 에셋 호출을 함께 출력하는 2.7.4 이미지 프롬프트 생성기입니다. 다운로드 파일명은 야담_이미지제작_2.7.4.zip입니다.',
+        'features': ['003 | 대본 원문 30자 | @[에셋] 프롬프트 형식', '화풍 선택·캐릭터 참조·원문 전체 보존', '지침·코드·참고 이미지·설치 복구 파일 포함'],
+        'fileCount': 72,
+        'sha256': '71de06695d7bf3b00c1e780a13aefbbe474db7b0c7acf3f45784fb3de3871494',
     },
     {
         'id': 'yadam-validator',
@@ -72,7 +75,11 @@ PACKAGES = (
 )
 
 
-def package_path(package):
+def package_path(package, data_root=None):
+    if package['asset'] in RELEASES:
+        if data_root is None:
+            data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
+        return ensure_release(package['asset'], data_root)
     path = PACKAGE_ROOT / package['asset']
     if path.suffix != '.b64' or not path.is_file():
         return path
@@ -84,11 +91,17 @@ def package_path(package):
 
 
 def install_shared_tools(core):
+    # Prepare the approved ZIP before this deployment can become healthy.
+    # Subsequent requests use the private volume, without another Drive transfer.
+    for package in PACKAGES:
+        if package['asset'] in RELEASES:
+            package_path(package, core.DATA)
+
     @core.app.get('/api/tools')
     def catalogue():
         items = []
         for package in PACKAGES:
-            path = package_path(package)
+            path = package_path(package, core.DATA)
             if not path.is_file():
                 core.fail(503, '공유 파일을 준비하고 있습니다. 잠시 후 다시 확인해 주세요.')
             item = {key: value for key, value in package.items() if key != 'asset'}
@@ -103,7 +116,7 @@ def install_shared_tools(core):
         package = next((p for p in PACKAGES if p['id'] == ident), None)
         if package is None:
             core.fail(404, '등록된 공유 파일이 아닙니다.')
-        path = package_path(package)
+        path = package_path(package, core.DATA)
         if not path.is_file():
             core.fail(503, '공유 파일을 준비하고 있습니다. 잠시 후 다시 확인해 주세요.')
         return FileResponse(

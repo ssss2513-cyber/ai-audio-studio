@@ -12,6 +12,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import requests
@@ -211,15 +212,38 @@ class Migration:
                     Metadata={'source-md5':meta['md5Checksum']})
                 row['upload_id']=upload['UploadId']
                 self.update(row['id'],upload_id=row['upload_id'])
+            completed={}
+            for p in parts:
+                number=int(p['PartNumber'])
+                expected=min(PART,size-(number-1)*PART)
+                if number<1 or expected<=0 or p['Size']!=expected or number in completed:
+                    raise MigrationError('multipart_resume_mismatch')
+                completed[number]=p
             offset=0
-            for number,p in enumerate(parts,1):
-                expected=min(PART,size-offset)
-                if p['PartNumber']!=number or p['Size']!=expected:raise MigrationError('multipart_resume_mismatch')
-                offset+=p['Size']
+            while offset<size and offset//PART+1 in completed:
+                offset+=completed[offset//PART+1]['Size']
             report('transfer_start',id=row['id'],bytes=size,resumeBytes=offset)
             last_report=time.monotonic()
+            transferred=sum(p['Size'] for p in completed.values())
+            def send(number,payload):
+                result=s3.upload_part(Bucket=bucket,Key=row['object_key'],UploadId=row['upload_id'],
+                    PartNumber=number,Body=payload,
+                    ContentMD5=base64.b64encode(hashlib.md5(payload).digest()).decode('ascii'))
+                return dict(PartNumber=number,ETag=result['ETag'],Size=len(payload))
+            def collect(future):
+                nonlocal transferred,last_report
+                part=future.result()
+                completed[part['PartNumber']]=part
+                transferred+=part['Size']
+                self.update(row['id'],transferred=transferred)
+                if time.monotonic()-last_report>=25 or transferred==size:
+                    report('progress',id=row['id'],transferred=transferred,bytes=size)
+                    last_report=time.monotonic()
             if offset<size:
-                with self.source(row,offset) as source:
+                # Three bounded 16 MiB parts overlap network waits without staging
+                # the movie on the 500 MB data volume or exhausting server RAM.
+                with ThreadPoolExecutor(max_workers=3,thread_name_prefix='video-copy') as pool, self.source(row,offset) as source:
+                    pending=[]
                     while offset<size:
                         self.check_stopped()
                         length=min(PART,size-offset)
@@ -229,22 +253,18 @@ class Migration:
                             if not chunk:raise MigrationError('source_ended_early')
                             body.extend(chunk)
                         payload=bytes(body);del body
-                        number=len(parts)+1
-                        result=s3.upload_part(Bucket=bucket,Key=row['object_key'],UploadId=row['upload_id'],
-                            PartNumber=number,Body=payload,
-                            ContentMD5=base64.b64encode(hashlib.md5(payload).digest()).decode('ascii'))
-                        parts.append(dict(PartNumber=number,ETag=result['ETag'],Size=length))
+                        number=offset//PART+1
+                        if number not in completed:
+                            pending.append(pool.submit(send,number,payload))
                         offset+=length;del payload
-                        self.update(row['id'],transferred=offset)
-                        if time.monotonic()-last_report>=25 or offset==size:
-                            report('progress',id=row['id'],transferred=offset,bytes=size)
-                            last_report=time.monotonic()
+                        if len(pending)>=3:collect(pending.pop(0))
+                    for future in pending:collect(future)
                     if source.read(1):raise MigrationError('source_larger_than_metadata')
             latest=self.metadata(row)
             if latest['md5Checksum']!=meta['md5Checksum'] or int(latest['size'])!=size:
                 raise MigrationError('source_changed_during_transfer')
             s3.complete_multipart_upload(Bucket=bucket,Key=row['object_key'],UploadId=row['upload_id'],
-                MultipartUpload={'Parts':[{'PartNumber':p['PartNumber'],'ETag':p['ETag']} for p in parts]})
+                MultipartUpload={'Parts':[{'PartNumber':n,'ETag':p['ETag']} for n,p in sorted(completed.items())]})
         self.update(row['id'],state='verifying',transferred=size)
         report('verify_start',id=row['id'],bytes=size)
         self.verify_object(s3,bucket,row,meta)

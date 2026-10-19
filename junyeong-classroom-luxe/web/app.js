@@ -109,25 +109,28 @@ async function classes(){
 }
 function gptCollection(){
  // External ChatGPT GPT links provided by the site operator; each opens directly in a new tab.
- // Keep all five tools together as ONE collection, divided into three production stages.
+ // Keep all six tools in one collection; channel setup comes first, then the original five production tools.
  const groups=[
-  {stage:"01",name:"이야기 기획 · 집필",desc:"이야기의 뼈대를 잡고 본편 원고를 완성합니다.",items:[
-   {step:"01",name:"야담 시놉시스 제작",desc:"소재·작법 구조·챕터 시놉시스를 준비합니다.",url:"https://chatgpt.com/g/g-6a043cdc702081918b5996ee47484ee0-yadam-sinobsiseu-jejag-by-yuhun"},
-   {step:"02",name:"야담 오디오북 대본 제작",desc:"선택한 시놉시스를 낭독용 대본으로 완성합니다.",url:"https://chatgpt.com/g/g-6a046731b9c881919da07e6eefd367ee-yadam-odiobug-seukeuribteo"}
+  {stage:"01",name:"채널 시작 · 기본 준비",desc:"처음 유튜브 채널을 준비하는 분을 위한 시작 단계입니다.",items:[
+   {step:"01",name:"유튜브 채널 시작 도우미",desc:"유튜브 채널을 처음 시작할 때 필요한 준비와 설정을 안내합니다.",url:"https://chatgpt.com/g/g-68c03846b12081919402f59ecedf4ad6-yutyubeu-caeneol-sijag-doumi"}
   ]},
-  {stage:"02",name:"제목 · 도입부",desc:"처음 클릭과 초반 몰입에 필요한 요소를 만듭니다.",items:[
-   {step:"03",name:"제목과 도입부 생성",desc:"제목·썸네일 문구·인트로 설명을 구성합니다.",url:"https://chatgpt.com/g/g-69d8fc9f44ec8191834cbd255347a240-yadam-sseomneil-inteuro-seolmyeong-saengseonggi"}
+  {stage:"02",name:"이야기 기획 · 집필",desc:"이야기의 뼈대를 잡고 본편 원고를 완성합니다.",items:[
+   {step:"02",name:"야담 시놉시스 제작",desc:"소재·작법 구조·챕터 시놉시스를 준비합니다.",url:"https://chatgpt.com/g/g-6a043cdc702081918b5996ee47484ee0-yadam-sinobsiseu-jejag-by-yuhun"},
+   {step:"03",name:"야담 오디오북 대본 제작",desc:"선택한 시놉시스를 낭독용 대본으로 완성합니다.",url:"https://chatgpt.com/g/g-6a046731b9c881919da07e6eefd367ee-yadam-odiobug-seukeuribteo"}
   ]},
-  {stage:"03",name:"영상 · 이미지 제작",desc:"인트로 동영상과 본편 장면 이미지를 제작합니다.",items:[
-   {step:"04",name:"Flow Omni 인트로 프롬프트",desc:"인트로 영상에 사용할 장면·동작 프롬프트를 만듭니다.",url:"https://chatgpt.com/g/g-6a4b4dcbb180819190bbb4a4fa9f109b-flow-omni-inteuro-dongyeongsang-peurompeuteo"},
-   {step:"05",name:"야담 이미지 플로우",desc:"본편 장면의 이미지·Flow 프롬프트를 제작합니다.",url:"https://chatgpt.com/g/g-69f6e703b758819180229c897401aae8-yadam-flow-peurompeuteu-maseuteo"}
+  {stage:"03",name:"제목 · 도입부",desc:"처음 클릭과 초반 몰입에 필요한 요소를 만듭니다.",items:[
+   {step:"04",name:"제목과 도입부 생성",desc:"제목·썸네일 문구·인트로 설명을 구성합니다.",url:"https://chatgpt.com/g/g-69d8fc9f44ec8191834cbd255347a240-yadam-sseomneil-inteuro-seolmyeong-saengseonggi"}
+  ]},
+  {stage:"04",name:"영상 · 이미지 제작",desc:"인트로 동영상과 본편 장면 이미지를 제작합니다.",items:[
+   {step:"05",name:"Flow Omni 인트로 프롬프트",desc:"인트로 영상에 사용할 장면·동작 프롬프트를 만듭니다.",url:"https://chatgpt.com/g/g-6a4b4dcbb180819190bbb4a4fa9f109b-flow-omni-inteuro-dongyeongsang-peurompeuteo"},
+   {step:"06",name:"야담 이미지 플로우",desc:"본편 장면의 이미지·Flow 프롬프트를 제작합니다.",url:"https://chatgpt.com/g/g-69f6e703b758819180229c897401aae8-yadam-flow-peurompeuteu-maseuteo"}
   ]}
  ];
  return '<section class="gpt-suite" aria-labelledby="gpt-suite-title">'+
   '<div class="gpt-suite-top"><div><span class="gpt-suite-kicker">YOUR YADAM CREATION WORKFLOW</span>'+
   '<h2 id="gpt-suite-title">야담 제작 GPT 통합 모음</h2>'+
-  '<p>제작에 필요한 GPT 5개를 한곳에 모았습니다. 단계별로 선택해 바로 사용하세요.</p></div>'+
-  '<span class="gpt-suite-total">5개의 GPT · 3단계</span></div>'+
+  '<p>유튜브 채널 시작부터 야담 영상 제작까지 GPT 6개를 순서대로 이용하세요.</p></div>'+
+  '<span class="gpt-suite-total">6개의 GPT · 4단계</span></div>'+
   '<div class="gpt-suite-groups">'+groups.map(function(group){
    return '<div class="gpt-suite-group"><div class="gpt-suite-group-head">'+
     '<span class="gpt-suite-group-num">STAGE '+esc(group.stage)+'</span><h3>'+esc(group.name)+'</h3>'+

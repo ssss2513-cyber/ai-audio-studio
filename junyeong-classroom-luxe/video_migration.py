@@ -161,12 +161,32 @@ class Migration:
         size=int(meta['size'])
         if head['ContentLength']!=size or head.get('Metadata',{}).get('source-md5')!=meta['md5Checksum']:
             raise MigrationError('destination_metadata_mismatch')
-        digest=hashlib.md5();count=0
-        remote=s3.get_object(Bucket=bucket,Key=row['object_key'])['Body']
-        try:
-            for block in iter(lambda:remote.read(1024*1024),b''):
-                self.check_stopped();digest.update(block);count+=len(block)
-        finally:remote.close()
+        digest=hashlib.md5();count=0;last_report=time.monotonic()
+        def read_range(start):
+            self.check_stopped()
+            length=min(PART,size-start)
+            result=s3.get_object(Bucket=bucket,Key=row['object_key'],
+                                Range=f'bytes={start}-{start+length-1}',IfMatch=head['ETag'])
+            remote=result['Body']
+            try:data=remote.read(length+1)
+            finally:remote.close()
+            if len(data)!=length:raise MigrationError('verification_range_length_mismatch')
+            return data
+        # Hash every byte in order, while overlapping three bounded range reads.
+        # The ETag condition prevents mixing bytes from different object versions.
+        with ThreadPoolExecutor(max_workers=3,thread_name_prefix='video-verify') as pool:
+            pending=[]
+            def consume(future):
+                nonlocal count,last_report
+                self.check_stopped()
+                data=future.result();digest.update(data);count+=len(data)
+                if time.monotonic()-last_report>=25:
+                    report('verify_progress',id=row['id'],verified=count,bytes=size)
+                    last_report=time.monotonic()
+            for start in range(0,size,PART):
+                pending.append(pool.submit(read_range,start))
+                if len(pending)>=3:consume(pending.pop(0))
+            for future in pending:consume(future)
         if count!=size or digest.hexdigest()!=meta['md5Checksum']:
             raise MigrationError('destination_checksum_mismatch')
         # Verify real signed delivery, seeking and browser origin support as well.

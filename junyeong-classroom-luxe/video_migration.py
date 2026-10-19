@@ -161,6 +161,31 @@ class Migration:
         size=int(meta['size'])
         if head['ContentLength']!=size or head.get('Metadata',{}).get('source-md5')!=meta['md5Checksum']:
             raise MigrationError('destination_metadata_mismatch')
+        # A whole-source MD5 plus the independently returned multipart ETag
+        # verifies all uploaded parts without a second multi-GB download. A
+        # restarted transfer or nonstandard ETag falls back to full byte hashing.
+        composite=(meta.get('_verified_source_md5')==meta['md5Checksum'] and
+                   bool(meta.get('_expected_multipart_etag')) and
+                   head.get('ETag','').strip('"')==meta['_expected_multipart_etag'])
+        if not composite:self.verify_contents(s3,bucket,row,meta,head)
+        report('checksum_verified',id=row['id'],mode='source-and-multipart-md5' if composite else 'full-read-md5')
+        # Verify real signed delivery, seeking and browser origin support as well.
+        for start in (0,max(0,size-1024)):
+            with requests.get(signed_url(row['object_key']),headers={
+                    'Range':f'bytes={start}-{min(start+1023,size-1)}','Origin':self.core.ORIGIN},
+                    stream=True,timeout=(15,60)) as response:
+                if response.status_code!=206 or not response.headers.get('Content-Range','').startswith(f'bytes {start}-'):
+                    raise MigrationError('signed_range_verification_failed')
+                if response.headers.get('Access-Control-Allow-Origin') not in (self.core.ORIGIN,'*'):
+                    raise MigrationError('storage_cors_verification_failed')
+        # Bucket must remain private when no signature or credentials are supplied.
+        from railway_s3 import origin
+        with requests.head(origin()+'/'+row['object_key'],timeout=(15,30)) as response:
+            if response.status_code not in (401,403,404):
+                raise MigrationError('unsigned_object_accessible')
+
+    def verify_contents(self,s3,bucket,row,meta,head):
+        size=int(meta['size'])
         digest=hashlib.md5();count=0;last_report=time.monotonic()
         def read_range(start):
             self.check_stopped()
@@ -189,20 +214,6 @@ class Migration:
             for future in pending:consume(future)
         if count!=size or digest.hexdigest()!=meta['md5Checksum']:
             raise MigrationError('destination_checksum_mismatch')
-        # Verify real signed delivery, seeking and browser origin support as well.
-        for start in (0,max(0,size-1024)):
-            with requests.get(signed_url(row['object_key']),headers={
-                    'Range':f'bytes={start}-{min(start+1023,size-1)}','Origin':self.core.ORIGIN},
-                    stream=True,timeout=(15,60)) as response:
-                if response.status_code!=206 or not response.headers.get('Content-Range','').startswith(f'bytes {start}-'):
-                    raise MigrationError('signed_range_verification_failed')
-                if response.headers.get('Access-Control-Allow-Origin') not in (self.core.ORIGIN,'*'):
-                    raise MigrationError('storage_cors_verification_failed')
-        # Bucket must remain private when no signature or credentials are supplied.
-        from railway_s3 import origin
-        with requests.head(origin()+'/'+row['object_key'],timeout=(15,30)) as response:
-            if response.status_code not in (401,403,404):
-                raise MigrationError('unsigned_object_accessible')
 
     def transfer(self,row):
         meta=self.metadata(row)
@@ -211,6 +222,8 @@ class Migration:
         previous=json.loads(row['metadata'])
         if previous and (previous.get('md5Checksum')!=meta['md5Checksum'] or int(previous['size'])!=size):
             raise MigrationError('source_changed_since_migration_started')
+        for key in ('_verified_source_md5','_expected_multipart_etag'):
+            if key in previous:meta[key]=previous[key]
         self.update(row['id'],size=size,metadata=json.dumps(meta),state='uploading',error='',retry_at=0)
         row=dict(row,size=size,metadata=json.dumps(meta))
         s3,bucket=client()
@@ -242,6 +255,8 @@ class Migration:
             offset=0
             while offset<size and offset//PART+1 in completed:
                 offset+=completed[offset//PART+1]['Size']
+            source_digest=hashlib.md5() if offset==0 else None
+            part_digests=[]
             report('transfer_start',id=row['id'],bytes=size,resumeBytes=offset)
             last_report=time.monotonic()
             transferred=sum(p['Size'] for p in completed.values())
@@ -273,6 +288,9 @@ class Migration:
                             if not chunk:raise MigrationError('source_ended_early')
                             body.extend(chunk)
                         payload=bytes(body);del body
+                        if source_digest is not None:
+                            source_digest.update(payload)
+                            part_digests.append(hashlib.md5(payload).digest())
                         number=offset//PART+1
                         if number not in completed:
                             pending.append(pool.submit(send,number,payload))
@@ -283,6 +301,12 @@ class Migration:
             latest=self.metadata(row)
             if latest['md5Checksum']!=meta['md5Checksum'] or int(latest['size'])!=size:
                 raise MigrationError('source_changed_during_transfer')
+            if source_digest is not None:
+                if source_digest.hexdigest()!=meta['md5Checksum']:
+                    raise MigrationError('downloaded_source_checksum_mismatch')
+                meta['_verified_source_md5']=source_digest.hexdigest()
+                meta['_expected_multipart_etag']=hashlib.md5(b''.join(part_digests)).hexdigest()+'-'+str(len(part_digests))
+                self.update(row['id'],metadata=json.dumps(meta))
             s3.complete_multipart_upload(Bucket=bucket,Key=row['object_key'],UploadId=row['upload_id'],
                 MultipartUpload={'Parts':[{'PartNumber':n,'ETag':p['ETag']} for n,p in sorted(completed.items())]})
         self.update(row['id'],state='verifying',transferred=size)

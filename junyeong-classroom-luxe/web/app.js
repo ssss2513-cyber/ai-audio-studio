@@ -167,10 +167,10 @@ function imageAutoPlacementCard(){
   '<span class="gpt-suite-total">웹 프로그램</span></div>'+
   '<div class="gpt-suite-items"><div class="gpt-suite-item">'+
   '<span class="gpt-suite-step" aria-hidden="true">✧</span>'+
-  '<div class="gpt-suite-item-text"><strong>이미지 자동배치</strong>'+
-  '<p>아래 버튼을 누르면 이미지 자동배치 사이트로 이동합니다.</p></div>'+
-  '<a class="gpt-suite-open" href="https://uhb.kr/ytc/yuhun.html" target="_blank" rel="noopener noreferrer" aria-label="이미지 자동배치 새 창에서 열기">프로그램 열기 <span aria-hidden="true">↗</span></a>'+
-  '</div></div><p class="gpt-suite-help">외부 사이트가 새 창에서 열립니다.</p></section>';
+  '<div class="gpt-suite-item-text"><strong>준영 이미지 자동배치 V1.5 · 핑크 공주 버전</strong>'+
+  '<p>자막 → 나레이션 → 자막영상 → 이미지 폴더 → 프롬프트 순으로 입력하고 캡컷에 배치하세요.</p></div>'+
+  '<a class="gpt-suite-open" href="https://junyoung-image-placer.ssss2513.chatgpt.site" target="_blank" rel="noopener noreferrer" aria-label="이미지 자동배치 새 창에서 열기">프로그램 열기 <span aria-hidden="true">↗</span></a>'+
+  '</div></div><p class="gpt-suite-help">공유 가능한 웹 프로그램입니다. PC Chrome·Edge에서 열고 캡컷 프로젝트 전체 경로를 입력해 주세요.</p></section>';
 }
 
 async function yadamTools(){

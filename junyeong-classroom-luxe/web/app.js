@@ -155,7 +155,7 @@ function royalStudioCard(){
   '<span class="gpt-suite-step" aria-hidden="true">✧</span>'+
   '<div class="gpt-suite-item-text"><strong>인기 야담 검색 · 썸네일 · AI 요약</strong>'+
   '<p>랜덤 영상 탐색, 롱폼 4분 이상 필터, 고해상도 썸네일 팝업과 요약 복사를 이용하세요.</p></div>'+
-  '<a class="gpt-suite-open" href="https://yadam-royal-studio.ssss2513.chatgpt.site/" target="_blank" rel="noopener noreferrer" aria-label="야담 로열 스튜디오 새 창에서 열기">프로그램 열기 <span aria-hidden="true">↗</span></a>'+
+  '<a class="gpt-suite-open" href="https://royal-workroom-m7q4n9.ssss2513.chatgpt.site/" target="_blank" rel="noopener noreferrer" aria-label="야담 로열 스튜디오 새 창에서 열기">프로그램 열기 <span aria-hidden="true">↗</span></a>'+
   '</div></div><p class="gpt-suite-help">누구나 접속할 수 있습니다. 검색과 AI 요약에는 각자의 YouTube·Gemini API 키가 필요합니다.</p></section>';
 }
 

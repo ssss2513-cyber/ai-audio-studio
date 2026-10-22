@@ -3,7 +3,7 @@
    information are ever sent to GitHub or embedded in this file. */
 (() => {
  // Bound memory/network usage and wait for every active request before reset.
- async function runPartQueue(numbers,transfer,onComplete,signal){
+ async function runPartQueue(numbers,transfer,onComplete,signal,concurrency=6){
    let next=0,firstError=null;
    async function worker(){
      while(!firstError&&!signal.aborted&&next<numbers.length){
@@ -12,7 +12,7 @@
        catch(error){if(!firstError)firstError=error;}
      }
    }
-   await Promise.allSettled(Array.from({length:Math.min(3,numbers.length)},worker));
+   await Promise.allSettled(Array.from({length:Math.min(Math.max(1,Math.min(9,concurrency)),numbers.length)},worker));
    if(firstError)throw firstError;
    if(signal.aborted)throw Error('업로드를 일시정지했습니다. 같은 파일을 다시 선택하면 이어올릴 수 있습니다.');
  }
@@ -75,11 +75,13 @@
    const previous=(S.videos||[]).find(v=>v.id===replace);
    const label=replace?'기존 강의 영상 교체':'새 강의 업로드';
    openModal('<div class="eyebrow">영상 업로드</div><h2>'+label+'</h2>'
-    +'<p>영상은 사이트 서버를 거치지 않고 전용 영상 저장소로 직접 업로드됩니다. 파일 조각 3개를 동시에 전송합니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
+    +'<p>영상은 사이트 서버를 거치지 않고 전용 영상 저장소로 직접 업로드됩니다. 여러 영상을 한 번에 선택하면 순서대로 자동 업로드합니다. 동시 전송 수를 조절할 수 있습니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
     +(replace?'<div class="notice"><b>기존 영상 연결만 변경합니다.</b><p>회원의 기존 강의 순서·승인 상태·시청 기록은 유지합니다. Google Drive 원본은 삭제하지 않습니다.</p></div>':'')
-    +'<form id="railway-upload-form"><label class="field"><span>영상 파일 · MP4 또는 WebM</span>'
-    +'<input type="file" name="file" accept="video/mp4,video/webm" required></label>'
+    +'<form id="railway-upload-form"><label class="field"><span>영상 파일 · MP4 또는 WebM · 여러 개 선택 가능</span>'
+    +'<input type="file" name="file" accept="video/mp4,video/webm" '+(replace?'':'multiple')+' required></label>'
     +'<label class="field"><span>영상 제목</span><input type="text" name="title" required maxlength="120" value="'+esc(previous?.title||'')+'"></label>'
+    +'<div id="railway-file-list"></div>'
+    +'<label class="field"><span>동시 전송 수</span><select name="concurrency"><option value="3">3개 · 안정 모드</option><option value="6" selected>6개 · 기본</option><option value="9">9개 · 빠른 전송 시도</option></select></label>'
     +'<label class="check"><input type="checkbox" name="rights" required><span>이 영상을 회원에게 제공할 권한이 있습니다.</span></label>'
     +'<div class="form-error" role="alert" hidden></div>'
     +'<button type="submit" class="primary full">영상 업로드 시작</button></form>'
@@ -88,6 +90,15 @@
     +'<button id="railway-stop" type="button" class="outline small">전송 일시정지</button></div>'
     +'<p class="form-note">처음 등록하는 영상은 비공개로 저장됩니다. 영상 관리에서 공개 상태를 선택해 주세요.</p>');
    const form=$el('#railway-upload-form');form.dataset.replace=replace;
+   form.elements.file.onchange=()=>{
+     const files=[...form.elements.file.files];
+     form.completedFiles=new Set();
+     form.elements.title.required=files.length<=1;
+     form.elements.title.closest('label').hidden=files.length>1;
+     if(files.length===1&&!replace)form.elements.title.value=files[0].name.replace(/\.[^.]+$/,'').slice(0,120);
+     $el('#railway-file-list').innerHTML=files.length>1
+       ?'<p>선택한 '+files.length+'개 영상을 순서대로 자동 업로드합니다. 제목을 수정할 수 있습니다.</p>'+files.map((f,i)=>'<label class="field"><span>'+esc(f.name)+'</span><input data-batch-title="'+i+'" required maxlength="120" value="'+esc(f.name.replace(/\.[^.]+$/,'').slice(0,120))+'"></label>').join(''):'';
+   };
    $el('#railway-stop').onclick=()=>{if(controller)controller.abort();};
  }
 
@@ -99,25 +110,47 @@
  }
 
  async function uploadRailway(form) {
-   const file=form.elements.file.files[0];
+   if(busy)throw Error('이미 업로드 중입니다.');
+   const files=[...form.elements.file.files];
+   const file=files[0];
    if(!file)throw Error('업로드할 영상 파일을 선택하세요.');
    if(file.size>MAX_BYTES)throw Error('영상 파일은 최대 5GB입니다.');
    if(!crypto?.subtle)throw Error('HTTPS에서만 업로드할 수 있습니다.');
    const mime=file.type||(/\.webm$/i.test(file.name)?'video/webm':'video/mp4');
    if(!/^video\/(mp4|webm)$/.test(mime))throw Error('MP4 또는 WebM 파일을 선택하세요.');
    if(!form.elements.rights.checked)throw Error('영상 제공 권한 확인이 필요합니다.');
-   const startAt=performance.now();
+   if(form.dataset.replace&&files.length!==1)throw Error('영상 교체는 한 개씩 선택해 주세요.');
+   for(const f of files){
+     if(f.size>MAX_BYTES||!f.size||!(/\.(mp4|webm)$/i.test(f.name)))throw Error(f.name+' · 5GB 이하 MP4 또는 WebM을 선택하세요.');
+   }
+   const completed=form.completedFiles||(form.completedFiles=new Set());
+   const failures=[];
+   const concurrency=[3,6,9].includes(Number(form.elements.concurrency.value))?Number(form.elements.concurrency.value):6;
+   const inputs=[...form.querySelectorAll('input,select')];
+   const errorNode=form.querySelector('.form-error');if(errorNode)errorNode.hidden=true;
+   inputs.forEach(x=>x.disabled=true);
+
    busy=true;uploadRunning=true;controller=new AbortController();
    const progress=$el('#railway-progress');progress.hidden=false;
    const info=$el('#railway-progress-text'),bar=$el('#railway-progress .upload-track span');
    const submit=form.querySelector('button[type=submit]');submit.disabled=true;
    try{
-     info.textContent='원본 파일을 확인하고 있습니다.';
+     for(let index=0;index<files.length;index++){
+     const file=files[index];
+     if(completed.has(file))continue;
+     if(controller.signal.aborted)throw Error('업로드를 일시정지했습니다. 다시 시작하면 완료된 영상은 건너뜁니다.');
+     const mime=file.type||(/\.webm$/i.test(file.name)?'video/webm':'video/mp4');
+     const prefix='['+(index+1)+'/'+files.length+'] '+file.name+' · ';
+     try{
+     info.textContent=prefix+'원본 파일을 확인하고 있습니다.';
+
      const fingerprintValue=await fingerprint(file);
+     const duration=await fileDuration(file);
+     if(controller.signal.aborted)throw Error('업로드를 일시정지했습니다.');
      const upload=await api('/admin/railway/uploads','POST',{
-       title:form.elements.title.value.trim(), description:'회원 전용 강의',
+       title:(files.length>1?form.querySelector('[data-batch-title="'+index+'"]').value:form.elements.title.value).trim(), description:'회원 전용 강의',
        filename:file.name,mime,size:file.size,fingerprint:fingerprintValue,
-       duration:await fileDuration(file),rights:true,replaceVideoId:form.dataset.replace||''
+       duration,rights:true,replaceVideoId:form.dataset.replace||''
      });
      const u=await api('/admin/railway/uploads/'+encodeURIComponent(upload.id));
      if(u.fingerprint!==fingerprintValue || u.size!==file.size)throw Error('이전 업로드 파일과 현재 파일이 다릅니다.');
@@ -127,7 +160,7 @@
      const show=()=>{
        const percent=(total/file.size*100);
        bar.style.width=percent.toFixed(1)+'%';
-       info.textContent=percent.toFixed(1)+'% · '+prettyBytes(total)+' / '+prettyBytes(file.size)+' · 저장된 조각은 이어올리기 가능합니다.';
+       info.textContent='완료 '+completed.size+'/'+files.length+'개 · 동시 '+concurrency+'개 · '+prefix+percent.toFixed(1)+'% · '+prettyBytes(total)+' / '+prettyBytes(file.size)+' · 저장된 조각은 이어올리기 가능합니다.';
      };
      show();
      const remaining=Array.from({length:Math.ceil(file.size/chunk)},(_,i)=>i+1).filter(n=>!done.has(n));
@@ -142,14 +175,21 @@
            await new Promise(ok=>setTimeout(ok,(retry+1)*1200));
          }
        }
-     },bytes=>{total+=bytes;show();},controller.signal);
+     },bytes=>{total+=bytes;show();},controller.signal,concurrency);
      info.textContent='파일 조각을 검증하고 저장 중입니다. 잠시 기다려 주세요.';
      await api('/admin/railway/uploads/'+encodeURIComponent(upload.id)+'/finish','POST',{});
-     toast('영상 업로드 완료 · 기존 강의 연결 상태를 확인해 주세요.');
+     completed.add(file);
+     }catch(error){
+       if(controller.signal.aborted)throw error;
+       failures.push(file.name+': '+error.message);
+     }
+     }
+     if(failures.length)throw Error(completed.size+'/'+files.length+'개 완료. 실패한 영상은 다시 시작하면 재시도합니다. '+failures.join(' / '));
+     toast(files.length+'개 영상 업로드 완료 · 영상 관리에서 공개 상태를 선택해 주세요.');
      busy=false;uploadRunning=false;
      closeModal();S.tab='videos';await render();
    }finally{
-     busy=false;uploadRunning=false;controller=null;submit.disabled=false;
+     busy=false;uploadRunning=false;controller=null;submit.disabled=false;inputs.forEach(x=>x.disabled=false);
    }
  }
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import persistent_db
 
 UTC = dt.timezone.utc
 ANALYSIS_SECONDS = 30*60
@@ -107,8 +108,8 @@ class Library:
         for name in ('media','temp','backups'):
             (self.root/name).mkdir(exist_ok=True)
         self.path = self.root/'library.sqlite3'
-        with self.connect() as db:
-            db.executescript('''
+        with self.connect(initialize=True) as db:
+            schema='''
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS lectures(
@@ -131,7 +132,11 @@ class Library:
             CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,role TEXT NOT NULL,expires REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,expires REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,input_tokens INTEGER,output_tokens INTEGER);
-            ''')
+            '''
+            if persistent_db.database_url():
+                schema=schema.replace('CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(chunk_id UNINDEXED,terms);',
+                    "CREATE TABLE IF NOT EXISTS search_index(chunk_id BIGINT PRIMARY KEY,terms TEXT NOT NULL); CREATE INDEX IF NOT EXISTS search_terms ON search_index USING GIN(to_tsvector('simple',terms));")
+            db.executescript(schema)
             columns={r[1] for r in db.execute('PRAGMA table_info(lectures)')}
             for name in ('phase','phase_at','model_used'):
                 if name not in columns:db.execute(f"ALTER TABLE lectures ADD COLUMN {name} TEXT DEFAULT ''")
@@ -144,7 +149,11 @@ class Library:
             os.chmod(self.path, 0o600)
 
     @contextlib.contextmanager
-    def connect(self):
+    def connect(self, initialize=False):
+        if persistent_db.database_url():
+            with persistent_db.connect('lecture_ai', initialize=initialize) as db:
+                yield db
+            return
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
@@ -300,9 +309,15 @@ class Library:
         with self.connect() as db:
             if terms:
                 match=' OR '.join('"'+v+'"' for v in terms)
-                lexical=[r[0] for r in db.execute(f'''SELECT c.id FROM search_index f JOIN chunks c ON c.id=f.chunk_id
-                  JOIN lectures l ON l.id=c.lecture_id WHERE search_index MATCH ? AND {filters}
-                  ORDER BY bm25(search_index) LIMIT 100''',[match,*args])]
+                if persistent_db.database_url():
+                    match=' | '.join(terms)
+                    lexical=[r[0] for r in db.execute(f'''SELECT c.id FROM search_index f JOIN chunks c ON c.id=f.chunk_id
+                      JOIN lectures l ON l.id=c.lecture_id WHERE to_tsvector('simple',f.terms) @@ to_tsquery('simple',?) AND {filters}
+                      ORDER BY ts_rank(to_tsvector('simple',f.terms),to_tsquery('simple',?)) DESC,c.id LIMIT 100''',[match,*args,match])]
+                else:
+                    lexical=[r[0] for r in db.execute(f'''SELECT c.id FROM search_index f JOIN chunks c ON c.id=f.chunk_id
+                      JOIN lectures l ON l.id=c.lecture_id WHERE search_index MATCH ? AND {filters}
+                      ORDER BY bm25(search_index) LIMIT 100''',[match,*args])]
             if vector:
                 q=array.array('f');q.frombytes(normalize(vector))
                 cursor=db.execute(f'''SELECT c.id,c.embedding FROM chunks c JOIN lectures l ON l.id=c.lecture_id

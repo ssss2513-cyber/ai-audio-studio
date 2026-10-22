@@ -1,4 +1,5 @@
 """Railway private multipart uploads and authorized direct playback."""
+import logging
 import math
 import os
 import re
@@ -75,14 +76,24 @@ def install(core, drive_streamer):
 
     def storage_error(exc):
         # Never echo S3 credentials, signed URLs, or raw provider exception bodies.
-        core.fail(503, "Railway 저장소 연결에 실패했습니다. 관리자 설정을 확인해 주세요.")
+        code = getattr(exc, 'response', {}).get('Error', {}).get('Code', '')
+        safe_codes = {'AccessDenied','InvalidAccessKeyId','SignatureDoesNotMatch','NoSuchBucket','NoSuchUpload','InvalidPart'}
+        code = code if code in safe_codes else type(exc).__name__
+        logging.getLogger('maison.storage').error('VIDEO_STORAGE_ERROR code=%s', code)
+        messages = {
+            'AccessDenied': '영상 저장소의 읽기·쓰기 권한을 확인해 주세요.',
+            'InvalidAccessKeyId': '영상 저장소 접근 키가 올바르지 않습니다.',
+            'SignatureDoesNotMatch': '영상 저장소 비밀 키와 지역 설정을 확인해 주세요.',
+            'NoSuchBucket': '영상 저장소 버킷 이름과 지역 설정을 확인해 주세요.',
+        }
+        core.fail(503, messages.get(code, '영상 저장소 연결에 실패했습니다. 관리자 설정을 확인해 주세요.'))
 
     def verify_owner(req, ident, write=False):
         owner = core.require(req, admin=True, write=write)
         with core.db() as db:
             row=db.execute("SELECT * FROM railway_uploads WHERE id=? AND owner=?", (ident, owner["id"])).fetchone()
         if not row:
-            core.fail(404,"Railway 업로드 작업을 찾을 수 없습니다.")
+            core.fail(404,"영상 업로드 작업을 찾을 수 없습니다.")
         return owner,row
 
     def list_parts(s3,bucket,row):
@@ -96,7 +107,7 @@ def install(core, drive_streamer):
             if not data.get("IsTruncated"):
                 break
             if not batch:
-                core.fail(503,"Railway 업로드 조각 목록을 확인할 수 없습니다.")
+                core.fail(503,"영상 업로드 조각 목록을 확인할 수 없습니다.")
             marker=batch[-1]["PartNumber"]
         return result
 
@@ -297,7 +308,7 @@ def install(core, drive_streamer):
         # Request is authenticated and authorized by core.watch() before this call.
         key=v["external_id"]
         if not _KEY_PATTERN.fullmatch(key or ""):
-            core.fail(404,"Railway 영상 정보가 올바르지 않습니다.")
+            core.fail(404,"저장소 영상 정보가 올바르지 않습니다.")
         try:
             s3,bucket=client()
             method="HEAD" if req.method=="HEAD" else "GET"
@@ -315,7 +326,7 @@ def install(core, drive_streamer):
     def delete_railway(v):
         key=v["external_id"]
         if not _KEY_PATTERN.fullmatch(key or ""):
-            core.fail(404,"Railway 영상 정보가 올바르지 않습니다.")
+            core.fail(404,"저장소 영상 정보가 올바르지 않습니다.")
         try:
             s3,bucket=client()
             s3.delete_object(Bucket=bucket,Key=key)

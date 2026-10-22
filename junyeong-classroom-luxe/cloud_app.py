@@ -358,11 +358,11 @@ def _public_brand_media(req: Request, file_id: str, mime: str, maxage: int):
 
 @app.api_route('/api/public/brand-intro.mp4',methods=['GET','HEAD'])
 def brand_intro(req: Request):
- return _public_brand_media(req,'1du6wZx1Ga94vLo0zPGF-ekRwObRWCDwF','video/mp4',3600)
+ return FileResponse(core.ROOT/'public_media'/'brand-intro.mp4',media_type='video/mp4',headers={'Cache-Control':'public, max-age=3600'})
 
 @app.api_route('/api/public/brand-poster.jpg',methods=['GET','HEAD'])
 def brand_intro_poster(req: Request):
- return _public_brand_media(req,'13ayyUIBfCoWuTH9ghVCwHDNvrxhWJ4AP','image/jpeg',86400)
+ return FileResponse(core.ROOT/'public_media'/'brand-poster.jpg',media_type='image/jpeg',headers={'Cache-Control':'public, max-age=86400'})
 
 
 

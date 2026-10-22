@@ -8,3 +8,5 @@ __pycache__
 *.webm
 *.key
 *.sqlite*
+
+!public_media/brand-intro.mp4

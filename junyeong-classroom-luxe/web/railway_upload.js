@@ -2,6 +2,21 @@
 /* Optional Railway admin feature. No video keys, passwords, or member
    information are ever sent to GitHub or embedded in this file. */
 (() => {
+ // Bound memory/network usage and wait for every active request before reset.
+ async function runPartQueue(numbers,transfer,onComplete,signal){
+   let next=0,firstError=null;
+   async function worker(){
+     while(!firstError&&!signal.aborted&&next<numbers.length){
+       const number=numbers[next++];
+       try{const bytes=await transfer(number);onComplete(bytes);}
+       catch(error){if(!firstError)firstError=error;}
+     }
+   }
+   await Promise.allSettled(Array.from({length:Math.min(3,numbers.length)},worker));
+   if(firstError)throw firstError;
+   if(signal.aborted)throw Error('업로드를 일시정지했습니다. 같은 파일을 다시 선택하면 이어올릴 수 있습니다.');
+ }
+
  const MAX_BYTES=5*1024**3;
  const $el=(s,r=document)=>r.querySelector(s);
  let busy=false,scanning=false,controller=null;
@@ -60,7 +75,7 @@
    const previous=(S.videos||[]).find(v=>v.id===replace);
    const label=replace?'기존 강의 영상 교체':'새 강의 업로드';
    openModal('<div class="eyebrow">영상 업로드</div><h2>'+label+'</h2>'
-    +'<p>영상은 사이트 서버를 거치지 않고 전용 영상 저장소로 직접 업로드됩니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
+    +'<p>영상은 사이트 서버를 거치지 않고 전용 영상 저장소로 직접 업로드됩니다. 파일 조각 3개를 동시에 전송합니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
     +(replace?'<div class="notice"><b>기존 영상 연결만 변경합니다.</b><p>회원의 기존 강의 순서·승인 상태·시청 기록은 유지합니다. Google Drive 원본은 삭제하지 않습니다.</p></div>':'')
     +'<form id="railway-upload-form"><label class="field"><span>영상 파일 · MP4 또는 WebM</span>'
     +'<input type="file" name="file" accept="video/mp4,video/webm" required></label>'
@@ -115,21 +130,19 @@
        info.textContent=percent.toFixed(1)+'% · '+prettyBytes(total)+' / '+prettyBytes(file.size)+' · 저장된 조각은 이어올리기 가능합니다.';
      };
      show();
-     for(let number=1;number<=Math.ceil(file.size/chunk);number++){
-       if(controller.signal.aborted)throw Error('업로드를 일시정지했습니다. 같은 파일을 다시 선택하면 이어올릴 수 있습니다.');
-       if(done.has(number))continue;
+     const remaining=Array.from({length:Math.ceil(file.size/chunk)},(_,i)=>i+1).filter(n=>!done.has(n));
+     await runPartQueue(remaining,async number=>{
        const part=file.slice((number-1)*chunk,Math.min(number*chunk,file.size));
-       let sent=false;
        for(let retry=0;retry<3;retry++){
-         try{await sendPart(upload,number,part);sent=true;break;}
+         if(controller.signal.aborted)throw Error('업로드를 일시정지했습니다. 같은 파일을 다시 선택하면 이어올릴 수 있습니다.');
+         try{await sendPart(upload,number,part);return part.size;}
          catch(error){
            if(controller.signal.aborted)throw Error('업로드를 일시정지했습니다. 같은 파일을 다시 선택하면 이어올릴 수 있습니다.');
            if(retry===2)throw error;
            await new Promise(ok=>setTimeout(ok,(retry+1)*1200));
          }
        }
-       if(sent){total+=part.size;show();}
-     }
+     },bytes=>{total+=bytes;show();},controller.signal);
      info.textContent='파일 조각을 검증하고 저장 중입니다. 잠시 기다려 주세요.';
      await api('/admin/railway/uploads/'+encodeURIComponent(upload.id)+'/finish','POST',{});
      toast('영상 업로드 완료 · 기존 강의 연결 상태를 확인해 주세요.');
@@ -148,13 +161,19 @@
    requestAnimationFrame(()=>{scheduled=false;decorate().catch(()=>{});});
  }
  if(main)new MutationObserver(queue).observe(main,{childList:true,subtree:false});
- document.addEventListener('click',event=>{
-   const b=event.target.closest('[data-railway-open],[data-railway-replace]');
+ document.addEventListener('click',async event=>{
+   const b=event.target.closest('[data-railway-open],[data-railway-replace],[data-action="upload"]');
    if(!b)return;
    event.preventDefault();
    event.stopImmediatePropagation();
-   if(b.dataset.railwayReplace)uploadModal(b.dataset.railwayReplace);
-   else uploadModal();
+   if(!S.member||S.member.role!=='admin')return;
+   if(busy){toast('진행 중인 업로드를 완료하거나 일시정지해 주세요.');return;}
+   try{
+     const storage=await api(statusUrl);
+     if(!storage.connected)throw Error('영상 저장소 연결 설정이 필요합니다.');
+     if(b.dataset.railwayReplace)uploadModal(b.dataset.railwayReplace);
+     else uploadModal();
+   }catch(error){toast(error.message);}
  },true);
  document.addEventListener('submit',event=>{
    if(event.target.id!=='railway-upload-form')return;

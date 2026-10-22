@@ -18,17 +18,17 @@
    const wrapper=document.createElement('div');
    wrapper.id='railway-tools-bar';
    wrapper.className='panel';
-   wrapper.innerHTML='<div class="section-top"><div><div class="eyebrow">PRIVATE VIDEO STORAGE</div><h2>끊김 없는 영상 저장소 · Railway</h2></div><span class="pill">회원 전용</span></div>'
+   wrapper.innerHTML='<div class="section-top"><div><div class="eyebrow">PRIVATE VIDEO STORAGE</div><h2>영상 저장소</h2></div><span class="pill">회원 전용</span></div>'
     +'<p id="railway-status-detail" class="form-note">영상 저장소 연결을 확인하고 있어요.</p>'
-    +'<div class="button-row"><button class="primary small" type="button" data-railway-open disabled>Railway로 영상 업로드</button>'
-    +'<a class="outline small" href="https://docs.railway.com/storage-buckets" target="_blank" rel="noopener noreferrer">연결 설명 보기 ↗</a></div>';
+    +'<div class="button-row"><button class="primary small" type="button" data-railway-open disabled>영상 업로드</button>'
+    +'</div>';
    top.insertAdjacentElement('afterend',wrapper);
    try{
      const info=await api(statusUrl);
      if(!wrapper.isConnected)return;
      const text=$el('#railway-status-detail',wrapper),button=$el('[data-railway-open]',wrapper);
      if(info.connected){
-       text.textContent='Railway 연결됨 · 사이트에 등록된 영상 '+prettyBytes(info.registeredVideoBytes||0)
+       text.textContent='영상 저장소 연결됨 · 사이트에 등록된 영상 '+prettyBytes(info.registeredVideoBytes||0)
          +' · 영상은 전용 저장소에서 직접 재생됩니다.';
        if(info.migration?.total){
          text.textContent+=' · 이전 '+info.migration.complete+'/'+info.migration.total+'개 완료';
@@ -59,15 +59,15 @@
    if(busy){toast('진행 중인 업로드를 완료하거나 일시정지해 주세요.');return;}
    const previous=(S.videos||[]).find(v=>v.id===replace);
    const label=replace?'기존 강의 영상 교체':'새 강의 업로드';
-   openModal('<div class="eyebrow">RAILWAY · LARGE VIDEO</div><h2>'+label+'</h2>'
-    +'<p>2GB 영상은 사이트 서버를 거치지 않고 Railway로 직접 올라갑니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
+   openModal('<div class="eyebrow">영상 업로드</div><h2>'+label+'</h2>'
+    +'<p>영상은 사이트 서버를 거치지 않고 전용 영상 저장소로 직접 업로드됩니다. 업로드 중에는 이 창을 유지해 주세요.</p>'
     +(replace?'<div class="notice"><b>기존 영상 연결만 변경합니다.</b><p>회원의 기존 강의 순서·승인 상태·시청 기록은 유지합니다. Google Drive 원본은 삭제하지 않습니다.</p></div>':'')
     +'<form id="railway-upload-form"><label class="field"><span>영상 파일 · MP4 또는 WebM</span>'
     +'<input type="file" name="file" accept="video/mp4,video/webm" required></label>'
     +'<label class="field"><span>영상 제목</span><input type="text" name="title" required maxlength="120" value="'+esc(previous?.title||'')+'"></label>'
     +'<label class="check"><input type="checkbox" name="rights" required><span>이 영상을 회원에게 제공할 권한이 있습니다.</span></label>'
     +'<div class="form-error" role="alert" hidden></div>'
-    +'<button type="submit" class="primary full">Railway 업로드 시작</button></form>'
+    +'<button type="submit" class="primary full">영상 업로드 시작</button></form>'
     +'<div id="railway-progress" hidden><div class="upload-track"><span></span></div>'
     +'<p id="railway-progress-text" role="status">준비 중입니다.</p>'
     +'<button id="railway-stop" type="button" class="outline small">전송 일시정지</button></div>'
@@ -80,7 +80,7 @@
    const signed=await api('/admin/railway/uploads/'+encodeURIComponent(u.id)+'/parts/'+number,'POST',{});
    const response=await fetch(signed.url,{method:'PUT',body:blob,signal:controller.signal,
      credentials:'omit',referrerPolicy:'no-referrer'});
-   if(!response.ok)throw Error('Railway 전송에 실패했습니다. HTTP '+response.status+' · 버킷 CORS 설정과 연결 상태를 확인해 주세요.');
+   if(!response.ok)throw Error('영상 전송에 실패했습니다. HTTP '+response.status+' · 버킷 CORS 설정과 연결 상태를 확인해 주세요.');
  }
 
  async function uploadRailway(form) {
@@ -100,7 +100,7 @@
      info.textContent='원본 파일을 확인하고 있습니다.';
      const fingerprintValue=await fingerprint(file);
      const upload=await api('/admin/railway/uploads','POST',{
-       title:form.elements.title.value.trim(), description:'Railway 회원 전용 강의',
+       title:form.elements.title.value.trim(), description:'회원 전용 강의',
        filename:file.name,mime,size:file.size,fingerprint:fingerprintValue,
        duration:await fileDuration(file),rights:true,replaceVideoId:form.dataset.replace||''
      });
@@ -132,7 +132,7 @@
      }
      info.textContent='파일 조각을 검증하고 저장 중입니다. 잠시 기다려 주세요.';
      await api('/admin/railway/uploads/'+encodeURIComponent(upload.id)+'/finish','POST',{});
-     toast('Railway 업로드 완료 · 기존 강의 연결 상태를 확인해 주세요.');
+     toast('영상 업로드 완료 · 기존 강의 연결 상태를 확인해 주세요.');
      busy=false;uploadRunning=false;
      closeModal();S.tab='videos';await render();
    }finally{

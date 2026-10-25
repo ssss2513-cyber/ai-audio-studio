@@ -109,7 +109,7 @@ async function classes(){
 }
 function gptCollection(){
  // External ChatGPT GPT links provided by the site operator; each opens directly in a new tab.
- // Keep all six tools in one collection; channel setup comes first, then the original five production tools.
+ // Keep the creation tools in workflow order, from channel setup through music distribution.
  const groups=[
   {stage:"01",name:"채널 시작 · 기본 준비",desc:"처음 유튜브 채널을 준비하는 분을 위한 시작 단계입니다.",items:[
    {step:"01",name:"유튜브 채널 시작 도우미",desc:"유튜브 채널을 처음 시작할 때 필요한 준비와 설정을 안내합니다.",url:"https://chatgpt.com/g/g-68c03846b12081919402f59ecedf4ad6-yutyubeu-caeneol-sijag-doumi"}
@@ -124,13 +124,16 @@ function gptCollection(){
   {stage:"04",name:"영상 · 이미지 제작",desc:"인트로 동영상과 본편 장면 이미지를 제작합니다.",items:[
    {step:"05",name:"Flow Omni 인트로 프롬프트",desc:"인트로 영상에 사용할 장면·동작 프롬프트를 만듭니다.",url:"https://chatgpt.com/g/g-6a4b4dcbb180819190bbb4a4fa9f109b-flow-omni-inteuro-dongyeongsang-peurompeuteo"},
    {step:"06",name:"야담 이미지 플로우",desc:"본편 장면의 이미지·Flow 프롬프트를 제작합니다.",url:"https://chatgpt.com/g/g-69f6e703b758819180229c897401aae8-yadam-flow-peurompeuteu-maseuteo"}
+  ]},
+  {stage:"05",name:"음악 제작 · 유통",desc:"음악 만들기와 음원 유통을 준비합니다.",items:[
+   {step:"07",name:"음악 만들어서 유통시키기 by 어비",desc:"음악 제작과 음원 유통을 도와주는 GPT입니다.",url:"https://chatgpt.com/g/g-6870ac1232cc819185dd50e4b8639554-eumag-mandeuleoseo-yutongsikigi-by-eobi"}
   ]}
  ];
  return '<section class="gpt-suite" aria-labelledby="gpt-suite-title">'+
   '<div class="gpt-suite-top"><div><span class="gpt-suite-kicker">YOUR YADAM CREATION WORKFLOW</span>'+
   '<h2 id="gpt-suite-title">야담 제작 GPT 통합 모음</h2>'+
-  '<p>유튜브 채널 시작부터 야담 영상 제작까지 GPT 6개를 순서대로 이용하세요.</p></div>'+
-  '<span class="gpt-suite-total">6개의 GPT · 4단계</span></div>'+
+  '<p>유튜브 채널 시작부터 야담 영상·음악 제작과 유통까지 GPT 7개를 순서대로 이용하세요.</p></div>'+
+  '<span class="gpt-suite-total">7개의 GPT · 5단계</span></div>'+
   '<div class="gpt-suite-groups">'+groups.map(function(group){
    return '<div class="gpt-suite-group"><div class="gpt-suite-group-head">'+
     '<span class="gpt-suite-group-num">STAGE '+esc(group.stage)+'</span><h3>'+esc(group.name)+'</h3>'+

@@ -42,7 +42,8 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip junyeong-classroom-luxe/shared_tools.py
+          git add -f -- junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip
+          git add -- junyeong-classroom-luxe/shared_tools.py
           git diff --cached --stat
           git diff --cached --quiet || git commit -m 'Publish Yadam 2.7.7 pastel hanbok style, preserving 2.7.6 asset workflow'
           git push origin HEAD:maison-lumiel

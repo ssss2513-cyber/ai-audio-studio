@@ -279,31 +279,39 @@ async function play(id){
  playerId=id;document.body.classList.add('playing');const el=$('#player');el.src='/api/videos/'+encodeURIComponent(id)+'/stream';
  el.addEventListener('loadedmetadata',()=>{if(v.seconds&&v.seconds<el.duration-3)el.currentTime=v.seconds;},{once:true});
  let busy=false,networkMisses=0,recoveryAttempts=0,lastPosition=Math.max(0,Number(v.seconds)||0);
+ // Browsers may reuse the redirected Spaces URL for later byte ranges.
+ // Renew before its 300-second signature expires, including after a long pause.
+ let streamLoadedAt=Date.now(),renewing=false;
+ const STREAM_RENEW_AFTER_MS=240000;
  const streamPath='/api/videos/'+encodeURIComponent(id)+'/stream';
  const showStatus=(message='',retry=false)=>{
   const box=$('#player-network-status');if(!box)return;
   box.textContent=message;
   if(retry){const b=document.createElement('button');b.type='button';b.className='outline small';b.dataset.action='retry-video';b.textContent='이어서 다시 연결';b.style.marginLeft='12px';box.appendChild(b);}
  };
- const reconnect=(manual=false)=>{
+ const reconnect=(manual=false,renewal=false)=>{
   if(playerId!==id||!el.isConnected||videoRecoveryTimer)return;
   if(recoveryAttempts>=4&&!manual){showStatus('영상 연결이 계속 지연되고 있습니다. 다시 연결을 눌러 주세요.',true);return;}
   if(manual)recoveryAttempts=0;
   recoveryAttempts++;
-  const pos=lastPosition,rate=el.playbackRate,shouldPlay=!el.paused||!!el.error;
-  showStatus('일시적으로 연결이 끊겼습니다. 보던 위치에서 다시 연결하고 있습니다.');
+  const pos=Number.isFinite(el.currentTime)?el.currentTime:lastPosition,rate=el.playbackRate,shouldPlay=!el.paused||!!el.error;
+  renewing=true;
+  showStatus(renewal?'보던 위치를 유지하며 영상 연결을 갱신하고 있습니다.':'일시적으로 연결이 끊겼습니다. 보던 위치에서 다시 연결하고 있습니다.');
   const reload=()=>{
    videoRecoveryTimer=null;
    if(playerId!==id||!el.isConnected)return;
    el.onloadedmetadata=()=>{
     el.onloadedmetadata=null;
+    renewing=false;
     try{
      if(Number.isFinite(pos)&&pos>0)el.currentTime=Math.min(pos,Number.isFinite(el.duration)?Math.max(0,el.duration-1):pos);
      el.playbackRate=rate;
     }catch(_){}
     if(shouldPlay)el.play().catch(()=>showStatus('영상의 ▶ 재생 버튼을 눌러 이어서 시청해 주세요.',true));
+    else showStatus();
    };
-   el.src=streamPath+'?reconnect='+Date.now()+'-'+recoveryAttempts;
+   streamLoadedAt=Date.now();
+   el.src=streamPath+'?reconnect='+streamLoadedAt+'-'+recoveryAttempts;
    el.load();
   };
   if(manual)reload();else videoRecoveryTimer=setTimeout(reload,Math.min(1200*2**(recoveryAttempts-1),7000));
@@ -328,6 +336,7 @@ async function play(id){
  });
  const scheduleStall=()=>{
   if(playerId!==id||el.paused||videoStallTimer)return;
+  if(!renewing&&Date.now()-streamLoadedAt>=STREAM_RENEW_AFTER_MS){reconnect(true,true);return;}
   const at=el.currentTime;
   videoStallTimer=setTimeout(()=>{
    videoStallTimer=null;
@@ -336,6 +345,9 @@ async function play(id){
  };
  el.addEventListener('waiting',scheduleStall);
  el.addEventListener('stalled',scheduleStall);
+ el.addEventListener('play',()=>{
+  if(!renewing&&Date.now()-streamLoadedAt>=STREAM_RENEW_AFTER_MS)reconnect(true,true);
+ });
  const driveQuota=(e)=>e?.status===503&&String(e.message||'').includes('Google Drive 영상 다운로드 한도');
  const showDriveQuota=(message)=>{
   if(playerId!==id)return;
@@ -350,7 +362,10 @@ async function play(id){
   busy=true;
   try{
    await api('/videos/'+id+'/access','GET',undefined,{signal:AbortSignal.timeout(9000)});
-   if(playerId===id)networkMisses=0;
+   if(playerId===id){
+    networkMisses=0;
+    if(!el.paused&&!el.ended&&!renewing&&!videoRecoveryTimer&&Date.now()-streamLoadedAt>=STREAM_RENEW_AFTER_MS)reconnect(true,true);
+   }
   }catch(e){
    if(playerId!==id)return;
    if(driveQuota(e)){

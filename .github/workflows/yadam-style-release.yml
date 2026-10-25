@@ -1,0 +1,41 @@
+name: Yadam style release
+on:
+  push:
+    branches: [maison-lumiel]
+    paths: ['.github/workflows/yadam-style-release.yml', 'ops/releases/yadam-style-277/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inspect current package and preserve original
+        run: |
+          mkdir -p release-inspection
+          python - <<'PY'
+          import pathlib,zipfile,hashlib,json,shutil
+          p=pathlib.Path('junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.6.zip')
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='648ee832595e8f4b669a1400e31e4e22c1abd6e8d42fb27756c6a8198aa2187b'
+          with zipfile.ZipFile(p) as z:
+            assert z.testzip() is None
+            print('FILES',json.dumps(z.namelist(),ensure_ascii=False))
+            for n in ('PACKAGE_MANIFEST.json','share_manifest.json','README_처음읽기.txt'):
+              print('FILE',n);print(z.read(n).decode('utf-8-sig'))
+          shutil.copy2(p,'release-inspection/base-2.7.6.zip')
+          PY
+      - name: Read current live tool catalogue without authentication
+        continue-on-error: true
+        run: |
+          curl --fail --silent --show-error --max-time 30 https://143-198-87-243.sslip.io/api/health | tee release-inspection/live-health.json
+          curl --fail --silent --show-error --max-time 30 https://143-198-87-243.sslip.io/api/tools | tee release-inspection/live-tools.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yadam-current-package-inspection
+          path: release-inspection/
+          retention-days: 3

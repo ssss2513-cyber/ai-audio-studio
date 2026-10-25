@@ -5,37 +5,75 @@ on:
     paths: ['.github/workflows/yadam-style-release.yml', 'ops/releases/yadam-style-277/**']
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: yadam-style-release-277
+  cancel-in-progress: false
 jobs:
-  inspect:
+  release:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: maison-lumiel
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Inspect current package and preserve original
+      - name: Reconstruct and verify reference preview
         run: |
-          mkdir -p release-inspection
           python - <<'PY'
-          import pathlib,zipfile,hashlib,json,shutil
-          p=pathlib.Path('junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.6.zip')
-          assert hashlib.sha256(p.read_bytes()).hexdigest()=='648ee832595e8f4b669a1400e31e4e22c1abd6e8d42fb27756c6a8198aa2187b'
-          with zipfile.ZipFile(p) as z:
-            assert z.testzip() is None
-            print('FILES',json.dumps(z.namelist(),ensure_ascii=False))
-            for n in ('PACKAGE_MANIFEST.json','share_manifest.json','README_처음읽기.txt'):
-              print('FILE',n);print(z.read(n).decode('utf-8-sig'))
-          shutil.copy2(p,'release-inspection/base-2.7.6.zip')
+          from pathlib import Path
+          import hashlib
+          d=Path('ops/releases/yadam-style-277')
+          b=b''.join((d/('reference.part'+str(i))).read_bytes() for i in range(4))
+          assert hashlib.sha256(b).hexdigest()=='2b9d8fdcc70102c6c6c3b68d4937586161239cb97016e45c19dcc7d3759ceb59'
+          (d/'reference.jpg').write_bytes(b)
           PY
-      - name: Read current live tool catalogue without authentication
-        continue-on-error: true
+      - name: Build, test and update only image-tool catalogue entry
         run: |
-          curl --fail --silent --show-error --max-time 30 https://143-198-87-243.sslip.io/api/health | tee release-inspection/live-health.json
-          curl --fail --silent --show-error --max-time 30 https://143-198-87-243.sslip.io/api/tools | tee release-inspection/live-tools.json
+          python ops/releases/yadam-style-277/build_release.py --base junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.6.zip --reference ops/releases/yadam-style-277/reference.jpg --output junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip --catalog junyeong-classroom-luxe/shared_tools.py
+          python -m py_compile junyeong-classroom-luxe/shared_tools.py
+          mkdir -p release-result
+          cp junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip release-result/
+          cp junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.json release-result/build-report.json
+      - name: Commit verified release without force pushing
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip junyeong-classroom-luxe/shared_tools.py
+          git diff --cached --stat
+          git diff --cached --quiet || git commit -m 'Publish Yadam 2.7.7 pastel hanbok style, preserving 2.7.6 asset workflow'
+          git push origin HEAD:maison-lumiel
+          git rev-parse HEAD > release-result/release-commit.txt
+      - name: Verify actual production catalogue and health
+        run: |
+          python - <<'PY'
+          import json,time,urllib.request
+          from pathlib import Path
+          expected=json.loads(Path('release-result/build-report.json').read_text())
+          origin='https://143-198-87-243.sslip.io'
+          def get(path):
+              req=urllib.request.Request(origin+path,headers={'Cache-Control':'no-cache'})
+              with urllib.request.urlopen(req,timeout=15) as r:return json.load(r)
+          for attempt in range(36):
+              try:
+                  health=get('/api/health')
+                  catalogue=get('/api/tools')
+                  item=next(x for x in catalogue['items'] if x['id']=='yadam-image-prompts')
+                  print('Live check',attempt+1,'version',item.get('version'),flush=True)
+                  if health.get('ok') and item.get('version')=='2.7.7' and item.get('sha256')==expected['package_sha256'] and item.get('size')==expected['package_size']:
+                      Path('release-result/live-verification.json').write_text(json.dumps({'status':'VERIFIED','origin':origin,'health':health,'image_tool':item,'checked_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())},ensure_ascii=False,indent=2))
+                      print('LIVE_VERIFIED_2.7.7',flush=True)
+                      break
+              except Exception as e:print('Live check pending:',type(e).__name__,flush=True)
+              time.sleep(10)
+          else:raise SystemExit('Release committed; live verification did not complete. Do not claim deployment success.')
+          PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: yadam-current-package-inspection
-          path: release-inspection/
-          retention-days: 3
+          name: yadam-2.7.7-release-and-live-verification
+          path: release-result/
+          retention-days: 7

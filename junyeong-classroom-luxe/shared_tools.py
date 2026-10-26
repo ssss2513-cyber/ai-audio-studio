@@ -1,12 +1,14 @@
 """Versioned yadam downloads; package bytes use the existing member access checks."""
 from pathlib import Path
 import base64
+import hashlib
 import os
 import tempfile
 
 from fastapi import Request
 from fastapi.responses import FileResponse
 from shared_tool_release import RELEASES, ensure_release
+from shared_tool_type4 import build_type4_package
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
@@ -37,17 +39,17 @@ PACKAGES = (
     },
     {
         'id': 'yadam-generator',
-        'asset': 'yadam-generator-v13.11.zip',
-        'filename': '야담_대본생성기_V13.11_로맨스성인해학_전체파일.zip',
+        'asset': 'yadam-generator-v13.11.1-type4.zip',
+        'filename': '야담_대본생성기_V13.11.1_밤마실야담_4유형_전체파일.zip',
         'title': '야담 대본 생성기',
         'step': '01 · 대본 만들기',
-        'version': 'V13.11 · 로맨스 성인해학',
-        'updated': '2026-10-22',
-        'description': '5막 20챕터·35,000자 이상과 별도 60초 인트로를 지원하는 야담 대본 생성기입니다. V13.11은 성인 로맨스의 비노골적인 속뜻 있는 문답·상호 응답·관계 변화를 기획과 집필·원문 검토에 통합합니다. 기존형·몰입 강화형·매운맛 반전형 선택, 내장 모티프 뱅크, 레퍼런스 흐름을 살린 각색과 미취학 아동 제외 기준을 유지합니다.',
-        'features': ['V13.11 · 성인 로맨스 문답·관계 변화·원문 검토', '기존형 · 몰입 강화형 · 매운맛 반전형', '레퍼런스가 없으면 내장 모티프 뱅크 활용', '미취학 아동 제외 · 5막 20챕터 · 35,000자 이상 · 별도 60초 인트로'],
-        'fileCount': 8,
-        'sha256': '92a034d0089d2cd3999b99726ae257004748282a96f8c2ae971ed1431c79e9a5',
+        'version': 'V13.11.1 · 4번 밤마실야담 작법',
+        'updated': '2026-10-26',
+        'description': 'V13.11의 성인 로맨스·해학과 기존 세 유형을 그대로 유지하면서 4번 밤마실야담 작법을 추가했습니다. 비상식적인 행동 후킹, 첫 비밀의 중간 해명, 연쇄 궁금증과 생활 묘사, 과거 인연 및 초반 복선의 감정적 회수를 5막 20챕터에 적용합니다. 60초 인트로 분리·35,000자 이상·미취학 아동 제외 기준을 유지합니다.',
+        'features': ['① 기존형 · ② 몰입 강화형 · ③ 매운맛 반전형 · ④ 밤마실야담 작법', 'V13.11 성인 로맨스·해학 규칙 및 기존 모티프·검증 유지', '상식 반전 후킹 · 연쇄 궁금증 · 생활 묘사 · 복선 회수', '5막 20챕터 · 35,000자 이상 · 별도 60초 인트로'],
+        'fileCount': 10,
     },
+    
     {'id': 'yadam-image-prompts',
      'asset': 'yadam-image-prompts-v2.7.7.zip',
      'filename': '야담_이미지제작_2.7.7.zip',
@@ -80,6 +82,10 @@ PACKAGES = (
 
 
 def package_path(package, data_root=None):
+    if package['id'] == 'yadam-generator':
+        if data_root is None:
+            data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
+        return build_type4_package(PACKAGE_ROOT, Path(data_root))
     if package['asset'] in RELEASES:
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
@@ -98,7 +104,7 @@ def install_shared_tools(core):
     # Prepare the approved ZIP before this deployment can become healthy.
     # Subsequent requests use the private volume, without another Drive transfer.
     for package in PACKAGES:
-        if package['asset'] in RELEASES:
+        if package['asset'] in RELEASES or package['id'] == 'yadam-generator':
             package_path(package, core.DATA)
 
     @core.app.get('/api/tools')
@@ -110,6 +116,8 @@ def install_shared_tools(core):
                 core.fail(503, '공유 파일을 준비하고 있습니다. 잠시 후 다시 확인해 주세요.')
             item = {key: value for key, value in package.items() if key != 'asset'}
             item['size'] = path.stat().st_size
+            if package['id'] == 'yadam-generator':
+                item['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
             item['downloadUrl'] = '/api/tools/' + package['id'] + '/download'
             items.append(item)
         return {'items': items}

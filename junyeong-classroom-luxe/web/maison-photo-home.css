@@ -1,0 +1,105 @@
+/* MAISON LUMIEL: directly use the existing generated screenshot as the home UI.
+   Desktop image stays unaltered; semantic clickable hotspots are positioned on top.
+   Existing authentication, tools, lecture/video, admin and data routes are untouched. */
+body.maison-image-home{background:#fff1f6!important;color:#8f4e70!important}
+body.maison-image-home #main{
+  margin:0!important;padding:0!important;max-width:none!important;width:100%!important;
+  min-height:100vh!important;background:#fff2f6!important;overflow:visible;
+}
+body.maison-image-home>.princess-sidebar,
+body.maison-image-home>.princess-menu-backdrop,
+body.maison-image-home>.site-header,
+body.maison-image-home>.mobile-nav,
+body.maison-image-home>.site-footer{display:none!important}
+body.maison-image-home #la-launcher{background:linear-gradient(120deg,#ffe7ef,#f5b8cf)!important;color:#9b4470!important}
+.maison-image-home-main{width:100%;margin:0 auto;max-width:2000px;overflow:hidden}
+.maison-photo-desktop{position:relative;width:100%;aspect-ratio:1672 / 941;background:#fff0f5;isolation:isolate;line-height:1}
+.maison-photo-background{display:block;position:absolute;inset:0;width:100%;height:100%;object-fit:fill}
+.maison-photo-interactions{position:absolute;inset:0;z-index:2}
+.maison-photo-hit{position:absolute;display:block;border-radius:12px;overflow:hidden;outline-offset:-3px;
+  transition:background .14s ease;cursor:pointer}
+.maison-photo-hit:hover{background:rgba(255,255,255,.13)}
+.maison-photo-hit:focus-visible{outline:3px solid #ca367d!important;background:rgba(255,255,255,.32)!important}
+.maison-photo-search{
+ position:absolute;left:28.9%;top:46.1%;width:51.8%;height:8.7%;
+ display:flex;align-items:center;justify-content:space-between;
+ background:#fff9fbf0;border:1px solid #f4cad9;
+ border-radius:50px;box-shadow:inset 0 1px 5px #d791b217;
+ padding:0 1.5% 0 2.2%;gap:10px}
+.maison-photo-search input{
+ border:0!important;outline:0!important;background:transparent!important;box-shadow:none!important;
+ color:#90506c!important;font-size:clamp(12px,1.15vw,19px)!important;
+ padding:0!important;flex:1;min-width:0;height:100%;width:100%;font-family:'Noto Serif KR',serif!important}
+.maison-photo-search input::placeholder{color:#ad8498!important}
+.maison-photo-search button{
+ display:grid;place-items:center;border:0;background:#ed82a7;color:#fff;
+ border-radius:50%;width:clamp(24px,2.8vw,47px);height:clamp(24px,2.8vw,47px);
+ font-size:clamp(12px,1.5vw,22px);box-shadow:0 3px 10px #d76d987c;cursor:pointer}
+.maison-photo-search button:hover{background:#dc5a91}
+.maison-photo-search button:focus-visible{outline:3px solid #c33373!important;outline-offset:3px}
+.maison-photo-mobile{display:none}
+.maison-image-original-content{background:#fff6fa}
+.maison-image-original-content .lumiel-film{background:#fff6fa!important}
+.maison-image-original-content .yadam-shell{background:#fff6fa}
+.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;
+ overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+@media(min-width:1050px){
+ body.maison-image-home #la-launcher{bottom:15px!important;right:15px!important;
+ min-height:40px!important;padding:8px 13px!important;font-size:12px!important;opacity:.83}
+ body.maison-image-home #la-launcher:hover{opacity:1}
+}
+@media(max-width:880px){
+ body.maison-image-home>.site-header{display:flex!important;position:sticky!important;top:0;z-index:45;background:#fff8fb!important;border-bottom:1px solid #e9b5ca!important}
+ body.maison-image-home>.mobile-nav{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;background:#fff6fa!important;border-top:1px solid #ddafc8!important}
+ body.maison-image-home>.princess-sidebar{display:flex!important}
+ body.maison-image-home>.site-footer{display:block!important}
+ body.maison-image-home>.princess-menu-backdrop{display:block}
+ body.maison-image-home .maison-photo-desktop{display:none}
+ body.maison-image-home .maison-photo-mobile{display:block}
+ body.maison-image-home .maison-image-original-content{margin-top:16px;padding-bottom:50px}
+ .maison-photo-mobile{background:#fff5fa;color:#8b4164}
+ .maison-photo-mobile-hero{position:relative;margin:13px 10px 24px;min-height:535px;overflow:hidden;
+  border:2px solid #d1a06e;border-radius:21px;box-shadow:0 10px 28px #c276a346,inset 0 0 0 4px #fff7f8;
+  background-color:#fce1eb;
+  background-image:linear-gradient(180deg,rgba(255,251,253,.95) 0%,rgba(255,249,251,.90) 25%,rgba(255,241,249,.62) 56%,rgba(255,240,247,0) 100%),
+                   url('/assets/maison-reference.avif?v=20261028-photo-1');
+  background-size:cover,auto 120%;background-position:center,73% center}
+ .maison-photo-mobile-hero:before{content:'❀  ♡  ❀';position:absolute;top:10px;left:8px;right:8px;text-align:center;
+  color:#cfa072;font-size:18px;letter-spacing:.24em;pointer-events:none}
+ .maison-photo-mobile-hero:after{content:'';position:absolute;inset:8px;border:1px solid #e7c09d99;border-radius:15px;pointer-events:none}
+ .maison-photo-mobile-text{position:relative;z-index:2;text-align:center;padding:49px 15px 15px}
+ .maison-photo-mobile-crest{color:#cda06d;font-size:21px;text-shadow:0 1px #fff}
+ .maison-photo-mobile-text h1{margin:13px 0 16px;font:italic 500 clamp(36px,10vw,52px)/1.1 'Great Vibes',Georgia,serif!important;color:#b84e7d!important}
+ .maison-photo-mobile-text h1 small{display:block;font:500 23px/1.55 'Noto Serif KR',serif!important;color:#ba5787!important}
+ .maison-photo-mobile-text p{font:500 13px/1.9 'Noto Serif KR',serif!important;color:#905371!important}
+ .maison-photo-mobile-actions{display:flex;gap:9px;align-items:center;justify-content:center;flex-wrap:wrap;margin-top:20px}
+ .maison-photo-mobile-actions a{border-radius:99px;padding:10px 15px;min-height:42px;display:inline-flex;align-items:center;
+  background:linear-gradient(130deg,#ed9aba,#e56b9a);color:white!important;border:1px solid #e691b2;
+  font-size:12px;font-weight:700;box-shadow:0 5px 14px #db7da64d}
+ .maison-photo-mobile-actions a+a{background:#fff9fb;color:#a8527b!important;border-color:#e3abc0}
+ .maison-photo-mobile-tools{padding:27px 13px 28px;margin:0 10px 25px;
+  border:2px solid #dbb087;border-radius:22px;background:linear-gradient(150deg,#fffcfc,#ffedf6);
+  box-shadow:0 10px 25px #bc85a52e,inset 0 0 0 5px #fffafd}
+ .maison-photo-mobile-tools h2{font:600 clamp(19px,5.1vw,24px)/1.55 'Noto Serif KR',serif!important;color:#b44d7e!important;text-align:center;margin-bottom:14px}
+ .maison-photo-mobile-search{display:flex;align-items:center;min-height:52px;border:1px solid #ecc3d4;
+   background:#fffdfd;border-radius:99px;padding:5px 7px 5px 14px;box-shadow:0 7px 18px #db9bbb27;gap:7px}
+ .maison-photo-mobile-search input{background:transparent!important;border:0!important;box-shadow:none!important;
+  min-width:0;flex:1;font-size:14px!important;color:#945776!important;padding:4px!important}
+ .maison-photo-mobile-search button{border:0;border-radius:50%;width:39px;height:39px;
+  background:#e8759f;color:#fff;display:grid;place-items:center}
+ .maison-photo-mobile-chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 21px}
+ .maison-photo-mobile-chips a{background:#fffafa;border:1px solid #f2c6d5;border-radius:50px;padding:8px 10px;
+  font-size:11px;color:#b35b83}
+ .maison-photo-mobile-tools h3{font:600 17px/1.5 'Noto Serif KR',serif;color:#b04b7d;margin:12px 0}
+ .maison-photo-mobile-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
+ .maison-photo-mobile-card{border:1px solid #d9abbd;min-height:145px;padding:16px 10px;
+  border-radius:15px;background:radial-gradient(circle at 60% 25%,#fffefa,#ffe6f0);
+  box-shadow:inset 0 0 0 3px #fffafc,0 7px 16px #d48bad30;
+  text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px}
+ .maison-photo-mobile-card span{color:#d16a95;font-size:31px}
+ .maison-photo-mobile-card strong{color:#9c5277;font:600 13px/1.5 'Noto Serif KR',serif}
+ .maison-photo-mobile-card small{color:#977789;font-size:11px;line-height:1.4}
+ body.maison-image-home #la-launcher{right:10px!important;bottom:85px!important;
+  min-height:45px!important;padding:8px 12px!important;font-size:12px!important}
+}
+@media(prefers-reduced-motion:reduce){.maison-photo-hit{transition:none}}

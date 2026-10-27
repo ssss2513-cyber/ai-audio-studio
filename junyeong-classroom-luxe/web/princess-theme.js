@@ -75,4 +75,34 @@
   window.addEventListener('hashchange',syncSidebar);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',syncSidebar);
   else syncSidebar();
+
+  /* Responsive rose-salon navigation. Preserve existing hash router. */
+  function setPrincessMenuOpen(open){
+    document.body.classList.toggle('princess-menu-open',Boolean(open));
+    const button=document.getElementById('princess-menu-toggle');
+    if(button){
+      button.setAttribute('aria-expanded',String(Boolean(open)));
+      button.setAttribute('aria-label',open?'메뉴 닫기':'메뉴 열기');
+    }
+  }
+  document.addEventListener('click',function(event){
+    if(event.target.closest('#princess-menu-toggle')){
+      event.preventDefault();
+      setPrincessMenuOpen(!document.body.classList.contains('princess-menu-open'));
+      return;
+    }
+    if(event.target.closest('.princess-menu-backdrop')||
+       event.target.closest('.princess-side-nav a')||
+       event.target.closest('.princess-crest')){
+      setPrincessMenuOpen(false);
+    }
+  });
+  window.addEventListener('hashchange',function(){setPrincessMenuOpen(false)});
+  document.addEventListener('keydown',function(event){
+    if(event.key==='Escape')setPrincessMenuOpen(false);
+  });
+  window.addEventListener('resize',function(){
+    if(window.innerWidth>980)setPrincessMenuOpen(false);
+  });
+
 })();

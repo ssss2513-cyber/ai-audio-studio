@@ -36,6 +36,15 @@ jobs:
       - name: Test optional R2 free-tier storage controls
         working-directory: junyeong-classroom-luxe
         run: python -m unittest discover -s tests -p 'test_r2_storage.py' -v
+      - name: Verify original rose-palace design assets
+        working-directory: junyeong-classroom-luxe
+        run: |
+          python -c "from xml.etree import ElementTree as ET; [ET.parse('web/' + x) for x in ('princess-hero-art.svg','princess-tool-art.svg')]"
+          node --check web/princess-theme.js
+          grep -q 'name="color-scheme" content="only light"' web/index.html
+          grep -q 'princess-menu-toggle' web/index.html
+          grep -q 'princess-hero-art.svg' web/princess-theme.css
+          grep -q 'princess-tool-art.svg' web/princess-theme.css
       - name: Confirm brand build retains new feature
         working-directory: junyeong-classroom-luxe
         run: |

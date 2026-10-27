@@ -3,17 +3,17 @@
    Buttons remain real links and the existing server-backed film, video and AI tools are kept. */
 (function(){
   const links=[
-    ["홈","#home",24.5,6.5],
-    ["야담 제작 도구","#tools",33.5,6.5],
-    ["야담 로열 스튜디오","#tools",38,6.5],
-    ["이미지 자동배치","#tools",42.3,6.5],
-    ["강의 비서","#assistant",47,6.5],
-    ["라이브 송출","#tools",51.5,6.5],
-    ["Eleven Renew 도구","#tools",56.1,6.5],
-    ["공지사항","#guide",60.6,6.5],
-    ["업데이트 내역","#guide",64.9,6.5],
-    ["자주 묻는 질문","#guide",69.3,6.5],
-    ["고객센터","#guide",73.7,6.5]
+    ["홈","#home",30.4,6.5],
+    ["야담 제작 도구","#tools",36.6,6.5],
+    ["야담 로열 스튜디오","#tools",41.2,6.5],
+    ["이미지 자동배치","#tools",46.1,6.5],
+    ["강의 비서","#assistant",50.8,6.5],
+    ["라이브 송출","#tools",55.6,6.5],
+    ["Eleven Renew 도구","#tools",60.1,6.5],
+    ["공지사항","#guide",65.4,6.5],
+    ["업데이트 내역","#guide",69.7,6.5],
+    ["자주 묻는 질문","#guide",74.4,6.5],
+    ["고객센터","#guide",78.6,6.5]
   ];
   const hit=(name,href,x,y,w,h=4.5)=>'<a class="maison-photo-hit" href="'+href+'" style="left:'+x+'%;top:'+y+'%;width:'+w+'%;height:'+h+'%" aria-label="'+name+'" title="'+name+'"></a>';
   function screenshot(){

@@ -26,16 +26,16 @@ PACKAGES = (
         'fileCount': 14,
     },
     {
-        'id': 'yadam-script-titles',
-        'asset': 'yadam-script-titles-v1.zip.b64',
-        'filename': 'Yadam_Script_Titles_Skill.zip',
-        'title': '썸네일 문구·제목 5세트 스킬',
+        'id': 'yadam-thumbnail-title',
+        'asset': 'yadam-thumbnail-title-v1.zip.b64',
+        'filename': 'Yadam_Thumbnail_Title_Skill.zip',
+        'title': '야담 제목·썸네일 원스톱 제작 스킬',
         'step': '04 · 썸네일과 제목 만들기',
         'version': 'V1.0',
-        'updated': '2026-10-14',
-        'description': '완성된 야담 대본을 넣으면 썸네일 2줄 문구와 영상 제목을 5세트 만들고 최종 1안을 고르는 ChatGPT 스킬입니다.',
-        'features': ['썸네일 2줄 문구·영상 제목 5세트', '대본 근거 확인·결말과 정체 숨김', '스킬 설정·참고 사진 5장 포함'],
-        'fileCount': 8,
+        'updated': '2026-10-28',
+        'description': '대본을 분석하고 참고 화풍을 적용해 후킹 문구가 들어간 썸네일 이미지와 영상 제목을 제작하는 스킬입니다.',
+        'features': ['대본 분석 · 후킹과 반전 중심 문구', '참고 화풍으로 새 장면 생성 · 색상과 글자 검수', '추천 제목 1개 · 대체 제목 2개 · 썸네일 이미지'],
+        'fileCount': 1,
     },
     {
         'id': 'yadam-generator',
@@ -93,7 +93,7 @@ def package_path(package, data_root=None):
     path = PACKAGE_ROOT / package['asset']
     if path.suffix != '.b64' or not path.is_file():
         return path
-    decoded = Path(tempfile.gettempdir()) / 'maison-yadam-script-titles-v1.zip'
+    decoded = Path(tempfile.gettempdir()) / 'maison-yadam-thumbnail-title-v1.zip'
     payload = base64.b64decode(path.read_bytes(), validate=True)
     if not decoded.is_file() or decoded.read_bytes() != payload:
         decoded.write_bytes(payload)

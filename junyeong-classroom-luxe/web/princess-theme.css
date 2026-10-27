@@ -4,7 +4,7 @@
  */
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Great+Vibes&display=swap');
 :root{
- color-scheme:light!important;
+ color-scheme:only light!important;
  --paper:#fff7fa;--white:#fffefd;--ink:#553246;--muted:#8e647b;
  --rose:#d95c8f;--rose-dark:#ad3f70;--blush:#ffe4ef;--gold:#b98b56;
  --line:#efd3e0;--lilac:#f3e7ff;--sage:#e7f6ef;
@@ -346,3 +346,296 @@ body.no-motion .princess-shortcut:hover,body.no-motion .princess-side-nav a:hove
  .princess-shortcut,.princess-side-nav a,.primary,.outline{transition:none!important}
  .princess-shortcut:hover,.princess-side-nav a:hover{transform:none}
 }
+
+
+/* ROYAL ROSE V2 · faithful reference direction / Oct 28
+   A strictly light pastel canvas plus hand-crafted original palace and tool graphics. */
+:root,html,body{color-scheme:only light!important}
+html,body{background-color:#fff4f8!important}
+@supports(color-scheme:only light){
+ .site-header,.princess-welcome,.princess-shortcut,.princess-sidebar,.mobile-nav,dialog{color-scheme:only light!important}
+}
+.site-header{
+ border-bottom:2px solid #e6b7cc!important;
+ box-shadow:0 5px 17px #c4739727,inset 0 3px 0 #fff!important;
+}
+.site-header:before{
+ content:"✧  ❀  ✧  ♡  ✧  ❀  ✧";
+ position:absolute;left:0;right:0;top:1px;
+ height:11px;text-align:center;pointer-events:none;
+ color:#db9db3;font:11px/1 Georgia,serif;letter-spacing:.65em;
+ opacity:.6;
+}
+.site-header .brand-seal{
+ background:radial-gradient(circle at 35% 23%,#fffdfb,#ffe6f0)!important;
+ box-shadow:inset 0 0 0 3px #fff8f9,inset 0 0 0 5px #dcb495,0 4px 15px #e0a3be47!important;
+ border:2px solid #c9a36b!important;
+ border-radius:50%!important;
+}
+.site-header .brand strong{
+ font-size:clamp(17px,1.7vw,23px)!important;
+ font-family:'Cormorant Garamond',Georgia,'Noto Serif KR',serif!important;
+ font-weight:600!important;letter-spacing:.07em!important;
+ color:#bd4c7a!important;
+}
+.site-header .brand small{color:#ad6281!important;letter-spacing:.05em!important}
+#princess-menu-toggle{
+ min-height:40px;min-width:40px;width:43px;height:43px;
+ display:none;align-items:center;justify-content:center;flex-direction:column;
+ border:1px solid #e5b9c8;border-radius:50%;background:#fff8fb;
+ box-shadow:0 3px 11px #db8aaf24;color:#cf628d;cursor:pointer;gap:4px;
+}
+#princess-menu-toggle span{width:17px;height:2px;background:currentColor;border-radius:2px;display:block}
+#princess-menu-toggle:hover{background:#ffe2ee}
+.princess-menu-backdrop{position:fixed;inset:0;background:#42243965;z-index:60;display:none;backdrop-filter:blur(3px)}
+body.princess-menu-open .princess-menu-backdrop{display:block}
+.princess-sidebar{background:linear-gradient(170deg,#fffefe,#ffeff6 60%,#fff9f4)!important;border-right:2px solid #e3b4c9!important}
+.princess-crest{
+ background:radial-gradient(ellipse at 50% 19%,#fff,#ffe9f3 75%)!important;
+ border:2px solid #cda272!important;
+ box-shadow:inset 0 0 0 6px #fffafc,inset 0 0 0 8px #e5bdd0,0 10px 25px #d38bab35!important;
+}
+.princess-side-nav a.active{background:linear-gradient(115deg,#ffb2c9,#e86e99)!important}
+.princess-side-note{
+ background:linear-gradient(160deg,#fffdfc,#ffe9f2)!important;
+ border:2px solid #c99f72!important;
+ box-shadow:inset 0 0 0 5px #fffbfc,inset 0 0 0 6px #e5bfd0!important;
+}
+.princess-home{
+ background:
+ radial-gradient(ellipse at 0% 11%,#fce8f3ad,transparent 34%),
+ radial-gradient(ellipse at 94% 69%,#ffe1efb0,transparent 32%);
+}
+.princess-welcome{
+ display:block!important;
+ position:relative!important;
+ min-height:480px!important;
+ margin:20px 22px 0!important;
+ padding:58px clamp(25px,5.3vw,85px) 48px!important;
+ border:2px solid #cfa171!important;
+ border-radius:29px!important;
+ background-color:#fff6fa!important;
+ background-image:
+  linear-gradient(90deg,rgba(255,251,252,.97) 0%,rgba(255,248,251,.93) 27%,rgba(255,246,250,.57) 49%,rgba(255,248,249,.05) 79%),
+  url('/assets/princess-hero-art.svg?v=20261028-royal-rose-v2')!important;
+ background-size:cover,cover!important;
+ background-repeat:no-repeat,no-repeat!important;
+ background-position:center,center!important;
+ box-shadow:0 20px 60px #ba789d33,inset 0 0 0 7px #fff8fad6!important;
+ overflow:hidden;
+}
+.princess-welcome:before{
+ inset:10px!important;border:1px solid #cda26da8!important;border-radius:22px!important;
+ box-shadow:inset 0 0 0 2px #fff4ec8c;pointer-events:none;
+}
+.princess-welcome:after{
+ content:'♛  ·  ♡  ·  ♛'!important;
+ top:13px!important;left:15px!important;right:15px!important;
+ font:19px/1.3 Georgia,serif!important;color:#bf8758!important;
+ letter-spacing:.19em!important;opacity:.83!important;
+}
+.princess-welcome-copy{max-width:600px!important;padding:8px 0 4px!important;position:relative;z-index:2}
+.princess-overline{
+ font-size:11px!important;font-weight:700!important;
+ letter-spacing:.12em!important;
+ display:inline-block;padding:6px 12px;
+ border-radius:99px;border:1px solid #e3b5c3;background:#fffafbd9;color:#aa6a83!important;
+}
+.princess-hero-crown{font-size:36px!important;margin-top:16px!important;color:#c39961!important;text-shadow:0 2px 0 #fff}
+.princess-welcome h1{
+ margin:8px 0 20px!important;
+ font:600 clamp(32px,3.7vw,56px)/1.35 'Noto Serif KR',Georgia,serif!important;
+ letter-spacing:-.055em!important;
+ color:#a53869!important;text-shadow:0 2px 1px #fff5f8ad!important;
+}
+.princess-welcome h1 em{color:#d75587!important}
+.princess-welcome-copy p{color:#914b72!important;font-size:15px!important;line-height:1.9!important;
+ text-shadow:0 1px 0 #fffafa}
+.princess-welcome-actions a{box-shadow:0 6px 17px #df86ac46!important}
+.princess-signature{font-size:clamp(21px,2.15vw,30px)!important;color:#ba6086!important;text-shadow:0 2px 1px #fff}
+.princess-palace-scene{display:none!important}
+.princess-shortcuts{
+ position:relative;
+ padding:44px 26px 52px!important;
+ margin:9px 22px 20px!important;
+ background:linear-gradient(155deg,rgba(255,254,254,.78),rgba(255,231,241,.9))!important;
+ border:2px solid #d9af8b;border-radius:29px!important;
+ box-shadow:0 14px 42px #d78fb432,inset 0 0 0 7px #fffbfbbd;
+}
+.princess-shortcuts:before{
+ content:'♡';position:absolute;top:-24px;left:calc(50% - 27px);
+ width:54px;height:50px;display:grid;place-items:center;
+ font-size:28px;color:#d66d9a;text-shadow:0 0 2px #fff;
+ border:2px solid #c79967;border-radius:50%;
+ background:radial-gradient(circle,#fffdfc 25%,#ffe4ef);
+ box-shadow:0 5px 17px #d48da55b;
+}
+.princess-shortcuts .princess-section-heading{margin-top:4px}
+.princess-section-heading h2{
+ color:#b64b7c!important;
+ font:600 clamp(23px,2.6vw,34px)/1.4 'Noto Serif KR',serif!important;
+}
+.princess-section-kicker{color:#b87c98!important;letter-spacing:.1em!important}
+.princess-shortcut-grid{gap:13px!important}
+.princess-shortcut{
+ min-height:245px!important;
+ padding:153px 18px 20px!important;
+ border-radius:20px!important;
+ border:2px solid #cfa679!important;
+ box-shadow:inset 0 0 0 6px #fff9fb,0 7px 24px #d28eae38!important;
+ background:linear-gradient(180deg,#fffafc,#ffe8f1)!important;
+ position:relative!important;overflow:hidden!important;
+}
+.princess-shortcut.tone-lilac{background:linear-gradient(180deg,#fffbfe,#f2e6ff)!important}
+.princess-shortcut.tone-peach{background:linear-gradient(180deg,#fffefc,#ffe7ec)!important}
+.princess-shortcut.tone-cream{background:linear-gradient(180deg,#fffefa,#fff0db)!important}
+.princess-shortcut.tone-mint{background:linear-gradient(180deg,#fffefa,#e7f6ee)!important}
+.princess-shortcut.tone-blue{background:linear-gradient(180deg,#fffafa,#e9edff)!important}
+.princess-shortcut:before{
+ content:''!important;
+ position:absolute!important;
+ display:block!important;
+ inset:3px 6px auto 6px!important;
+ height:139px!important;
+ width:auto!important;
+ background-image:url('/assets/princess-tool-art.svg?v=20261028-royal-rose-v2')!important;
+ background-repeat:no-repeat!important;
+ background-size:600% auto!important;
+ background-position:0% center!important;
+ opacity:1!important;
+}
+.princess-shortcut.tone-lilac:before{background-position:20% center!important}
+.princess-shortcut.tone-peach:before{background-position:40% center!important}
+.princess-shortcut.tone-cream:before{background-position:60% center!important}
+.princess-shortcut.tone-mint:before{background-position:80% center!important}
+.princess-shortcut.tone-blue:before{background-position:100% center!important}
+.princess-shortcut:after{
+ content:'❧'!important;position:absolute!important;right:14px!important;bottom:12px!important;
+ width:auto!important;height:auto!important;border:0!important;
+ font-size:23px;color:#c9a172;opacity:.7;background:none!important;
+}
+.princess-shortcut-icon{display:none!important}
+.princess-shortcut-title,.princess-shortcut-desc,.princess-shortcut-arrow{z-index:2;position:relative}
+.princess-shortcut-title{font-size:18px!important;color:#a64070!important}
+.princess-shortcut-desc{font-size:13px!important;color:#8c6278!important}
+.princess-shortcut-arrow{color:#bc5985!important;font-size:12px!important}
+.princess-shortcut:hover{box-shadow:inset 0 0 0 6px #fff9fb,0 14px 33px #d280a258!important}
+
+/* A pink-gold salon frame for the existing media section and feature cards. */
+.lumiel-film{background:linear-gradient(165deg,#fff9fc,#fff0f6)!important}
+.lumiel-film-frame{border:2px solid #cfa678!important;box-shadow:0 15px 45px #bd819a38,inset 0 0 0 4px #fff8fa!important}
+.lumiel-film-top{border-bottom:1px solid #efc8d5;padding-bottom:20px}
+.gpt-suite{border:2px solid #d9b08c!important}
+.gpt-suite-group{border-radius:21px!important;overflow:hidden}
+.gpt-suite-item:hover{background:#fff4f9!important}
+.site-footer{border-top:2px solid #e4bcca!important}
+
+/* MOBILE: the same rose-palace art, not a dark or stripped-down layout. */
+@media(max-width:980px){
+ .site-header{z-index:50!important}
+ #princess-menu-toggle{display:flex!important}
+ .princess-sidebar{
+   display:flex!important;
+   width:min(300px,84vw)!important;
+   max-width:300px;
+   z-index:72!important;transform:translateX(-104%);transition:transform .24s ease!important;
+   visibility:hidden;
+   box-shadow:12px 0 34px #5c2e4651!important;
+ }
+ body.princess-menu-open .princess-sidebar{transform:translateX(0);visibility:visible}
+ .princess-welcome{margin:14px 16px 0!important}
+ .princess-shortcuts{margin:10px 16px 20px!important}
+ .mobile-nav,.yadam-home .mobile-nav{display:flex!important}
+ .mobile-nav a,.yadam-home .mobile-nav a{display:flex!important}
+}
+@media(max-width:700px){
+ .site-header{height:75px!important;gap:8px;padding-inline:13px!important}
+ .site-header .brand{gap:7px!important;min-width:0}
+ .site-header .brand-seal{width:41px!important;height:43px!important;flex:0 0 41px}
+ .site-header .brand strong{font-size:18px!important;line-height:1.07!important;letter-spacing:.025em!important}
+ .site-header .brand small{font-size:9px!important;white-space:normal!important;line-height:1.3!important;margin-top:4px!important}
+ .site-header .header-actions{gap:6px!important}
+ .site-header #account-btn{border-radius:99px!important;min-height:39px!important;font-size:13px!important;padding:8px 11px!important;white-space:nowrap!important}
+ #princess-menu-toggle{min-height:40px;min-width:40px;width:40px;height:40px}
+ .princess-welcome{
+   display:block!important;min-height:635px!important;
+   margin:11px 9px 0!important;padding:41px 23px 300px!important;
+   border-radius:20px!important;border-width:2px!important;
+   background-image:
+     linear-gradient(180deg,#fff9fbf7 0%,#fff7fbf2 31%,#fff0f7d7 52%,#fff1f550 76%,#fff7fb00 98%),
+     url('/assets/princess-hero-art.svg?v=20261028-royal-rose-v2')!important;
+   background-size:cover,auto 101%!important;
+   background-position:center,68% center!important;
+   box-shadow:0 11px 25px #bc7fa335,inset 0 0 0 5px #fff9fad1!important;
+ }
+ .princess-welcome:before{inset:5px!important;border-radius:15px!important}
+ .princess-welcome:after{font-size:14px!important;top:8px!important}
+ .princess-welcome-copy{max-width:100%!important;padding:7px 0!important}
+ .princess-overline{font-size:8px!important;letter-spacing:.02em!important;padding:5px 7px!important}
+ .princess-hero-crown{margin-top:20px!important;font-size:28px!important}
+ .princess-welcome h1{font-size:clamp(31px,8.9vw,40px)!important;line-height:1.35!important;
+  margin:5px 0 14px!important;letter-spacing:-.065em!important}
+ .princess-welcome-copy p{font-size:13px!important;line-height:1.73!important;color:#934a6d!important}
+ .princess-welcome-actions{flex-wrap:nowrap!important;gap:8px!important;margin-top:20px!important}
+ .princess-welcome-actions a{
+   min-height:44px!important;padding:10px 12px!important;font-size:12px!important;
+   flex:1 1 auto!important;white-space:nowrap!important;gap:4px!important;
+ }
+ .princess-welcome-actions a:first-child{flex:1.18!important}
+ .princess-welcome-actions a:last-child{flex:.9!important}
+ .princess-signature{font-size:22px!important;margin-top:19px!important;color:#ae5982!important}
+ .princess-shortcuts{
+   margin:18px 9px 16px!important;padding:30px 13px 28px!important;
+   border-radius:21px!important;box-shadow:inset 0 0 0 5px #fff9f9a8,0 9px 25px #d590b432!important;
+ }
+ .princess-shortcuts:before{top:-18px;left:calc(50% - 23px);width:46px;height:44px;font-size:23px}
+ .princess-section-heading{gap:8px}
+ .princess-section-heading h2{font-size:23px!important}
+ .princess-section-heading p{font-size:12px!important}
+ .princess-all-tools{font-size:11px}
+ .princess-shortcut-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px!important}
+ .princess-shortcut{
+  min-height:202px!important;
+  padding:110px 10px 10px!important;
+  border-radius:17px!important;
+  box-shadow:inset 0 0 0 4px #fff9fb,0 5px 15px #bd829e24!important;
+ }
+ .princess-shortcut:before{height:103px!important;inset:0 3px auto 3px!important}
+ .princess-shortcut-title{font-size:14px!important}
+ .princess-shortcut-desc{font-size:11px!important;line-height:1.45!important;margin-top:4px!important}
+ .princess-shortcut-arrow{font-size:10px!important;padding-top:7px!important}
+ .princess-shortcut:after{font-size:18px!important;right:8px!important;bottom:8px!important}
+ .site-header #motion-btn{display:none!important}
+ .mobile-nav,.yadam-home .mobile-nav{
+   position:fixed!important;bottom:0!important;left:0!important;right:0!important;
+   display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;
+   gap:0!important;align-items:center!important;padding:9px 4px max(9px,env(safe-area-inset-bottom))!important;
+   background:linear-gradient(180deg,#fffefe,#ffeaf3)!important;
+   border-top:2px solid #c99d78!important;box-shadow:0 -8px 24px #dc9ab443!important;
+   z-index:64!important;justify-content:stretch!important;min-height:68px!important;
+   border-radius:18px 18px 0 0!important;
+ }
+ .mobile-nav a,.yadam-home .mobile-nav a,
+ .yadam-home .mobile-nav a:not([href="#home"]):not([href="#tools"]){
+   display:flex!important;flex-direction:column!important;align-items:center!important;
+   justify-content:center!important;min-height:53px!important;
+   padding:4px 2px!important;font-size:10px!important;
+   color:#bc5480!important;text-align:center!important;white-space:nowrap!important;
+ }
+ .mobile-nav a span{font-size:22px!important;line-height:1.05!important;margin-bottom:4px!important;color:#d16a96!important}
+ .mobile-nav a.active,.yadam-home .mobile-nav a.active{color:#a83c6e!important;font-weight:800!important}
+ .mobile-nav a.active span{color:#fff!important;background:linear-gradient(135deg,#f7a2bd,#dc6697);
+  border-radius:11px;box-shadow:0 4px 12px #d1779e45;min-width:40px;padding:5px}
+ .site-footer{padding-bottom:120px!important}
+}
+@media(max-width:385px){
+ .princess-welcome{padding-left:17px!important;padding-right:17px!important;min-height:610px!important}
+ .princess-welcome h1{font-size:31px!important}
+ .princess-welcome-actions a{font-size:11px!important;padding-inline:7px!important}
+ .site-header .brand strong{font-size:16px!important}
+ .site-header .brand small{font-size:8px!important}
+ .site-header #account-btn{font-size:12px!important;padding-inline:8px!important}
+ .princess-shortcut-title{font-size:13px!important}
+}
+body.no-motion .princess-sidebar{transition:none!important}
+@media(prefers-reduced-motion:reduce){.princess-sidebar{transition:none!important}}

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="220" viewBox="0 0 1800 220" role="img" aria-label="메종 루미엘 도구를 상징하는 분홍 공주풍 일러스트"><defs>
+<linearGradient id="vellum" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fffef6"/><stop offset=".55" stop-color="#fff3de"/><stop offset="1" stop-color="#f0d3b6"/></linearGradient>
+<linearGradient id="pink" x1="0" y1="0" x2=".6" y2="1"><stop stop-color="#fff1f6"/><stop offset=".4" stop-color="#f7abc3"/><stop offset="1" stop-color="#d75d8d"/></linearGradient>
+<linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff3c9"/><stop offset=".3" stop-color="#eac481"/><stop offset=".65" stop-color="#af794d"/><stop offset="1" stop-color="#f7df9e"/></linearGradient>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff9fb"/><stop offset="1" stop-color="#ffe3ef"/></linearGradient>
+<linearGradient id="blue" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#d7effc"/><stop offset="1" stop-color="#c8a8db"/></linearGradient>
+<g id="flower"><path d="M-21 9Q-46 13 -40 -15Q-20 -20 -12 1M23 8Q49 9 42 -16Q21 -18 13 -2" fill="#83a697" stroke="#6b9c8a" stroke-width="1.5"/>
+<path d="M0 0C-20 -25 -44 -3 -22 14C-34 34 -5 37 0 19C13 37 35 20 21 8C39 -9 9 -25 0 0Z" fill="url(#pink)" stroke="#d56794" stroke-width="1.6"/>
+<path d="M-12 9Q-1 -13 11 3Q18 14 7 17Q-6 19 -5 6Q3 -1 9 7" stroke="#fff3f5" stroke-width="3" fill="none"/>
+<circle cx="1" cy="9" r="4" fill="#ffc9db"/></g>
+<g id="curl"><path d="M0 0Q15 -28 32 -12Q39 -3 25 4Q13 5 17 -5C28 -14 38 11 49 6Q60 3 71 -14" fill="none" stroke="url(#gold)" stroke-width="3" stroke-linecap="round"/></g>
+<g id="spark"><path d="M0 -13Q2 -2 13 0Q2 2 0 13Q-2 2 -13 0Q-2 -2 0 -13Z" fill="#ffeab8" stroke="#cdaa75"/></g>
+<g id="panel"><rect x="11" y="7" width="278" height="203" rx="24" fill="url(#bg)" fill-opacity=".28" stroke="#eac8d5" stroke-width="1.4"/>
+<path d="M16 58V28Q16 12 33 12H92M284 158V190Q284 206 266 206H211" fill="none" stroke="url(#gold)" stroke-width="2.4"/>
+<path d="M19 62Q36 50 40 26M281 154Q260 165 258 197" stroke="url(#gold)" stroke-width="1.4" fill="none"/>
+<use href="#flower" transform="translate(40 30) scale(.45)"/>
+<use href="#flower" transform="translate(264 187) scale(.39)"/>
+</g>
+</defs><g transform="translate(0 0)"><use href="#panel"/>
+<path d="M76 69Q141 55 201 73L207 161Q148 149 78 165Z" fill="url(#vellum)" stroke="#b98769" stroke-width="3"/>
+<path d="M79 71Q62 57 63 78L69 158Q73 174 85 163M202 74Q215 58 219 78L218 153Q214 166 205 161" stroke="#dcb292" stroke-width="9" fill="none"/>
+<path d="M108 95H171M106 112H185M106 129H178M106 146H158" stroke="#d8ac98" stroke-width="3"/>
+<path d="M145 155Q210 55 244 30Q251 96 153 163Z" fill="url(#pink)" stroke="#cd7793" stroke-width="2"/>
+<path d="M154 163L243 35" stroke="#fbf2ec" stroke-width="2"/>
+<use href="#flower" transform="translate(63 159) scale(0.52)"/><use href="#flower" transform="translate(228 152) scale(0.59)"/>
+<use href="#spark" transform="translate(240 71) scale(.8)"/></g><g transform="translate(300 0)"><use href="#panel"/>
+<ellipse cx="151" cy="170" rx="101" ry="25" fill="#e6afc3" opacity=".45"/>
+<path d="M58 140Q62 98 151 105Q236 98 245 140L237 167Q151 187 68 167Z" fill="url(#pink)" stroke="#b66c8b" stroke-width="3"/>
+<path d="M71 148Q151 170 230 149" fill="none" stroke="#fff3f0" stroke-width="3" opacity=".72"/>
+<path d="M75 102L93 115L113 76L151 107L191 76L211 115L229 100L216 143Q151 155 88 143Z" fill="url(#gold)" stroke="#b4874e" stroke-width="4"/>
+<circle cx="112" cy="85" r="7" fill="#ffdfeb" stroke="#b8836a"/><circle cx="191" cy="84" r="7" fill="#ffdfeb" stroke="#b8836a"/>
+<circle cx="151" cy="100" r="11" fill="#f2b3d0" stroke="#b8836a" stroke-width="3"/>
+<path d="M90 146Q151 151 215 146" stroke="#fff6dc" stroke-width="5"/>
+<use href="#spark" transform="translate(150 46) scale(.9)"/>
+<use href="#flower" transform="translate(58 156) scale(0.63)"/><use href="#flower" transform="translate(243 164) scale(0.55)"/></g><g transform="translate(600 0)"><use href="#panel"/>
+<g transform="translate(63 62) rotate(-8 70 60)"><rect x="0" y="0" width="121" height="102" rx="6" fill="#eed4ad" stroke="#b88a57" stroke-width="6"/>
+<rect x="11" y="10" width="99" height="82" rx="3" fill="url(#blue)"/>
+<path d="M11 87L49 46L70 70L92 30L110 61V92H11Z" fill="#9ac4b5"/>
+<path d="M63 40L78 22L95 41Z" fill="#fff2ee"/><circle cx="41" cy="36" r="12" fill="#fff4e3"/></g>
+<g transform="translate(140 75) rotate(9 54 50)"><rect width="108" height="92" rx="6" fill="#f9dfc5" stroke="#b88a57" stroke-width="5"/>
+<rect x="9" y="10" width="91" height="72" fill="#d6e7fa"/>
+<path d="M9 76L36 48L58 65L76 36L99 69V82H9Z" fill="#b3d1a7"/>
+<circle cx="30" cy="29" r="10" fill="#fff5e8"/></g>
+<use href="#flower" transform="translate(67 165) scale(0.65)"/><use href="#flower" transform="translate(242 164) scale(0.63)"/><use href="#spark" transform="translate(249 50)"/></g><g transform="translate(900 0)"><use href="#panel"/>
+<rect x="66" y="58" width="170" height="117" rx="22" fill="url(#pink)" stroke="url(#gold)" stroke-width="7"/>
+<rect x="80" y="71" width="143" height="89" rx="12" fill="#ffeaf3" stroke="#ffe5be" stroke-width="3"/>
+<path d="M136 89L136 142L177 116Z" fill="#e97c9f" stroke="#ce6995" stroke-width="3"/>
+<path d="M134 54L115 35Q134 17 152 52Q176 13 191 34L166 57Z" fill="#f3a2bc" stroke="#e07ca4" stroke-width="2"/>
+<circle cx="152" cy="54" r="9" fill="#fff4f6" stroke="#d99a8d" stroke-width="2"/>
+<use href="#flower" transform="translate(55 157) scale(0.52)"/><use href="#flower" transform="translate(244 160) scale(0.58)"/><use href="#spark" transform="translate(239 42) scale(.9)"/></g><g transform="translate(1200 0)"><use href="#panel"/>
+<path d="M151 72Q102 39 61 75V159Q105 123 151 161Z" fill="url(#vellum)" stroke="#bf8b75" stroke-width="4"/>
+<path d="M151 72Q205 39 247 75V159Q199 124 151 161Z" fill="url(#vellum)" stroke="#bf8b75" stroke-width="4"/>
+<path d="M151 72V164" stroke="#bf8b75" stroke-width="4"/>
+<path d="M81 86L128 93M83 102L131 109M84 120L132 127M175 91L226 83M175 107L226 99M175 123L221 115" stroke="#dfb7ad" stroke-width="3"/>
+<path d="M178 143Q223 67 246 32Q247 112 184 151Z" fill="url(#pink)" stroke="#cd7c9b" stroke-width="2"/>
+<use href="#flower" transform="translate(51 160) scale(0.55)"/><use href="#spark" transform="translate(229 46) scale(.75)"/></g><g transform="translate(1500 0)"><use href="#panel"/>
+<rect x="76" y="55" width="157" height="119" rx="15" fill="url(#vellum)" stroke="url(#gold)" stroke-width="6"/>
+<rect x="88" y="70" width="134" height="87" rx="8" fill="url(#blue)" stroke="#d1b6c8" stroke-width="2"/>
+<path d="M115 113Q134 83 152 111Q173 82 194 111Q203 129 152 151Q100 127 115 113Z" fill="url(#pink)" stroke="#e5b5bf" stroke-width="2"/>
+<path d="M142 49Q166 20 181 49" stroke="#bc8c74" stroke-width="6" fill="none"/>
+<use href="#flower" transform="translate(61 164) scale(0.58)"/><use href="#flower" transform="translate(248 166) scale(0.57)"/><use href="#spark" transform="translate(252 47) scale(.8)"/></g></svg>

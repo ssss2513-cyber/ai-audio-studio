@@ -639,3 +639,69 @@ body.princess-menu-open .princess-menu-backdrop{display:block}
 }
 body.no-motion .princess-sidebar{transition:none!important}
 @media(prefers-reduced-motion:reduce){.princess-sidebar{transition:none!important}}
+
+
+/* ROYAL ROSE V3 · richer portrait garden and all-pink lecture concierge */
+@media(max-width:700px){
+ .princess-welcome{
+   background-image:url('/assets/princess-mobile-hero.svg?v=20261028-royal-rose-v3')!important;
+   background-color:#fff1f7!important;
+   background-position:center center!important;
+   background-size:cover!important;
+   background-repeat:no-repeat!important;
+ }
+ .princess-welcome-copy{isolation:isolate!important}
+ .princess-welcome-copy:before{
+   content:'';display:block;position:absolute;z-index:-1;
+   top:-6px;left:-9px;right:-9px;bottom:-18px;
+   border-radius:22px;
+   background:linear-gradient(180deg,rgba(255,252,253,.91) 0%,rgba(255,250,252,.92) 22%,rgba(255,250,252,.87) 68%,rgba(255,249,251,.48) 91%,transparent 100%);
+   pointer-events:none;
+ }
+ .princess-signature{font-weight:500!important;text-shadow:0 1px 2px #fff9fbaa!important}
+}
+#la-widget{color:#763e59!important}
+#la-launcher{
+ color:#853c61!important;
+ border:2px solid #c9a272!important;
+ background:linear-gradient(126deg,#ffe8f1,#f4b2ce 65%,#ffe3ec)!important;
+ box-shadow:0 9px 29px #b5669857,inset 0 1px 0 #fff9fa!important;
+}
+#la-launcher:hover{box-shadow:0 14px 32px #bd719955!important}
+#la-chat-panel{
+ color:#70425a!important;background:#fff9fc!important;
+ border:2px solid #d4a881!important;box-shadow:0 20px 80px #7a31576b!important;
+}
+.la-popup-header{
+ background:linear-gradient(125deg,#ffe4ef,#fff5fa)!important;
+ border-bottom:1px solid #e8bad0!important;color:#894966!important;
+}
+.la-popup-mark{background:#ffe9f2!important;color:#b65985!important;border:1px solid #dea9bd!important}
+.la-icon-button{color:#995370!important}
+.la-icon-button:hover{background:#f9dce9!important}
+.la-popup-header p,#la-chat-panel .la-popup-tools,#la-chat-panel .la-scope-picker{color:#956f83!important}
+#la-chat-panel .la-popup-notice{color:#9a5f7b!important;background:#ffedf6!important}
+#la-chat-panel .la-messages{scrollbar-color:#e0afc5 #fff4f8}
+#la-chat-panel .la-empty h2,#la-chat-panel .la-popup-welcome h3{color:#8c4a6a!important}
+#la-chat-panel .la-empty p,#la-chat-panel .la-popup-welcome p{color:#916e82!important}
+#la-chat-panel .la-message{
+ background:#fff1f7!important;color:#704259!important;border:1px solid #eed0dc!important;
+}
+#la-chat-panel .la-user{background:#ffe1ed!important}
+#la-chat-panel .la-answer{background:#fff9fc!important}
+#la-chat-panel .la-message p,#la-chat-panel .la-source,#la-chat-panel .la-source strong{color:#7a4b62!important}
+#la-chat-panel .la-compose{background:#fff4f9!important;border-color:#e5bad0!important}
+#la-chat-panel .la-compose textarea{
+ background:#fffdfd!important;border-color:#e5bfd0!important;color:#673e55!important;
+}
+#la-chat-panel .la-compose small,#la-chat-panel #la-chat-status{color:#9a7285!important}
+#la-chat-panel .primary{
+ background:linear-gradient(125deg,#eca2bd,#d96591)!important;color:#fff!important;
+ border-color:#d982a4!important;border-radius:99px!important;
+}
+#la-chat-panel .outline{background:#fff9fc!important;color:#9a5074!important;border-color:#ddb0c4!important}
+#la-chat-panel .la-popup-tools .text-btn{color:#af6083!important}
+#la-chat-panel .la-scope select{background:#fff!important;color:#764a60!important;border:1px solid #e6bfd0!important}
+@media(max-width:700px){
+ #la-launcher{right:12px!important;min-height:49px!important;padding:10px 13px!important;font-size:13px!important}
+}

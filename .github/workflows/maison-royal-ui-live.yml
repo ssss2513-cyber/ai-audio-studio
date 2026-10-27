@@ -1,0 +1,45 @@
+name: Verify deployed Maison Lumiel princess theme
+on:
+  push:
+    branches: [maison-lumiel]
+    paths:
+      - "junyeong-classroom-luxe/web/princess-theme.css"
+      - "junyeong-classroom-luxe/web/princess-theme.js"
+      - "junyeong-classroom-luxe/web/princess-hero-art.svg"
+      - "junyeong-classroom-luxe/web/princess-tool-art.svg"
+      - "junyeong-classroom-luxe/web/index.html"
+      - ".github/workflows/maison-royal-ui-live.yml"
+  workflow_dispatch:
+
+jobs:
+  public-site-theme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for public auto-deployment and verify the exact theme assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://143-198-87-243.sslip.io"
+          OK=false
+          for attempt in $(seq 1 8); do
+            echo "Checking live homepage (attempt ${attempt} of 8)"
+            if curl --retry 1 -fsSL --max-time 15 "$URL/?royal_rose_probe=20261028-3" -o /tmp/maison-index.html; then
+              if grep -q 'princess-theme.css?v=20261028-royal-rose-3' /tmp/maison-index.html \
+                && grep -q 'content="only light"' /tmp/maison-index.html \
+                && grep -q 'princess-menu-toggle' /tmp/maison-index.html; then
+                OK=true
+                break
+              fi
+              echo "Live homepage responds but has not picked up the latest royal rose source."
+            else
+              echo "Live homepage is temporarily unreachable from GitHub Actions."
+            fi
+            sleep 12
+          done
+          test "$OK" = true || { echo "Latest theme not confirmed on live site."; exit 1; }
+          for asset in princess-theme.css princess-theme.js princess-hero-art.svg princess-tool-art.svg; do
+            status=$(curl --max-time 15 --location --silent --output /dev/null --write-out '%{http_code}' "$URL/assets/$asset?v=20261028-royal-rose-3")
+            echo "$asset: HTTP $status"
+            test "$status" = "200"
+          done
+          echo "The latest bright princess theme is served by the DigitalOcean public domain."

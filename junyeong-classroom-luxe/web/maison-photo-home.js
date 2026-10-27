@@ -92,7 +92,11 @@
   home=function maisonImageHome(){
     const film=typeof lumielIntroSection==='function'?lumielIntroSection():'';
     const spotlight=typeof __maisonSingleSpotlightHome==='function'?__maisonSingleSpotlightHome():'';
-    return '<div class="maison-image-home-main">'+screenshot()+mobile()+
-      '<div class="maison-image-original-content">'+film+spotlight+'</div></div>';
+    // The existing introduction film is always the very first homepage content.
+    // The ORIGINAL generated princess photo appears immediately after the film on both screen sizes.
+    return '<div class="maison-image-home-main">'+
+      '<div class="maison-image-original-content maison-image-intro-first">'+film+'</div>'+
+      '<div id="maison-photo-after-intro" class="maison-photo-after-intro">'+screenshot()+mobile()+'</div>'+
+      '<div class="maison-image-original-content maison-image-below-photo">'+spotlight+'</div></div>';
   };
 })();

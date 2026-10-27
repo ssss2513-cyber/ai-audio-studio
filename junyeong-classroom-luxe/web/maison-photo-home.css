@@ -21,7 +21,7 @@ body.maison-image-home #la-launcher{background:linear-gradient(120deg,#ffe7ef,#f
 .maison-photo-hit:hover{background:rgba(255,255,255,.13)}
 .maison-photo-hit:focus-visible{outline:3px solid #ca367d!important;background:rgba(255,255,255,.32)!important}
 .maison-photo-search{
- position:absolute;left:28.9%;top:46.1%;width:51.8%;height:8.7%;
+ position:absolute;left:28.9%;top:44%;width:51.8%;height:10.1%;
  display:flex;align-items:center;justify-content:space-between;
  background:#fff9fbf0;border:1px solid #f4cad9;
  border-radius:50px;box-shadow:inset 0 1px 5px #d791b217;
@@ -103,3 +103,6 @@ body.maison-image-home #la-launcher{background:linear-gradient(120deg,#ffe7ef,#f
   min-height:45px!important;padding:8px 12px!important;font-size:12px!important}
 }
 @media(prefers-reduced-motion:reduce){.maison-photo-hit{transition:none}}
+/* Keep the exact photo free of the old floating chat bubble; the interactive photo search opens it. */
+body.maison-image-home #la-launcher{opacity:0!important;pointer-events:none!important}
+body.maison-image-home #la-chat-panel:not([hidden]){opacity:1!important;pointer-events:auto!important}

@@ -25,6 +25,7 @@ jobs:
         run: |
           node --check web/app.js
           node --check web/lumiel.js
+          node --check web/princess-theme.js
           node --check web/r2_upload.js
       - name: Check manual-approval rules
         working-directory: junyeong-classroom-luxe
@@ -44,11 +45,14 @@ jobs:
           grep -q 'yadam_home.css' web/index.html
           grep -q 'public/yadam-trends' web/app.js
           grep -q 'gptCollection()' web/app.js
-          grep -q 'yadam-gpt-entrance' web/app.js
+          grep -q 'gpt-suite' web/app.js
           grep -q 'chatgpt.com/g/g-6a043cdc702081918b5996ee47484ee0' web/app.js
           grep -q 'chatgpt.com/g/g-6a046731b9c881919da07e6eefd367ee' web/app.js
           grep -q 'chatgpt.com/g/g-69f6e703b758819180229c897401aae8' web/app.js
           grep -q 'chatgpt.com/g/g-69d8fc9f44ec8191834cbd255347a240' web/app.js
           grep -q 'chatgpt.com/g/g-6a4b4dcbb180819190bbb4a4fa9f109b' web/app.js
           grep -q 'gpt-suite-v2' web/index.html
+          grep -q 'princess-theme.css' web/index.html
+          grep -q 'princess-theme.js' web/index.html
+          grep -q 'princess-sidebar' web/index.html
 

@@ -6,6 +6,7 @@ on:
       - "junyeong-classroom-luxe/web/maison-photo-home.css"
       - "junyeong-classroom-luxe/web/maison-photo-home.js"
       - "junyeong-classroom-luxe/web/maison-reference.avif"
+      - "junyeong-classroom-luxe/web/maison-mobile-photo.avif"
       - "junyeong-classroom-luxe/web/index.html"
       - ".github/workflows/maison-royal-ui-live.yml"
   workflow_dispatch:
@@ -22,17 +23,17 @@ jobs:
           READY=false
           for attempt in $(seq 1 10); do
             echo "Checking production homepage: ${attempt}/10"
-            if curl -fsSL --max-time 15 "$URL/?photo_check=20261028-pixelfaithful-1" -o /tmp/maison-index.html &&
-               grep -q 'maison-photo-home.css?v=20261028-pixelfaithful-1' /tmp/maison-index.html &&
-               grep -q 'maison-photo-home.js?v=20261028-pixelfaithful-1' /tmp/maison-index.html; then
+            if curl -fsSL --max-time 15 "$URL/?photo_check=20261028-pixelfaithful-2" -o /tmp/maison-index.html &&
+               grep -q 'maison-photo-home.css?v=20261028-pixelfaithful-2' /tmp/maison-index.html &&
+               grep -q 'maison-photo-home.js?v=20261028-pixelfaithful-2' /tmp/maison-index.html; then
               READY=true
               break
             fi
             sleep 12
           done
           if [ "$READY" != true ]; then echo "Updated homepage is not on the live site yet."; exit 1; fi
-          for asset in maison-photo-home.css maison-photo-home.js maison-reference.avif; do
-            curl -fsSL --max-time 20 "$URL/assets/$asset?photo_check=20261028-pixelfaithful-1" -o "/tmp/$asset"
+          for asset in maison-photo-home.css maison-photo-home.js maison-reference.avif maison-mobile-photo.avif; do
+            curl -fsSL --max-time 20 "$URL/assets/$asset?photo_check=20261028-pixelfaithful-2" -o "/tmp/$asset"
             test -s "/tmp/$asset"
             echo "$asset served, bytes: $(wc -c < "/tmp/$asset")"
           done
@@ -42,6 +43,8 @@ jobs:
           from pathlib import Path
           data=Path('/tmp/maison-reference.avif').read_bytes()
           assert len(data)>80000 and data[4:12].startswith(b'ftypavif'), "Actual generated AVIF photo missing"
+          mobile=Path('/tmp/maison-mobile-photo.avif').read_bytes()
+          assert len(mobile)>15000 and mobile[4:12].startswith(b'ftypavif'), "Mobile palace photo missing"
           print("PASS: Real generated image bytes served successfully")
           PY
       - name: Capture desktop and mobile home screenshots for comparison
@@ -56,11 +59,11 @@ jobs:
           "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
             --window-size=1672,941 --virtual-time-budget=5500 \
             --screenshot=/tmp/maison-royal-desktop.png \
-            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-1#home'
+            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-2#home'
           "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
             --window-size=393,852 --virtual-time-budget=5500 \
             --screenshot=/tmp/maison-royal-mobile.png \
-            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-1#home'
+            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-2#home'
           ls -lh /tmp/maison-royal-*.png
       - name: Save site screenshots
         if: always()

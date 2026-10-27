@@ -1,71 +1,74 @@
-name: Verify deployed Maison Lumiel princess theme
+name: Verify Maison Lumiel photo-first homepage on DigitalOcean
 on:
   push:
     branches: [maison-lumiel]
     paths:
-      - "junyeong-classroom-luxe/web/princess-theme.css"
-      - "junyeong-classroom-luxe/web/princess-theme.js"
-      - "junyeong-classroom-luxe/web/princess-hero-art.svg"
-      - "junyeong-classroom-luxe/web/princess-tool-art.svg"
+      - "junyeong-classroom-luxe/web/maison-photo-home.css"
+      - "junyeong-classroom-luxe/web/maison-photo-home.js"
+      - "junyeong-classroom-luxe/web/maison-reference.avif"
       - "junyeong-classroom-luxe/web/index.html"
       - ".github/workflows/maison-royal-ui-live.yml"
   workflow_dispatch:
 
 jobs:
-  public-site-theme:
+  public-photo-home:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for public auto-deployment and verify the exact theme assets
+      - name: Verify DigitalOcean serves the existing generated image and interactive homepage
         shell: bash
         run: |
           set -euo pipefail
           URL="https://143-198-87-243.sslip.io"
-          OK=false
-          for attempt in $(seq 1 8); do
-            echo "Checking live homepage (attempt ${attempt} of 8)"
-            if curl --retry 1 -fsSL --max-time 15 "$URL/?royal_rose_probe=20261028-3" -o /tmp/maison-index.html; then
-              if grep -q 'princess-theme.css?v=20261028-royal-rose-3' /tmp/maison-index.html \
-                && grep -q 'content="only light"' /tmp/maison-index.html \
-                && grep -q 'princess-menu-toggle' /tmp/maison-index.html; then
-                OK=true
-                break
-              fi
-              echo "Live homepage responds but has not picked up the latest royal rose source."
-            else
-              echo "Live homepage is temporarily unreachable from GitHub Actions."
+          READY=false
+          for attempt in $(seq 1 10); do
+            echo "Checking production homepage: ${attempt}/10"
+            if curl -fsSL --max-time 15 "$URL/?photo_check=20261028-pixelfaithful-1" -o /tmp/maison-index.html &&
+               grep -q 'maison-photo-home.css?v=20261028-pixelfaithful-1' /tmp/maison-index.html &&
+               grep -q 'maison-photo-home.js?v=20261028-pixelfaithful-1' /tmp/maison-index.html; then
+              READY=true
+              break
             fi
             sleep 12
           done
-          test "$OK" = true || { echo "Latest theme not confirmed on live site."; exit 1; }
-          for asset in princess-theme.css princess-theme.js princess-hero-art.svg princess-tool-art.svg; do
-            status=$(curl --max-time 15 --location --silent --output /dev/null --write-out '%{http_code}' "$URL/assets/$asset?v=20261028-royal-rose-3")
-            echo "$asset: HTTP $status"
-            test "$status" = "200"
+          if [ "$READY" != true ]; then echo "Updated homepage is not on the live site yet."; exit 1; fi
+          for asset in maison-photo-home.css maison-photo-home.js maison-reference.avif; do
+            curl -fsSL --max-time 20 "$URL/assets/$asset?photo_check=20261028-pixelfaithful-1" -o "/tmp/$asset"
+            test -s "/tmp/$asset"
+            echo "$asset served, bytes: $(wc -c < "/tmp/$asset")"
           done
-          echo "The latest bright princess theme is served by the DigitalOcean public domain."
-      - name: Capture rendered mobile homepage for visual QA
+          grep -q 'maison-reference.avif' /tmp/maison-photo-home.css
+          grep -q 'maison-photo-desktop' /tmp/maison-photo-home.js
+          python3 - <<'PY'
+          from pathlib import Path
+          data=Path('/tmp/maison-reference.avif').read_bytes()
+          assert len(data)>80000 and data[4:12].startswith(b'ftypavif'), "Actual generated AVIF photo missing"
+          print("PASS: Real generated image bytes served successfully")
+          PY
+      - name: Capture desktop and mobile home screenshots for comparison
         shell: bash
         continue-on-error: true
         run: |
           BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
           if [ -z "$BROWSER" ]; then
-            echo "No headless Chrome binary on this runner."
+            echo "No headless Chrome binary available on the runner."
             exit 0
           fi
-          "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
-            --force-device-scale-factor=1 --window-size=393,852 --virtual-time-budget=5000 \
+          "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+            --window-size=1672,941 --virtual-time-budget=5500 \
+            --screenshot=/tmp/maison-royal-desktop.png \
+            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-1#home'
+          "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+            --window-size=393,852 --virtual-time-budget=5500 \
             --screenshot=/tmp/maison-royal-mobile.png \
-            'https://143-198-87-243.sslip.io/?royal_rose_probe=20261028-3#home'
-          if [ -s /tmp/maison-royal-mobile.png ]; then
-            ls -l /tmp/maison-royal-mobile.png
-            python -m pip -q install pillow
-            python -c "from PIL import Image,ImageStat; i=Image.open('/tmp/maison-royal-mobile.png').convert('RGB'); v=i.crop((20,100,i.width-20,min(700,i.height))); print('SCREEN',i.size,'MAIN AVERAGE RGB',ImageStat.Stat(v).mean)"
-          fi
-      - name: Upload actual live mobile screenshot
+            'https://143-198-87-243.sslip.io/?photo_check=20261028-pixelfaithful-1#home'
+          ls -lh /tmp/maison-royal-*.png
+      - name: Save site screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: maison-royal-mobile-preview
-          path: /tmp/maison-royal-mobile.png
+          name: maison-photo-home-qa
+          path: |
+            /tmp/maison-royal-desktop.png
+            /tmp/maison-royal-mobile.png
           if-no-files-found: warn
           retention-days: 7

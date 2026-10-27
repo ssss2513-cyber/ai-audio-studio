@@ -33,10 +33,7 @@
     return '<section class="maison-photo-desktop" aria-label="메종 루미엘 핑크 공주 홈페이지">'+
       '<img class="maison-photo-background" src="/assets/maison-reference.avif?v=20261028-photo-1" alt="핑크 장미와 샹들리에, 공주 성, 금장 프레임으로 장식한 메종 루미엘 홈페이지" fetchpriority="high">'+
       '<div class="maison-photo-interactions">'+hotspots+
-      '<form class="maison-photo-search" id="maison-photo-search" aria-label="AI 강의 비서 검색">'+
-      '<label class="sr-only" for="maison-photo-question">무엇을 도와드릴까요?</label>'+
-      '<input id="maison-photo-question" name="question" placeholder="무엇이든 물어보세요..." autocomplete="off" aria-label="질문 입력">'+
-      '<button type="submit" aria-label="강의 비서에게 질문하기">➤</button></form>'+
+      '<button type="button" class="maison-photo-open-chat" aria-label="강의 비서 열기: 이미지 속 검색창"></button>'+
       '</div></section>';
   }
   function mobile(){
@@ -71,6 +68,16 @@
       location.hash='#assistant';
     }
   }
+  document.addEventListener('click',function(event){
+    if(event.target.closest('.maison-photo-open-chat')){
+      event.preventDefault();
+      const launcher=document.getElementById('la-launcher');
+      if(launcher){
+        if(launcher.getAttribute('aria-expanded')!=='true')launcher.click();
+        document.getElementById('la-input')?.focus();
+      }else{location.hash='#assistant';}
+    }
+  });
   document.addEventListener('submit',function(event){
     if(event.target.id==='maison-photo-search'||event.target.id==='maison-mobile-search'){
       event.preventDefault();openQuestion(event.target);

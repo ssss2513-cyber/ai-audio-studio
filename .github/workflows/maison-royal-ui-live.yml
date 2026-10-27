@@ -43,3 +43,29 @@ jobs:
             test "$status" = "200"
           done
           echo "The latest bright princess theme is served by the DigitalOcean public domain."
+      - name: Capture rendered mobile homepage for visual QA
+        shell: bash
+        continue-on-error: true
+        run: |
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$BROWSER" ]; then
+            echo "No headless Chrome binary on this runner."
+            exit 0
+          fi
+          "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
+            --force-device-scale-factor=1 --window-size=393,852 --virtual-time-budget=5000 \
+            --screenshot=/tmp/maison-royal-mobile.png \
+            'https://143-198-87-243.sslip.io/?royal_rose_probe=20261028-3#home'
+          if [ -s /tmp/maison-royal-mobile.png ]; then
+            ls -l /tmp/maison-royal-mobile.png
+            python -m pip -q install pillow
+            python -c "from PIL import Image,ImageStat; i=Image.open('/tmp/maison-royal-mobile.png').convert('RGB'); v=i.crop((20,100,i.width-20,min(700,i.height))); print('SCREEN',i.size,'MAIN AVERAGE RGB',ImageStat.Stat(v).mean)"
+          fi
+      - name: Upload actual live mobile screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maison-royal-mobile-preview
+          path: /tmp/maison-royal-mobile.png
+          if-no-files-found: warn
+          retention-days: 7

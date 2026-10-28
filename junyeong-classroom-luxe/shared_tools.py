@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import FileResponse
 from shared_tool_release import RELEASES, ensure_release
 from shared_tool_type4 import build_type4_package
-from shared_tool_image279 import build_image279_package
+from shared_tool_image2710 import build_image2710_package
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
@@ -52,19 +52,19 @@ PACKAGES = (
     },
     
     {'id': 'yadam-image-prompts',
-     'asset': 'yadam-image-prompts-v2.7.9.zip',
-     'filename': '야담_이미지제작_2.7.9.zip',
+     'asset': 'yadam-image-prompts-v2.7.10.zip',
+     'filename': '야담_이미지제작_2.7.10.zip',
      'title': '이미지 프롬프트 생성기',
      'step': '02 · 이미지 구성하기',
-     'version': '2.7.9',
+     'version': '2.7.10',
      'updated': '2026-10-28',
-     'description': '대본 접수 시 추천 화풍·참조 이미지·직접 화풍을 먼저 묻고, 프롬프트 완성 후 이미지 생성 동의를 받습니다. 동의 후 인물·배경·소품 합계 18장을 먼저 제작하고 실제 에셋을 참조해 본편을 생성합니다. 통합 캐릭터시트와 호출 ID·실제 참조 일치 검사를 적용합니다.',
-     'features': ['화풍 방식 먼저 질문 · 사용자 선택 전 자동 확정 금지',
+     'description': '대본을 먼저 분석한 뒤 추천 화풍·원하는 화풍 직접 입력·참조 이미지 중 선택받습니다. 인물·배경·소품 합계 18개 에셋과 본편 프롬프트를 완성한 뒤 이미지 생성 동의를 받고, 에셋 생성·검수 후 실제 참조로 본편을 만듭니다. 에셋 ID별 파일명과 본편 원문 30자 저장명 대응표를 제공합니다.',
+     'features': ['대본 분석 후 화풍 선택 · 자동 확정 금지',
                   '에셋 총 18장 · 인물 1명 = 전신 2컷+얼굴 4컷 통합 시트 1장',
                   '프롬프트 완성 후 생성 동의 · 에셋 완료 후 본편 생성',
-                  '호출 ID·실제 참조 파일 검사 · 원문 30자 · 상세 화풍 유지'],
-     'fileCount': 78,
-     'sha256': '2955e6b342fb62886d1f9a3d0724b5b91ccecbec2286987aa30442fcf710e240'},
+                  '에셋 ID별 저장 · 본편 원문30자 숫자접두 없는 저장명 · 호출 ID 검사'],
+     'fileCount': 79,
+     'sha256': '351e56fd791274062fc0b15999dcb90ce3faff6cc70b5083c8498990679fb1f1'},
     {
         'id': 'yadam-validator',
         'asset': 'yadam-validator-v11.22.zip',
@@ -73,7 +73,7 @@ PACKAGES = (
         'step': '03 · 완성본 검증하기',
         'version': 'V11.22 · V13.9 연동',
         'updated': '2026-10-20',
-        'description': 'V13.9의 대본·인트로 완성도를 검토하는 검증기입니다. 작법 역할·초반 공감 행동·주요 장면 인과·마지막 선택을 원문 근거로 살피고, 요청한 부분만 별도 수정본으로 보완합니다. 주대본·인트로 분리와 화자 파일·분량 계산 기준도 함께 맞췄습니다.',
+        'description': 'V13.9의 대본·인트로 완성도를 검토하는 검증기입니다. 작법 역할·초반 공감·장면 인과·마지막 선택을 원문 근거로 살피고, 요청한 부분만 별도 수정본으로 보완합니다. 주대본·인트로 분리와 화자 파일·분량 계산 기준도 함께 맞췄습니다.',
         'features': ['작법·초반 공감·장면 인과·마지막 선택 점검', '본편·인트로 분리 / 실제 분량·본편 화자 대응', '지침·검사 코드·감사 지도 포함 · 의미 검토 구분'],
         'fileCount': 8,
         'sha256': 'ede36fba61838b44057bdb2a6d7b48b0bc587d9b36f59a695d8e11de201b52c7',
@@ -85,7 +85,7 @@ def package_path(package, data_root=None):
     if package['id'] == 'yadam-image-prompts':
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
-        return build_image279_package(PACKAGE_ROOT, Path(data_root))
+        return build_image2710_package(PACKAGE_ROOT, Path(data_root))
     if package['id'] == 'yadam-generator':
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))

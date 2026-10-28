@@ -1,0 +1,114 @@
+name: Register Yadam image 2.7.9 files
+on:
+  push:
+    branches: [maison-lumiel]
+    paths:
+      - '.github/workflows/yadam-image-279-register.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: yadam-image-279-registration
+  cancel-in-progress: false
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: maison-lumiel
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build exact supplied archive and extract separate instructions
+        run: |
+          python - <<'PY'
+          import ast
+          import hashlib
+          import importlib.util
+          import io
+          import json
+          from pathlib import Path
+          import tempfile
+          import zipfile
+
+          root = Path('junyeong-classroom-luxe')
+          package_root = root / 'shared-tools'
+          expected_sha = '2955e6b342fb62886d1f9a3d0724b5b91ccecbec2286987aa30442fcf710e240'
+          expected_size = 5865741
+          instruction_sha = 'ab0773ae8720b62d6c2ed68defae144b3813c24acb684b78cd0249c62f47b216'
+          catalogue = ast.parse((root/'shared_tools.py').read_text(encoding='utf-8'))
+          packages = next(ast.literal_eval(n.value) for n in catalogue.body
+                          if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'PACKAGES' for t in n.targets))
+          item = next(p for p in packages if p['id'] == 'yadam-image-prompts')
+          if item['version'] != '2.7.9' or item['sha256'] != expected_sha:
+              raise ValueError('Image release changed; stop without downgrading or changing the catalogue')
+          spec = importlib.util.spec_from_file_location('image279_release', root/'shared_tool_image279.py')
+          builder = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(builder)
+          with tempfile.TemporaryDirectory() as temporary:
+              built = builder.build_image279_package(package_root, Path(temporary))
+              raw = built.read_bytes()
+          if len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_sha:
+              raise ValueError('Build does not exactly match the ZIP supplied to the owner')
+          with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+              if archive.testzip() is not None:
+                  raise ValueError('ZIP integrity check failed')
+              entries = [i for i in archive.infolist() if not i.is_dir()]
+              if len(entries) != 78:
+                  raise ValueError('Unexpected archive member count')
+              instructions = archive.read('CLAUDE_PROJECT_INSTRUCTIONS.md')
+              if hashlib.sha256(instructions).hexdigest() != instruction_sha:
+                  raise ValueError('Project instructions differ from the separately supplied file')
+              manifest = json.loads(archive.read('PACKAGE_MANIFEST.json'))
+              for name, details in manifest['files'].items():
+                  data = archive.read(name)
+                  if len(data) != details['size'] or hashlib.sha256(data).hexdigest() != details['sha256']:
+                      raise ValueError('Manifest mismatch: ' + name)
+              for entry in entries:
+                  if entry.filename.endswith('.py'):
+                      ast.parse(archive.read(entry).decode('utf-8-sig'), filename=entry.filename)
+          destination = package_root/'yadam-image-prompts-v2.7.9.zip'
+          instruction_path = package_root/'야담_프로젝트지침_2.7.9.txt'
+          for path, data in ((destination, raw), (instruction_path, instructions)):
+              if path.exists() and path.read_bytes() != data:
+                  raise ValueError('Different registered file already exists: ' + str(path))
+              path.write_bytes(data)
+          report = {
+              'version': '2.7.9', 'status': 'PASS', 'size': len(raw),
+              'sha256': expected_sha, 'file_count': len(entries),
+              'archive': destination.name, 'instructions': instruction_path.name,
+              'instructions_sha256': instruction_sha,
+              'checks': ['exact supplied ZIP bytes', 'ZIP CRC', 'member checksums', 'Python syntax', 'separate instructions exact match'],
+              'scope': 'Repository release registration only; not generated-image validation or live deployment'
+          }
+          (package_root/'yadam-image-prompts-v2.7.9.json').write_text(
+              json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          PY
+      - name: Commit only ZIP, instructions and registration report
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f -- junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.9.zip
+          git add -- 'junyeong-classroom-luxe/shared-tools/야담_프로젝트지침_2.7.9.txt'
+          git add -- junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.9.json
+          git diff --cached --stat
+          if ! git diff --cached --quiet; then
+            git commit -m 'Register exact Yadam 2.7.9 archive and separate project instructions'
+            git push origin HEAD:maison-lumiel
+          fi
+          echo "Registered commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo 'SHA-256: 2955e6b342fb62886d1f9a3d0724b5b91ccecbec2286987aa30442fcf710e240' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yadam-image-2.7.9-registered-files
+          path: |
+            junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.9.zip
+            junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.9.json
+            junyeong-classroom-luxe/shared-tools/야담_프로젝트지침_2.7.9.txt
+          if-no-files-found: warn
+          retention-days: 7

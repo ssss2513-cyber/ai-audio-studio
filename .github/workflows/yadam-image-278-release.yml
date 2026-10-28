@@ -1,0 +1,113 @@
+name: Register Yadam image 2.7.8
+on:
+  push:
+    branches: [maison-lumiel]
+    paths:
+      - '.github/workflows/yadam-image-278-release.yml'
+      - 'ops/releases/yadam-image-278/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: yadam-image-release-278
+  cancel-in-progress: false
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: maison-lumiel
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and verify the exact owner-supplied ZIP
+        run: |
+          python ops/releases/yadam-image-278/build_release.py --base junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.7.zip --output junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.8.zip
+      - name: Connect the existing image-tool entry to the registered ZIP
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+          root = Path('junyeong-classroom-luxe')
+          report = json.loads((root/'shared-tools/yadam-image-prompts-v2.7.8.json').read_text())
+          assert report['status'] == 'PASS'
+          assert report['sha256'] == '66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112'
+          catalogue = root/'shared_tools.py'
+          source = catalogue.read_text(encoding='utf-8')
+          packages = next(ast.literal_eval(n.value) for n in ast.parse(source).body
+                          if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='PACKAGES' for t in n.targets))
+          item = next(p for p in packages if p['id']=='yadam-image-prompts')
+          assert item['version'] == '2.7.8', 'A newer image release is present; stop without downgrading it'
+          assert item['asset'] == 'yadam-image-prompts-v2.7.8.zip'
+          old = item['sha256']
+          assert old in ('03c86af947b1a4a8974dcc5cd3c0a9d0745aadd57592af17ec421790d9a3f18d',report['sha256'])
+          assert source.count(old)==1
+          catalogue.write_text(source.replace(old,report['sha256'],1),encoding='utf-8')
+          loader = '''"""Serve the verified owner-supplied ZIP committed alongside the application.
+          No network, runtime reconstruction, credential access, or provider calls.
+          """
+          from pathlib import Path
+          import hashlib
+          import threading
+          import zipfile
+
+          ASSET = 'yadam-image-prompts-v2.7.8.zip'
+          SHA256 = '66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112'
+          SIZE = 5919916
+          FILE_COUNT = 75
+          _LOCK = threading.Lock()
+          _VERIFIED = {}
+
+          def build_image278_package(package_root, data_root):
+              path = Path(package_root) / ASSET
+              with _LOCK:
+                  info = path.stat()
+                  fingerprint = (info.st_size, info.st_mtime_ns)
+                  if _VERIFIED.get(str(path)) == fingerprint:
+                      return path
+                  if info.st_size != SIZE or hashlib.sha256(path.read_bytes()).hexdigest() != SHA256:
+                      raise ValueError('Registered image tool 2.7.8 checksum mismatch')
+                  with zipfile.ZipFile(path) as archive:
+                      if archive.testzip() is not None:
+                          raise ValueError('Registered image tool ZIP CRC failed')
+                      if len([i for i in archive.infolist() if not i.is_dir()]) != FILE_COUNT:
+                          raise ValueError('Registered image tool member count mismatch')
+                  _VERIFIED[str(path)] = fingerprint
+                  return path
+          '''
+          (root/'shared_tool_image278.py').write_text(loader,encoding='utf-8')
+          ast.parse(loader)
+          ast.parse(catalogue.read_text(encoding='utf-8'))
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('registered_image278',root/'shared_tool_image278.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          assert module.build_image278_package(root/'shared-tools',root/'unused-data').is_file()
+          print('ZIP, project instructions, catalogue hash and local loader verified')
+          PY
+      - name: Commit only the approved release files without force pushing
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f -- junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.8.zip
+          git add -- junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.8.json
+          git add -- 'junyeong-classroom-luxe/shared-tools/야담_프로젝트지침_2.7.8.txt'
+          git add -- junyeong-classroom-luxe/shared_tool_image278.py junyeong-classroom-luxe/shared_tools.py
+          git diff --cached --stat
+          git diff --cached --quiet || git commit -m 'Register owner Yadam 2.7.8 ZIP and unified character-sheet project instructions'
+          git push origin HEAD:maison-lumiel
+          echo "Release commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Registered ZIP SHA-256: 66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yadam-image-2.7.8-registration
+          path: |
+            junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.8.zip
+            junyeong-classroom-luxe/shared-tools/yadam-image-prompts-v2.7.8.json
+            junyeong-classroom-luxe/shared-tools/야담_프로젝트지침_2.7.8.txt
+          retention-days: 7

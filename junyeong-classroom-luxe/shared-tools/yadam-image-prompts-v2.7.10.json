@@ -1,0 +1,18 @@
+{
+  "version": "2.7.10",
+  "status": "PASS",
+  "size": 5864222,
+  "sha256": "351e56fd791274062fc0b15999dcb90ce3faff6cc70b5083c8498990679fb1f1",
+  "file_count": 79,
+  "archive": "yadam-image-prompts-v2.7.10.zip",
+  "instructions": "야담_프로젝트지침_2.7.10.txt",
+  "instructions_sha256": "bb433b5c002f0939e8a9c45b8cfc884abbbef17a9d3722b60794d8b3293911a1",
+  "checks": [
+    "exact supplied ZIP bytes",
+    "ZIP CRC",
+    "manifest member checksums",
+    "Python syntax",
+    "separate instructions exact match"
+  ],
+  "scope": "Repository registration and file integrity only; not new program testing, image validation or live deployment"
+}

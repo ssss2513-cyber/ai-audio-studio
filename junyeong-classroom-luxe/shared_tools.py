@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import FileResponse
 from shared_tool_release import RELEASES, ensure_release
 from shared_tool_type4 import build_type4_package
-from shared_tool_image278 import build_image278_package
+from shared_tool_image279 import build_image279_package
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
@@ -52,19 +52,19 @@ PACKAGES = (
     },
     
     {'id': 'yadam-image-prompts',
-     'asset': 'yadam-image-prompts-v2.7.8.zip',
-     'filename': '야담_이미지제작_2.7.8.zip',
+     'asset': 'yadam-image-prompts-v2.7.9.zip',
+     'filename': '야담_이미지제작_2.7.9.zip',
      'title': '이미지 프롬프트 생성기',
      'step': '02 · 이미지 구성하기',
-     'version': '2.7.8',
+     'version': '2.7.9',
      'updated': '2026-10-28',
-     'description': '인물 한 명의 전신 정면·후면과 얼굴·상반신 네 각도를 한 장의 통합 캐릭터시트로 제작하도록 수정한 2.7.8입니다. 인물당 영문ID_캐릭터시트.png 한 파일을 사용하며, 본편은 단일 장면으로 유지합니다.',
-     'features': ['인물 1명 = 통합 캐릭터시트 1장 · 전신 2컷 + 얼굴 4컷',
-                  '화풍 10종 · 사용자 선택 후 적용 · 파스텔 한복 세미SD 포함',
-                  '영문ID_캐릭터시트.png · 실제 에셋 참조 · 배경·소품 별도',
-                  '숫자_ 없는 본편 저장명 · 원문 30자 · 화풍 원문 유지'],
-     'fileCount': 75,
-     'sha256': '66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112'},
+     'description': '대본 접수 시 추천 화풍·참조 이미지·직접 화풍을 먼저 묻고, 프롬프트 완성 후 이미지 생성 동의를 받습니다. 동의 후 인물·배경·소품 합계 18장을 먼저 제작하고 실제 에셋을 참조해 본편을 생성합니다. 통합 캐릭터시트와 호출 ID·실제 참조 일치 검사를 적용합니다.',
+     'features': ['화풍 방식 먼저 질문 · 사용자 선택 전 자동 확정 금지',
+                  '에셋 총 18장 · 인물 1명 = 전신 2컷+얼굴 4컷 통합 시트 1장',
+                  '프롬프트 완성 후 생성 동의 · 에셋 완료 후 본편 생성',
+                  '호출 ID·실제 참조 파일 검사 · 원문 30자 · 상세 화풍 유지'],
+     'fileCount': 78,
+     'sha256': '2955e6b342fb62886d1f9a3d0724b5b91ccecbec2286987aa30442fcf710e240'},
     {
         'id': 'yadam-validator',
         'asset': 'yadam-validator-v11.22.zip',
@@ -85,7 +85,7 @@ def package_path(package, data_root=None):
     if package['id'] == 'yadam-image-prompts':
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
-        return build_image278_package(PACKAGE_ROOT, Path(data_root))
+        return build_image279_package(PACKAGE_ROOT, Path(data_root))
     if package['id'] == 'yadam-generator':
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
@@ -120,7 +120,7 @@ def install_shared_tools(core):
                 core.fail(503, '공유 파일을 준비하고 있습니다. 잠시 후 다시 확인해 주세요.')
             item = {key: value for key, value in package.items() if key != 'asset'}
             item['size'] = path.stat().st_size
-            if package['id'] == 'yadam-generator':
+            if package['id'] in ('yadam-generator', 'yadam-image-prompts'):
                 item['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
             item['downloadUrl'] = '/api/tools/' + package['id'] + '/download'
             items.append(item)

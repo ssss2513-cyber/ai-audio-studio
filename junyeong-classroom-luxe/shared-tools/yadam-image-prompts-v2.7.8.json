@@ -1,0 +1,14 @@
+{
+  "version": "2.7.8",
+  "status": "PASS",
+  "size": 5919916,
+  "sha256": "66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112",
+  "file_count": 75,
+  "checks": [
+    "exact owner ZIP bytes",
+    "ZIP CRC",
+    "Python syntax",
+    "synchronized recovery payload"
+  ],
+  "scope": "Release file verification only; no generated-image or live-deployment verification"
+}

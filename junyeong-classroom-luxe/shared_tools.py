@@ -64,7 +64,7 @@ PACKAGES = (
                   '영문ID_캐릭터시트.png · 실제 에셋 참조 · 배경·소품 별도',
                   '숫자_ 없는 본편 저장명 · 원문 30자 · 화풍 원문 유지'],
      'fileCount': 75,
-     'sha256': '03c86af947b1a4a8974dcc5cd3c0a9d0745aadd57592af17ec421790d9a3f18d'},
+     'sha256': '66077b98a3e25dfafac1b1c233e4b0b6de07e415376f5770bb92cdbdefd14112'},
     {
         'id': 'yadam-validator',
         'asset': 'yadam-validator-v11.22.zip',

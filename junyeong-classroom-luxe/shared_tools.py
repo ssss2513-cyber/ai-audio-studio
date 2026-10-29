@@ -9,7 +9,6 @@ from fastapi import Request
 from fastapi.responses import FileResponse
 from shared_tool_release import RELEASES, ensure_release
 from shared_tool_type4 import build_type4_package
-from shared_tool_image2710 import build_image2710_package
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / 'shared-tools'
@@ -52,19 +51,20 @@ PACKAGES = (
     },
     
     {'id': 'yadam-image-prompts',
-     'asset': 'yadam-image-prompts-v2.7.10.zip',
-     'filename': '야담_이미지제작_2.7.10.zip',
+     'asset': 'yadam-image-prompts-v2.7.13.zip',
+     'filename': '야담_이미지제작_2.7.13.zip',
      'title': '이미지 프롬프트 생성기',
      'step': '02 · 이미지 구성하기',
-     'version': '2.7.10',
-     'updated': '2026-10-28',
-     'description': '대본을 먼저 분석한 뒤 추천 화풍·원하는 화풍 직접 입력·참조 이미지 중 선택받습니다. 인물·배경·소품 합계 18개 에셋과 본편 프롬프트를 완성한 뒤 이미지 생성 동의를 받고, 에셋 생성·검수 후 실제 참조로 본편을 만듭니다. 에셋 ID별 파일명과 본편 원문 30자 저장명 대응표를 제공합니다.',
-     'features': ['대본 분석 후 화풍 선택 · 자동 확정 금지',
+     'version': '2.7.13',
+     'updated': '2026-10-29',
+     'description': '러블리 궁중 순정만화풍과 소프트 일러스트풍을 추가한 12종 화풍이며 예시 이미지와 비교 화면을 포함합니다. 대본을 먼저 분석한 뒤 추천 화풍·원하는 화풍 직접 입력·참조 이미지 중 선택받습니다. 인물·배경·소품 합계 18개 에셋과 본편 프롬프트를 완성한 뒤 이미지 생성 동의를 받고, 에셋 생성·검수 후 실제 참조로 본편을 만듭니다. 에셋 ID별 파일명과 본편 원문 30자 저장명 대응표를 제공합니다.',
+     'features': ['화풍 12종 · 러블리 2종 예시 이미지와 비교 화면 포함',
+                  '대본 분석 후 화풍 선택 · 자동 확정 금지',
                   '에셋 총 18장 · 인물 1명 = 전신 2컷+얼굴 4컷 통합 시트 1장',
                   '프롬프트 완성 후 생성 동의 · 에셋 완료 후 본편 생성',
                   '에셋 ID별 저장 · 본편 원문30자 숫자접두 없는 저장명 · 호출 ID 검사'],
-     'fileCount': 79,
-     'sha256': '351e56fd791274062fc0b15999dcb90ce3faff6cc70b5083c8498990679fb1f1'},
+     'fileCount': 89,
+     'sha256': '55ed250a1f277a9965b507618e2cf662e2bad296e4b0785b5374e68bf8ccf16a'},
     {
         'id': 'yadam-validator',
         'asset': 'yadam-validator-v11.22.zip',
@@ -83,9 +83,10 @@ PACKAGES = (
 
 def package_path(package, data_root=None):
     if package['id'] == 'yadam-image-prompts':
-        if data_root is None:
-            data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))
-        return build_image2710_package(PACKAGE_ROOT, Path(data_root))
+        path = PACKAGE_ROOT / package['asset']
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != package['sha256']:
+            raise ValueError('Image package 2.7.13 is missing or has an invalid checksum')
+        return path
     if package['id'] == 'yadam-generator':
         if data_root is None:
             data_root = Path(os.getenv('CLASSROOM_DATA_DIR', str(PACKAGE_ROOT.parent / 'data')))

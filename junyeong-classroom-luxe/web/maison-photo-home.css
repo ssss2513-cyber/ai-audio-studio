@@ -127,3 +127,182 @@ body.maison-image-home #la-chat-panel:not([hidden]){opacity:1!important;pointer-
  .maison-photo-mobile-text{padding-top:41px!important}
  .maison-photo-mobile-hero .maison-photo-mobile-text h1{margin-top:8px!important}
 }
+
+
+
+/* Maison Lumiel photo composition v20261029: functional rose sidebar + intro film in gold frame. */
+.maison-photo-sidebar-real{
+ position:absolute;z-index:5;
+ left:2.65%;top:27.2%;width:17.65%;height:54.1%;
+ display:flex;flex-direction:column;gap:1px;
+ padding:7px 12px 5px;
+ border-radius:15px;
+ background:linear-gradient(160deg,#fff2f7 0%,#ffedf5 55%,#fff2f7 100%);
+ border:1px solid #f0c9d8;
+ box-shadow:0 5px 15px #b76f8e15,inset 0 1px 0 #fffdfc;
+}
+.maison-photo-side-link{
+ display:flex;align-items:center;gap:clamp(5px,.7vw,12px);
+ flex:1 1 0;min-height:0;padding:2px clamp(6px,.88vw,15px);
+ border:1px solid transparent;border-radius:13px;
+ color:#b94e7b!important;text-decoration:none!important;
+ font:600 clamp(11px,1.08vw,18px)/1.25 'Noto Sans KR',sans-serif;
+ white-space:nowrap;transition:transform .22s,background .22s,box-shadow .22s;
+}
+.maison-photo-side-link.active{
+ background:linear-gradient(120deg,#f6a0bc,#ed83a6);
+ box-shadow:0 4px 15px #cd739749;
+ color:#fff!important;
+}
+.maison-photo-side-link:hover{background:#fff7fb;transform:translateX(2px);color:#b44c79!important}
+.maison-photo-side-link.active:hover{background:#ee8bac;color:#fff!important}
+.maison-photo-side-link:focus-visible{outline:3px solid #be538a!important;outline-offset:0}
+.maison-photo-side-icon{display:inline-flex;align-items:center;justify-content:center;
+ color:#d45c8a;font:25px/1 Georgia,serif;flex-shrink:0;width:clamp(16px,1.65vw,28px)}
+.maison-photo-side-link.active .maison-photo-side-icon{color:#fff}
+.maison-photo-side-link small{margin-left:auto;color:#cd7197;font:600 12px Georgia,serif}
+.maison-photo-side-motion{
+ display:flex;align-items:center;justify-content:space-between;gap:8px;
+ flex:0 0 43px;margin-top:3px;padding:3px 8px 2px;
+ border-top:1px solid #e9bccd;
+}
+.maison-photo-motion-copy strong{display:block;color:#b64c78;font-size:clamp(10px,.95vw,15px);line-height:1.25}
+.maison-photo-motion-copy small{display:block;color:#9d7484;font-size:clamp(8px,.67vw,11px);line-height:1.35}
+.maison-photo-motion-toggle,.princess-side-motion-toggle{
+ display:inline-flex;align-items:center;justify-content:center;
+ gap:4px;min-height:28px;min-width:56px;padding:4px 7px;
+ border-radius:99px;border:1px solid #dfadc0;background:#fffafd;
+ font:700 10px/1 'Noto Sans KR',sans-serif;
+ color:#ab6482;box-shadow:0 2px 8px #c8849c21;cursor:pointer;
+}
+.maison-photo-motion-toggle i,.princess-side-motion-toggle i{
+ display:block;width:13px;height:13px;border-radius:50%;
+ background:#bfa2ad;box-shadow:inset 0 0 0 2px #fff7f9;transition:background .22s,transform .22s;
+}
+.maison-photo-motion-toggle[aria-pressed="true"],.princess-side-motion-toggle[aria-pressed="true"]{
+ color:#fff;border-color:#dd7da4;background:linear-gradient(120deg,#f3abc3,#d96b97);
+}
+.maison-photo-motion-toggle[aria-pressed="true"] i,.princess-side-motion-toggle[aria-pressed="true"] i{background:#fff6d6;transform:scale(1.05)}
+.maison-photo-motion-toggle:focus-visible,.princess-side-motion-toggle:focus-visible{outline:3px solid #ab4f84!important;outline-offset:2px}
+/* This opaque insert covers only the original question/shortcut text; gold perimeter remains. */
+.maison-photo-video-slot{
+ position:absolute;z-index:5;left:26.3%;top:35.9%;
+ width:57.1%;height:26.6%;
+ border-radius:17px;
+ background:linear-gradient(123deg,#fff7fafc,#ffeef5f9 65%,#fff3f9f9);
+ box-shadow:inset 0 1px 0 #fff,0 1px 10px #d795a013;
+ overflow:hidden;
+}
+.maison-photo-video-slot .lumiel-film{
+ width:100%;height:100%;min-height:0!important;margin:0!important;
+ padding:8px 12px!important;position:relative!important;
+ display:grid!important;grid-template-columns:minmax(0,.82fr) minmax(0,1.18fr);
+ grid-template-rows:minmax(0,1fr) auto;
+ gap:6px 14px;overflow:hidden!important;
+ background:transparent!important;border:0!important;
+ color:#854465!important;box-shadow:none!important;
+}
+.maison-photo-video-slot .lumiel-film:before{display:none!important}
+.maison-photo-video-slot .lumiel-film-top{
+ grid-column:1;grid-row:1;
+ margin:0!important;padding:9px 0 0!important;
+ display:flex!important;flex-direction:column!important;align-items:start!important;
+ justify-content:center!important;gap:4px!important;min-width:0;
+ border:0!important;
+}
+.maison-photo-video-slot .lumiel-film-copy{min-width:0}
+.maison-photo-video-slot .lumiel-film-copy .luxe-kicker{
+ color:#b86f90!important;font-size:clamp(8px,.7vw,11px)!important;
+ letter-spacing:.03em!important;margin-bottom:0!important;
+}
+.maison-photo-video-slot .lumiel-film h2{
+ font:600 clamp(14px,1.6vw,27px)/1.45 'Noto Serif KR',serif!important;
+ color:#ab4d77!important;margin:5px 0 6px!important;letter-spacing:-.03em!important;
+}
+.maison-photo-video-slot .lumiel-film h2 em{color:#cf6192!important}
+.maison-photo-video-slot .lumiel-film-copy p{
+ font:400 clamp(10px,.75vw,13px)/1.65 'Noto Sans KR',sans-serif!important;
+ color:#94687f!important;max-width:100%;margin:0!important;
+}
+.maison-photo-video-slot .lumiel-film-length{display:none!important}
+.maison-photo-video-slot .lumiel-film-frame{
+ grid-column:2;grid-row:1 / span 2;
+ height:100%!important;min-height:0!important;width:100%!important;max-width:none!important;
+ margin:0!important;padding:5px!important;
+ background:linear-gradient(135deg,#fffdfb,#ffdfeb)!important;
+ border:1px solid #d7a883!important;border-radius:13px!important;
+ box-shadow:0 4px 14px #c4789131!important;
+ display:flex;align-items:center;justify-content:center;overflow:hidden;
+}
+.maison-photo-video-slot .lumiel-film-frame video{
+ display:block!important;width:100%!important;height:100%!important;min-height:0!important;
+ max-height:100%!important;aspect-ratio:auto!important;
+ object-fit:contain!important;border-radius:9px!important;background:#3d2033!important;
+}
+.maison-photo-video-slot .lumiel-film-controls{
+ grid-column:1;grid-row:2;display:flex!important;
+ margin:0!important;gap:5px!important;align-items:center;
+}
+.maison-photo-video-slot .lumiel-film-controls button{
+ min-height:27px!important;padding:3px 11px!important;border-radius:99px!important;
+ border:1px solid #dc9ab8!important;background:#fff6fa!important;
+ color:#ad567c!important;font-size:clamp(10px,.8vw,12px)!important;
+}
+.maison-photo-video-slot .lumiel-film-bottom{display:none!important}
+.maison-photo-petals{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
+.maison-photo-petals span{
+ position:absolute;top:-10%;color:#f1a2bf;font:24px Georgia,serif;opacity:.7;
+ animation:maisonPetalFloat 16s linear infinite;filter:drop-shadow(0 3px 5px #eac8d7)
+}
+.maison-photo-petals span:nth-child(1){left:23%;animation-delay:-2s;font-size:18px}
+.maison-photo-petals span:nth-child(2){left:41%;animation-delay:-7s;font-size:15px}
+.maison-photo-petals span:nth-child(3){left:61%;animation-delay:-11s;font-size:22px}
+.maison-photo-petals span:nth-child(4){left:82%;animation-delay:-3s;font-size:14px}
+.maison-photo-petals span:nth-child(5){left:69%;animation-delay:-13s;font-size:19px}
+.maison-photo-petals span:nth-child(6){left:93%;animation-delay:-9s;font-size:13px}
+@keyframes maisonPetalFloat{
+ 0%{transform:translate3d(0,-20px,0) rotate(0);opacity:0}
+ 8%{opacity:.67}
+ 88%{opacity:.67}
+ 100%{transform:translate3d(40px,1040px,0) rotate(155deg);opacity:0}
+}
+body.no-motion .maison-photo-petals span{animation:none!important;opacity:0!important}
+body.no-motion .maison-photo-side-link,body.no-motion .maison-photo-motion-toggle i{transition:none!important}
+@media(prefers-reduced-motion:reduce){
+ .maison-photo-petals span{animation:none!important;opacity:0!important}
+}
+.maison-film-stash{display:none!important}
+.maison-image-original-content.maison-image-below-photo{margin-top:0!important}
+.maison-mobile-video-slot{display:none}
+@media(max-width:880px){
+ .maison-photo-sidebar-real,.maison-photo-video-slot,.maison-photo-petals{display:none!important}
+ .maison-mobile-video-slot{display:block;margin:0 0 17px}
+ .maison-mobile-video-slot .lumiel-film{
+  display:flex!important;flex-direction:column!important;
+  background:transparent!important;border:0!important;
+  box-shadow:none!important;padding:0!important;margin:0!important;
+ }
+ .maison-mobile-video-slot .lumiel-film:before{display:none!important}
+ .maison-mobile-video-slot .lumiel-film-top,.maison-mobile-video-slot .lumiel-film-bottom{display:none!important}
+ .maison-mobile-video-slot .lumiel-film-frame{
+  display:block;width:100%;max-width:none;margin:0;
+  padding:5px!important;background:#fffafa!important;
+  border:2px solid #cfa67b!important;border-radius:16px!important;
+  box-shadow:0 8px 26px #c47e9c42!important;
+ }
+ .maison-mobile-video-slot .lumiel-film-frame video{
+  display:block;width:100%;height:auto!important;aspect-ratio:16 / 9!important;
+  object-fit:contain;border-radius:10px!important;
+ }
+ .maison-mobile-video-slot .lumiel-film-controls{
+  display:flex;justify-content:center;gap:8px;margin:10px 0 0!important
+ }
+ .maison-mobile-video-slot .lumiel-film-controls button{
+  min-height:35px!important;padding:7px 16px!important;
+  background:#ffecf4!important;color:#b15280!important;
+  border:1px solid #dfaabd!important;border-radius:99px!important;font-size:12px!important;
+ }
+ .princess-side-motion-item{padding:12px 14px;margin-top:8px;border-top:1px solid #e7bfd0;
+  display:flex;align-items:center;justify-content:space-between;gap:12px}
+ .princess-side-motion-item label{color:#ab5077;font-size:13px;font-weight:600}
+}

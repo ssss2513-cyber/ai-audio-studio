@@ -8,3 +8,4 @@ boto3>=1.40,<2
 google-auth>=2.35,<3
 requests>=2.32,<3
 tzdata>=2025.2
+psycopg[binary]>=3.2,<4

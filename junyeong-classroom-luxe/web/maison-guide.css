@@ -1,0 +1,182 @@
+/* Maison Lumiel — Original Guide Character, 2026-11-01.
+   All artwork is cropped from the user's supplied character concept sheet.
+   Scoped to the guide so the welcome video, photo homepage and member tools stay untouched. */
+.ml-guide-section{
+ --ml-rose:#bc6085;--ml-ink:#77485c;--ml-line:#ecd3d6;--ml-gold:#c8a374;
+ max-width:1340px;margin:44px auto 70px;padding:0 clamp(14px,3.8vw,40px);
+ font-family:'Noto Sans KR',-apple-system,BlinkMacSystemFont,sans-serif;
+ color:var(--ml-ink);isolation:isolate;
+}
+.ml-guide-panel{
+ position:relative;display:grid;grid-template-columns:minmax(280px,.88fr) minmax(0,1.12fr);
+ overflow:hidden;border:1px solid #d8b695;border-radius:29px;
+ background:linear-gradient(132deg,#fffdfb,#fff6f8 47%,#ffe8ef);
+ box-shadow:0 22px 65px #b8769340,inset 0 0 0 6px #fffcfbbd;
+}
+.ml-guide-panel:before{content:'♛  ✧  ♡  ✧  ♛';position:absolute;z-index:2;
+ top:14px;left:20px;right:20px;text-align:center;color:#bd9368;opacity:.62;
+ font:16px/1.3 Georgia,serif;letter-spacing:.18em;pointer-events:none}
+.ml-guide-portrait{position:relative;min-height:540px;background:#f9e7e8;
+ overflow:hidden}
+.ml-guide-portrait:after{content:'';position:absolute;inset:0;pointer-events:none;
+ background:linear-gradient(180deg,transparent 59%,#9c5b7952 100%)}
+.ml-guide-portrait-img{position:absolute;inset:0;display:block;width:100%;height:100%;
+ object-fit:cover;object-position:center 30%}
+.ml-guide-portrait-brand{position:absolute;z-index:1;bottom:23px;left:27px;right:20px;
+ font:italic 600 31px/1.1 'Cormorant Garamond',Georgia,serif;letter-spacing:.025em;
+ color:#fffdf8;text-shadow:0 2px 10px #6c40517a}
+.ml-guide-story{padding:clamp(34px,4.8vw,66px) clamp(23px,4.9vw,66px) 35px;
+ min-width:0;align-self:center}
+.ml-guide-kicker{font-size:11px;letter-spacing:.14em;font-weight:700;color:#b89173}
+.ml-guide-story h2{margin:16px 0 18px!important;color:#9c5674!important;
+ font:600 clamp(30px,3vw,44px)/1.4 'Noto Serif KR',Georgia,serif!important;
+ letter-spacing:-.055em;word-break:keep-all}
+.ml-guide-story h2 em{color:#cc6c97!important;font-style:normal}
+.ml-guide-intro{max-width:620px;margin:0;color:#896878!important;
+ font-size:15px;line-height:1.95;word-break:keep-all}
+.ml-guide-quote{margin:19px 0 23px;padding:9px 0 9px 17px;
+ border-left:3px solid #d7a47b;color:#a35878!important;
+ font:500 18px/1.7 'Noto Serif KR',serif!important;word-break:keep-all}
+.ml-guide-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.ml-guide-actions a{min-height:43px;display:inline-flex;align-items:center;justify-content:center;
+ padding:10px 15px;border-radius:99px;text-decoration:none!important;
+ font-size:12px;font-weight:700;line-height:1.4;transition:transform .18s,background .18s}
+.ml-guide-actions a:hover{transform:translateY(-2px)}
+.ml-guide-primary{color:#fff!important;border:1px solid #dc87ab;
+ background:linear-gradient(125deg,#ef9fbb,#d26f99);box-shadow:0 7px 17px #d180a049}
+.ml-guide-primary:hover{background:#c6578a}
+.ml-guide-secondary{color:#a55878!important;border:1px solid #e6b4c8;background:#fff7fa}
+.ml-guide-secondary:hover{background:#ffe4f0}
+.ml-guide-text-link{color:#a7798a!important;padding-inline:8px!important;
+ background:transparent!important;border:1px solid transparent;font-weight:500!important}
+.ml-guide-text-link:hover{color:#aa4674!important}
+.ml-guide-expressions{margin-top:28px;border-top:1px solid #eed7dc;padding-top:20px}
+.ml-guide-expressions h3{color:#9b617a!important;font-size:14px;line-height:1.5;font-weight:700;margin:0 0 12px!important}
+.ml-guide-face-row{display:flex;gap:9px;align-items:start;flex-wrap:wrap}
+.ml-guide-mood{padding:5px 5px 7px;background:#fff8fa;border:1px solid #e9c8d6;
+ border-radius:13px;cursor:pointer;color:#92677a;text-align:center;
+ min-width:76px;min-height:108px;transition:transform .18s,border-color .18s,box-shadow .18s}
+.ml-guide-mood:hover{transform:translateY(-3px);border-color:#d894ae}
+.ml-guide-mood.is-selected{border:2px solid #d781a8;background:#ffeff5;
+ box-shadow:0 5px 14px #d38faf35}
+.ml-guide-mood:focus-visible{outline:3px solid #b65989!important;outline-offset:2px}
+.ml-guide-face{display:block;width:66px;height:70px;margin:auto;border-radius:10px;
+ background-image:url('/assets/maison-guide-faces.webp?v=20261101-character-1');
+ background-size:330px 70px;background-repeat:no-repeat;background-color:#fff0f3}
+.ml-guide-face-0{background-position:0 0}
+.ml-guide-face-1{background-position:-66px 0}
+.ml-guide-face-2{background-position:-132px 0}
+.ml-guide-face-3{background-position:-198px 0}
+.ml-guide-face-4{background-position:-264px 0}
+.ml-guide-mood-label{display:block;margin-top:7px;font-size:11px;font-weight:650}
+.ml-guide-mood-status{font-size:13px;color:#a16b83!important;line-height:1.65;
+ margin:13px 0 0!important;min-height:25px}
+.ml-guide-journey{margin:15px 0 0;padding:25px clamp(14px,3vw,35px) 30px;
+ border:1px solid #dfc7c6;border-radius:23px;
+ background:linear-gradient(145deg,#fffafa,#ffeef4);
+ box-shadow:0 10px 35px #b87a9330,inset 0 0 0 5px #fffdfbbd}
+.ml-guide-journey-title{text-align:center;margin:0 0 21px}
+.ml-guide-journey-title span{color:#b88e86;letter-spacing:.14em;font-size:10px;font-weight:700}
+.ml-guide-journey-title h3{margin:8px 0 0!important;color:#a6547b!important;
+ font:600 clamp(19px,2vw,27px)/1.5 'Noto Serif KR',serif!important}
+.ml-guide-pose-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.ml-guide-pose{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;
+ padding:15px 10px 19px;border-radius:17px;border:1px solid #e9c7d0;
+ background:#fffbfbea;color:#9e5777!important;text-decoration:none!important;
+ box-shadow:0 7px 20px #cb88a32c;transition:transform .2s,box-shadow .2s,border-color .2s}
+.ml-guide-pose:hover{transform:translateY(-5px);border-color:#da96b1;
+ box-shadow:0 12px 22px #bf7b9b52}
+.ml-guide-pose:focus-visible{outline:3px solid #b35987!important;outline-offset:2px}
+.ml-guide-pose-photo{display:block;width:120px;height:185px;border-radius:11px;
+ background-image:url('/assets/maison-guide-poses.webp?v=20261101-character-1');
+ background-size:480px 185px;background-repeat:no-repeat;background-color:#fff2f6}
+.ml-guide-pose-0{background-position:0 0}
+.ml-guide-pose-1{background-position:-120px 0}
+.ml-guide-pose-2{background-position:-240px 0}
+.ml-guide-pose-3{background-position:-360px 0}
+.ml-guide-pose strong{font-size:15px;color:#ad6280!important}
+.ml-guide-pose small{font-size:12px;color:#997b88!important;line-height:1.6}
+
+/* Small real-character concierge; no separate AI model or account is created. */
+.ml-guide-floating{position:fixed;z-index:69;right:20px;bottom:24px;width:max-content;
+ max-width:calc(100vw - 25px);pointer-events:none}
+.ml-guide-floating>*{pointer-events:auto}
+body:not(.maison-image-home) .ml-guide-floating{display:none!important}
+.ml-guide-launcher{display:flex;align-items:center;justify-content:center;gap:9px;
+ padding:5px 12px 5px 5px;min-height:64px;border-radius:99px;
+ border:2px solid #cfa477;background:linear-gradient(125deg,#fffdfb,#ffeaf2);
+ color:#9f4a74;box-shadow:0 11px 28px #a8578149;
+ font:700 13px/1.2 'Noto Sans KR',sans-serif;cursor:pointer}
+.ml-guide-launcher:hover{background:#fff5f9;box-shadow:0 14px 32px #a8578160}
+.ml-guide-launcher:focus-visible{outline:3px solid #b64e81!important;outline-offset:3px}
+.ml-guide-launcher-photo{display:block;width:49px;height:49px;overflow:hidden;border-radius:50%;
+ border:2px solid #f5c1d5;background:#ffedf4}
+.ml-guide-launcher-photo img{display:block;width:100%;height:100%;
+ object-fit:cover;object-position:center 20%}
+.ml-guide-launcher-text span{color:#db6a98}
+.ml-guide-popover{position:absolute;right:0;bottom:77px;width:310px;max-width:calc(100vw - 28px);
+ padding:21px 18px 19px;border:1.5px solid #d9b58c;border-radius:23px;
+ background:linear-gradient(145deg,#fffefd,#fff1f7);
+ box-shadow:0 18px 52px #92507363;color:#79516a;line-height:1.6}
+.ml-guide-popover[hidden]{display:none!important}
+.ml-guide-popover-close{position:absolute;right:10px;top:7px;padding:4px 10px;
+ border:0;background:transparent;color:#a76884;font-size:26px;cursor:pointer}
+.ml-guide-popover-header{display:flex;align-items:center;gap:12px;padding-right:20px}
+.ml-guide-popover-header img{width:61px;height:70px;border-radius:12px;object-fit:cover;object-position:center 15%;
+ border:1px solid #e8bfd0}
+.ml-guide-popover-header strong{display:block;font-size:15px;color:#aa5e81}
+.ml-guide-popover-header small{display:block;color:#ad8796;font-size:12px}
+.ml-guide-popover>p{font-size:13px;line-height:1.8;color:#886a7b!important;margin:17px 0 13px!important}
+.ml-guide-popover-links{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ml-guide-popover-links a{display:flex;align-items:center;justify-content:center;min-height:45px;
+ padding:9px 7px;border-radius:12px;border:1px solid #e8c2d0;
+ background:#fff9fc;color:#a4567a!important;text-align:center;text-decoration:none!important;
+ font-size:12px;font-weight:650}
+.ml-guide-popover-links a:hover{background:#ffe5ef}
+.ml-guide-sheet-link{display:inline-block;margin-top:13px;color:#a87889!important;font-size:12px!important}
+body.no-motion .ml-guide-launcher,body.no-motion .ml-guide-pose,body.no-motion .ml-guide-mood{transition:none!important}
+@media(max-width:900px){
+ .ml-guide-section{margin:32px auto 48px}
+ .ml-guide-panel{grid-template-columns:minmax(220px,.74fr) minmax(0,1.26fr)}
+ .ml-guide-portrait{min-height:475px}
+ .ml-guide-story{padding:38px 25px 26px}
+ .ml-guide-face-row{gap:7px}
+ .ml-guide-pose-grid{gap:9px}
+ .ml-guide-pose{padding:11px 6px 14px}
+ .ml-guide-journey{padding:25px 15px}
+}
+@media(max-width:700px){
+ .ml-guide-section{padding-inline:10px;margin:24px auto 37px}
+ .ml-guide-panel{grid-template-columns:1fr;border-radius:19px}
+ .ml-guide-panel:before{top:9px;font-size:12px;letter-spacing:.1em}
+ .ml-guide-portrait{min-height:0;height:350px}
+ .ml-guide-portrait-img{object-fit:cover;object-position:center 21%}
+ .ml-guide-portrait-brand{font-size:28px;bottom:14px}
+ .ml-guide-story{padding:27px 21px 29px}
+ .ml-guide-story h2{font-size:29px!important;margin:10px 0 14px!important}
+ .ml-guide-intro{font-size:14px}
+ .ml-guide-quote{font-size:15px!important}
+ .ml-guide-actions{gap:7px}
+ .ml-guide-actions a{font-size:12px}
+ .ml-guide-mood{min-width:65px;padding:4px;min-height:94px}
+ .ml-guide-face{width:56px;height:60px;background-size:280px 60px}
+ .ml-guide-face-0{background-position:0 0}
+ .ml-guide-face-1{background-position:-56px 0}
+ .ml-guide-face-2{background-position:-112px 0}
+ .ml-guide-face-3{background-position:-168px 0}
+ .ml-guide-face-4{background-position:-224px 0}
+ .ml-guide-face-row{flex-wrap:nowrap;overflow-x:auto;padding-bottom:7px}
+ .ml-guide-mood-label{font-size:10px}
+ .ml-guide-pose-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .ml-guide-pose{min-height:215px}
+ .ml-guide-pose strong{font-size:14px}
+ .ml-guide-pose small{font-size:11px}
+ .ml-guide-floating{right:11px;bottom:calc(92px + env(safe-area-inset-bottom))}
+ .ml-guide-launcher{min-height:52px;padding:4px 10px 4px 4px;font-size:11px}
+ .ml-guide-launcher-photo{width:41px;height:41px}
+ .ml-guide-popover{bottom:65px;max-height:min(560px,calc(100dvh - 160px));overflow:auto}
+}
+@media(prefers-reduced-motion:reduce){
+ .ml-guide-launcher,.ml-guide-pose,.ml-guide-mood{transition:none!important}
+ .ml-guide-launcher:hover,.ml-guide-pose:hover,.ml-guide-mood:hover{transform:none!important}
+}

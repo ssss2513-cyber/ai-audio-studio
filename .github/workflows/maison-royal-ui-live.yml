@@ -7,6 +7,9 @@ on:
       - "junyeong-classroom-luxe/web/maison-photo-home.js"
       - "junyeong-classroom-luxe/web/maison-reference.avif"
       - "junyeong-classroom-luxe/web/maison-mobile-photo.avif"
+      - "junyeong-classroom-luxe/web/maison-guide.js"
+      - "junyeong-classroom-luxe/web/maison-guide.css"
+      - "junyeong-classroom-luxe/web/maison-guide-*.webp"
       - "junyeong-classroom-luxe/web/index.html"
       - ".github/workflows/maison-royal-ui-live.yml"
   workflow_dispatch:
@@ -69,6 +72,46 @@ jobs:
           assert len(mobile)>15000 and mobile[4:12].startswith(b'ftypavif'), "Mobile palace photo missing"
           print("PASS: Real generated image bytes served successfully")
           PY
+      - name: Validate original Maison guide character image assets and interface
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://143-198-87-243.sslip.io"
+          test -s /tmp/maison-index.html
+          grep -q 'maison-guide.css?v=20261101-companion-1' /tmp/maison-index.html
+          grep -q 'maison-guide.js?v=20261101-companion-1' /tmp/maison-index.html
+          for asset in maison-guide.js maison-guide.css maison-guide-sheet.webp maison-guide-portrait.webp maison-guide-faces.webp maison-guide-poses.webp; do
+            curl -fsSL --max-time 20 "$URL/assets/$asset?companion_check=20261101-1" -o "/tmp/$asset"
+            test -s "/tmp/$asset"
+            echo "Verified $asset ($(wc -c < "/tmp/$asset") bytes)"
+          done
+          node --check /tmp/maison-guide.js
+          python3 - <<'PY'
+          from pathlib import Path
+          js=Path('/tmp/maison-guide.js').read_text('utf-8')
+          css=Path('/tmp/maison-guide.css').read_text('utf-8')
+          assert js.index('const originalHome=home') < js.index('home=function maisonHomeWithGuide')
+          for marker in ('ml-guide-section','ml-guide-floating','data-ml-guide-mood','maison-guide-sheet.webp','maison-guide-portrait.webp'):
+              assert marker in js, f'Missing guide behavior: {marker}'
+          for marker in ('.ml-guide-portrait','.ml-guide-mood','.ml-guide-pose','.ml-guide-popover'):
+              assert marker in css, f'Missing guide style: {marker}'
+          assert "maison-film-stash" in js, 'Guide is not inserted before preserved film'
+          for asset in ('sheet','portrait','faces','poses'):
+              p=Path('/tmp/maison-guide-'+asset+'.webp')
+              raw=p.read_bytes()
+              assert len(raw)>5000 and raw[:4]==b'RIFF' and raw[8:12]==b'WEBP', f'{asset}: invalid WebP'
+          print('PASS: guide portrait, expressions, poses, original sheet and site navigation')
+          PY
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -n "$BROWSER" ]; then
+            "$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+              --window-size=1280,900 --virtual-time-budget=6000 \
+              --dump-dom "$URL/?guide_check=20261101-1#home" > /tmp/maison-guide-dom.html
+            grep -q 'id="maison-guide"' /tmp/maison-guide-dom.html
+            grep -q 'id="ml-guide-launcher"' /tmp/maison-guide-dom.html
+            grep -q 'id="lumiel-intro-video"' /tmp/maison-guide-dom.html
+            echo 'PASS: guide section, floating launcher and existing intro video are rendered'
+          fi
       - name: Capture desktop and mobile home screenshots for comparison
         shell: bash
         continue-on-error: true

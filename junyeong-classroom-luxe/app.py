@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, InvalidHashError
 from cryptography.fernet import Fernet
+import persistent_db
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,10 +30,16 @@ for folder in [DATA, DATA/'media', DATA/'parts', DATA/'posters']:
     try: folder.chmod(0o700)
     except OSError: pass
 key_file = DATA/'secret.key'
-if not key_file.exists() and not os.getenv('CLASSROOM_DATA_KEY'):
+DATABASE_URL = persistent_db.database_url()
+if os.getenv('CLASSROOM_REQUIRE_DATABASE', '').lower() == 'true' and not DATABASE_URL:
+    raise RuntimeError('Persistent database is required; configure CLASSROOM_DATABASE_URL')
+if DATABASE_URL:
+    KEY = persistent_db.persistent_key(key_file.read_bytes().strip() if key_file.exists() else None)
+elif not key_file.exists() and not os.getenv('CLASSROOM_DATA_KEY'):
     fd = os.open(key_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'wb') as f: f.write(Fernet.generate_key())
-KEY = os.getenv('CLASSROOM_DATA_KEY', '').encode() or key_file.read_bytes().strip()
+if not DATABASE_URL:
+    KEY = os.getenv('CLASSROOM_DATA_KEY', '').encode() or key_file.read_bytes().strip()
 CIPHER = Fernet(KEY)
 PH = PasswordHasher()
 HASH_SLOTS = threading.BoundedSemaphore(2)
@@ -50,7 +57,11 @@ OBJECT_STORAGE_ORIGIN = ""
 REQUIRE_PHONE_VERIFICATION = os.getenv('REQUIRE_PHONE_VERIFICATION','false').strip().lower() in ('1','true','yes','on')
 
 @contextmanager
-def db():
+def db(initialize=False):
+    if DATABASE_URL:
+        with persistent_db.connect(initialize=initialize) as c:
+            yield c
+        return
     c = sqlite3.connect(DATA/'classroom.sqlite3', timeout=15)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
@@ -63,7 +74,7 @@ def db():
 
 DEFAULT = dict(title='준영 클래스', contact='ssss2513@gmail.com', open=True,
                autoApprove=False, retention='회원 탈퇴 또는 개인정보 삭제 요청 처리 시까지', revision=1)
-with db() as c:
+with db(initialize=True) as c:
     c.execute('PRAGMA journal_mode=WAL')
     c.executescript('''
     CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
@@ -160,7 +171,7 @@ def rate(req, scope, limit=30):
     key=digest(f'{scope}:{req.client.host if req.client else "unknown"}:{bucket}')
     with db() as c:
         c.execute('DELETE FROM rates WHERE expires<?',(now,))
-        c.execute('INSERT INTO rates VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',(key,now+900))
+        c.execute('INSERT INTO rates VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=rates.count+1',(key,now+900))
         n=c.execute('SELECT count FROM rates WHERE key=?',(key,)).fetchone()[0]
     if n>limit: fail(429,'요청 횟수가 많습니다. 15분 뒤 다시 시도해 주세요.')
 

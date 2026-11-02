@@ -1,0 +1,40 @@
+name: Maison database persistence
+on:
+  push:
+    branches: [fix/durable-classroom-postgres]
+  pull_request:
+    paths:
+      - 'junyeong-classroom-luxe/**'
+      - '.github/workflows/maison-persistence-test.yml'
+permissions:
+  contents: read
+jobs:
+  persistence:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: classroom_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: junyeong-classroom-luxe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-cloud.txt pytest httpx
+      - name: Replacement-container persistence
+        run: pytest -q tests/test_persistent_db.py
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:ci-only-password@localhost:5432/classroom_test
+      - name: Account and access controls on PostgreSQL
+        run: pytest -q tests/test_app.py tests/test_manual_approval.py
+        env:
+          CLASSROOM_DATABASE_URL: postgresql://postgres:ci-only-password@localhost:5432/classroom_test

@@ -96,7 +96,7 @@ def recover_admin(body: Recover, req: Request):
 @app.get('/api/health')
 def health():
  with core.db() as c: c.execute('SELECT 1').fetchone()
- return {'ok':True,'brand':'Maison Lumiel','version':'2.3.0','lectureAssistant':True,'storage':'railway-bucket' if os.getenv('VIDEO_S3_BUCKET') else 'google-drive' if os.getenv('GOOGLE_DRIVE_FOLDER_ID') else ('private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk')}
+ return {'ok':True,'brand':'Maison Lumiel','version':'2.3.0','lectureAssistant':True,'database':('postgresql' if core.DATABASE_URL else 'ephemeral-sqlite'),'storage':'railway-bucket' if os.getenv('VIDEO_S3_BUCKET') else 'google-drive' if os.getenv('GOOGLE_DRIVE_FOLDER_ID') else ('private-object-storage' if os.getenv('S3_BUCKET') else 'private-disk')}
 
 if os.getenv('S3_BUCKET'):
  import cloud_storage
